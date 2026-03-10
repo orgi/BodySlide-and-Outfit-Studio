@@ -2707,18 +2707,19 @@ int BodySlideApp::BuildListBodies(
 #ifdef _PPL_H
 	concurrency::concurrent_unordered_map<std::string, std::string> failedOutfitsCon;
 #else
+	std::mutex failedMutex;
+	std::mutex refNormalsMutex;
 	std::unordered_map<std::string, std::string> failedOutfitsCon;
 #endif
 
 	auto buildOutfit = [&](const std::string& outfit) {
-		wxString progMsg = wxString::Format(_("Processing '%s' (%d of %d)..."), wxString::FromUTF8(outfit), ++count, (int)outfitList.size());
-		progWnd.Update((int)(count * progstep) - 1, progMsg);
-		progWnd.Fit();
-
-		wxLogMessage(progMsg);
+		++count;
 
 		/* Load set */
 		if (outfitNameSource.find(outfit) == outfitNameSource.end()) {
+#ifndef _PPL_H
+			std::lock_guard<std::mutex> lock(failedMutex);
+#endif
 			failedOutfitsCon[outfit] = _("No recorded outfit name source");
 			return;
 		}
@@ -2730,11 +2731,17 @@ int BodySlideApp::BuildListBodies(
 		sliderDoc.Open(outfitNameSource[outfit]);
 		if (!sliderDoc.fail()) {
 			if (sliderDoc.GetSet(outfit, currentSet)) {
+#ifndef _PPL_H
+				std::lock_guard<std::mutex> lock(failedMutex);
+#endif
 				failedOutfitsCon[outfit] = _("Unable to get slider set from file: ") + outfitNameSource[outfit];
 				return;
 			}
 		}
 		else {
+#ifndef _PPL_H
+			std::lock_guard<std::mutex> lock(failedMutex);
+#endif
 			failedOutfitsCon[outfit] = _("Unable to open slider set file: ") + outfitNameSource[outfit];
 			return;
 		}
@@ -2770,6 +2777,9 @@ int BodySlideApp::BuildListBodies(
 		NifFile nifBig;
 		NifFile nifSmall;
 		if (nifBig.Load(file)) {
+#ifndef _PPL_H
+			std::lock_guard<std::mutex> lock(failedMutex);
+#endif
 			failedOutfitsCon[outfit] = _("Unable to load input nif: ") + currentSet.GetInputFileName();
 			return;
 		}
@@ -2930,8 +2940,12 @@ int BodySlideApp::BuildListBodies(
 			if (!it->second.lockNormals) {
 				nifBig.CalcNormalsForShape(shape, forceNormals, it->second.smoothSeamNormals);
 
-				if (forceNormals)
+				if (forceNormals) {
+#ifndef _PPL_H
+					std::lock_guard<std::mutex> lock(refNormalsMutex);
+#endif
 					ApplyReferenceNormals(nifBig);
+				}
 			}
 
 			nifBig.CalcTangentsForShape(shape);
@@ -2952,8 +2966,12 @@ int BodySlideApp::BuildListBodies(
 				if (!it->second.lockNormals) {
 					nifSmall.CalcNormalsForShape(shapeSmall, forceNormals, it->second.smoothSeamNormals);
 
-					if (forceNormals)
+					if (forceNormals) {
+#ifndef _PPL_H
+						std::lock_guard<std::mutex> lock(refNormalsMutex);
+#endif
 						ApplyReferenceNormals(nifSmall);
+					}
 				}
 
 				nifSmall.CalcTangentsForShape(shapeSmall);
@@ -2977,6 +2995,9 @@ int BodySlideApp::BuildListBodies(
 		bool success = wxFileName::Mkdir(dir, wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL);
 
 		if (!success) {
+#ifndef _PPL_H
+			std::lock_guard<std::mutex> lock(failedMutex);
+#endif
 			failedOutfitsCon[outfit] = _("Unable to create destination directory: ") + dir.ToUTF8().data();
 			return;
 		}
@@ -3054,6 +3075,9 @@ int BodySlideApp::BuildListBodies(
 			PlatformUtil::OpenFileStream(fileBig, outFileNameBig, std::ios::out | std::ios::binary);
 
 			if (nifBig.Save(fileBig, nifOptions)) {
+#ifndef _PPL_H
+				std::lock_guard<std::mutex> lock(failedMutex);
+#endif
 				failedOutfitsCon[outfit] = _("Unable to save nif file: ") + outFileNameBig;
 				return;
 			}
@@ -3062,6 +3086,9 @@ int BodySlideApp::BuildListBodies(
 			PlatformUtil::OpenFileStream(fileSmall, outFileNameSmall, std::ios::out | std::ios::binary);
 
 			if (nifSmall.Save(fileSmall, nifOptions)) {
+#ifndef _PPL_H
+				std::lock_guard<std::mutex> lock(failedMutex);
+#endif
 				failedOutfitsCon[outfit] = _("Unable to save nif file: ") + outFileNameSmall;
 				return;
 			}
@@ -3073,6 +3100,9 @@ int BodySlideApp::BuildListBodies(
 			PlatformUtil::OpenFileStream(fileBig, outFileNameBig, std::ios::out | std::ios::binary);
 
 			if (nifBig.Save(fileBig, nifOptions)) {
+#ifndef _PPL_H
+				std::lock_guard<std::mutex> lock(failedMutex);
+#endif
 				failedOutfitsCon[outfit] = _("Unable to save nif file: ") + outFileNameBig;
 				return;
 			}
@@ -3090,8 +3120,36 @@ int BodySlideApp::BuildListBodies(
 		wxMilliSleep(100);
 	}
 #else
-	for (auto& outfit : outfitList) {
-		buildOutfit(outfit);
+	// Run builds in parallel using std::async
+	unsigned int numThreads = std::max(1u, std::thread::hardware_concurrency());
+	std::vector<std::future<void>> futures;
+	size_t nextOutfit = 0;
+
+	while (nextOutfit < outfitList.size() || !futures.empty()) {
+		// Launch new tasks up to thread limit
+		while (futures.size() < numThreads && nextOutfit < outfitList.size()) {
+			const std::string& outfit = outfitList[nextOutfit++];
+			futures.push_back(std::async(std::launch::async, buildOutfit, outfit));
+		}
+
+		// Update progress on main thread
+		int curCount = count.load();
+		wxString progMsg = wxString::Format(_("Processing outfits (%d of %d)..."), curCount, (int)outfitList.size());
+		progWnd.Update((int)(curCount * progstep), progMsg);
+
+		// Reap completed futures
+		for (auto it = futures.begin(); it != futures.end();) {
+			if (it->wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+				it->get();
+				it = futures.erase(it);
+			}
+			else {
+				++it;
+			}
+		}
+
+		Yield();
+		wxMilliSleep(50);
 	}
 #endif
 
