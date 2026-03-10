@@ -3235,6 +3235,12 @@ BodySlideFrame::BodySlideFrame(BodySlideApp* a, const wxSize& size)
 	presetChoice = (wxChoice*)FindWindowByName("presetChoice", this);
 	btnSavePreset = (wxButton*)FindWindowByName("btnSavePreset", this);
 
+	// Prevent wxChoice from growing to fit the widest item on GTK
+	if (outfitChoice)
+		outfitChoice->SetMinSize(outfitChoice->FromDIP(wxSize(200, -1)));
+	if (presetChoice)
+		presetChoice->SetMinSize(presetChoice->FromDIP(wxSize(200, -1)));
+
 	xrc->Load(wxString::FromUTF8(Config["AppDir"]) + "/res/xrc/BatchBuild.xrc");
 	xrc->Load(wxString::FromUTF8(Config["AppDir"]) + "/res/xrc/Settings.xrc");
 	xrc->Load(wxString::FromUTF8(Config["AppDir"]) + "/res/xrc/About.xrc");
