@@ -435,6 +435,7 @@ void BodySlideApp::CharHook(wxKeyEvent& event) {
 				if (curSel > 0) {
 					sliderView->outfitChoice->SetSelection(curSel - 1);
 					ActivateOutfit(sliderView->outfitChoice->GetStringSelection().ToUTF8().data());
+					sliderView->outfitChoice->SetFocus();
 				}
 			}
 			return;
@@ -447,6 +448,7 @@ void BodySlideApp::CharHook(wxKeyEvent& event) {
 				if (curCount > 0 && curSel < curCount - 1) {
 					sliderView->outfitChoice->Select(curSel + 1);
 					ActivateOutfit(sliderView->outfitChoice->GetStringSelection().ToUTF8().data());
+					sliderView->outfitChoice->SetFocus();
 				}
 			}
 			return;
