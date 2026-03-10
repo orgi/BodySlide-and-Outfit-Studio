@@ -402,7 +402,7 @@ void BodySlideApp::LoadData() {
 
 void BodySlideApp::CharHook(wxKeyEvent& event) {
 	wxWindow* w = (wxWindow*)event.GetEventObject();
-	if (!w) {
+	if (!w || !sliderView) {
 		event.Skip();
 		return;
 	}
@@ -413,19 +413,18 @@ void BodySlideApp::CharHook(wxKeyEvent& event) {
 	if (event.ControlDown()) {
 		if (event.ShiftDown()) {
 			if (keyCode == (int)'A') {
-				if (sliderView) {
-					if (sliderView->outfitsearch)
-						sliderView->outfitsearch->Clear();
+				if (sliderView->outfitsearch)
+					sliderView->outfitsearch->Clear();
 
-					if (sliderView->search)
-						sliderView->search->Clear();
+				if (sliderView->search)
+					sliderView->search->Clear();
 
-					if (sliderView->sliderFilter)
-						sliderView->sliderFilter->Clear();
+				if (sliderView->sliderFilter)
+					sliderView->sliderFilter->Clear();
 
-					if (sliderView->presetFilter)
-						sliderView->presetFilter->Clear();
-				}
+				if (sliderView->presetFilter)
+					sliderView->presetFilter->Clear();
+
 				return;
 			}
 		}
