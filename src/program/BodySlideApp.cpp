@@ -1018,7 +1018,7 @@ void BodySlideApp::LaunchOutfitStudio(const wxString& args) {
 	const wxString osExec = "OutfitStudio";
 #endif
 
-	wxString osExecCmd = wxString::Format("\"%s\\%s\" %s", wxString::FromUTF8(Config["AppDir"]), osExec, args);
+	wxString osExecCmd = wxString::Format("\"%s/%s\" %s", wxString::FromUTF8(Config["AppDir"]), osExec, args);
 
 	if (!wxExecute(osExecCmd, wxEXEC_ASYNC)) {
 		wxLogError("Failed to execute '%s' process.", osExecCmd);
@@ -2574,7 +2574,7 @@ int BodySlideApp::BuildListBodies(
 					return;
 				}
 
-				// Only enforce the “radio per level” rule for level-2 items:
+				// Only enforce the ï¿½radio per levelï¿½ rule for level-2 items:
 				checkBoxReverting = true;
 
 				auto checkedState = treeListCtrl->GetCheckedState(item);
@@ -2637,7 +2637,7 @@ int BodySlideApp::BuildListBodies(
 										treeListCtrl->CheckItem(level2, wxCheckBoxState::wxCHK_UNCHECKED);
 								}
 							}
-							// else: no match found, do nothing — keep existing checks
+							// else: no match found, do nothing ï¿½ keep existing checks
 						}
 					}
 				});
@@ -2678,7 +2678,7 @@ int BodySlideApp::BuildListBodies(
 
 					// Remove from outfitList all outfits in choicesList[index]
 					for (auto& outfit : choicesList[index]) {
-						auto result = std::find(outfitList.begin(), outfitList.end(), outfit.ToUTF8());
+						auto result = std::find(outfitList.begin(), outfitList.end(), outfit.ToStdString());
 						if (result != outfitList.end())
 							outfitList.erase(result);
 					}

@@ -7,6 +7,8 @@ See the included LICENSE file
 #include "../utils/PlatformUtil.h"
 #include "../utils/StringStuff.h"
 
+#include <algorithm>
+
 ConfigurationItem::~ConfigurationItem() {
 	for (auto& it : properties)
 		delete it;
