@@ -1293,12 +1293,20 @@ void BodySlideApp::InitPreview() {
 		}
 		else if (zapIdx.size() > 0) {
 			// Preview Window has been opened for this shape before, zap the diff verts before applying them to the shape
-			for (int z = zapIdx.size() - 1; z >= 0; z--) {
-				if (zapIdx[z] >= verts.size())
+			size_t finalSize = verts.size();
+			size_t zi = 0;
+			size_t dest = 0;
+			for (size_t src = 0; src < finalSize; src++) {
+				if (zi < zapIdx.size() && src == zapIdx[zi]) {
+					zi++;
 					continue;
-				verts.erase(verts.begin() + zapIdx[z]);
-				uvs.erase(uvs.begin() + zapIdx[z]);
+				}
+				verts[dest] = verts[src];
+				uvs[dest] = uvs[src];
+				dest++;
 			}
+			verts.resize(dest);
+			uvs.resize(dest);
 			PreviewMod.SetVertsForShape(shape, verts);
 			PreviewMod.SetUvsForShape(shape, uvs);
 		}
@@ -1361,13 +1369,19 @@ void BodySlideApp::UpdatePreview() {
 
 		// Zap deleted verts before applying to the shape
 		if (zapIdx.size() > 0) {
-			for (int z = zapIdx.size() - 1; z >= 0; z--) {
-				if (zapIdx[z] >= verts.size())
+			size_t zi = 0;
+			size_t dest = 0;
+			for (size_t src = 0; src < verts.size(); src++) {
+				if (zi < zapIdx.size() && src == zapIdx[zi]) {
+					zi++;
 					continue;
-
-				verts.erase(verts.begin() + zapIdx[z]);
-				uvs.erase(uvs.begin() + zapIdx[z]);
+				}
+				verts[dest] = verts[src];
+				uvs[dest] = uvs[src];
+				dest++;
 			}
+			verts.resize(dest);
+			uvs.resize(dest);
 		}
 		preview->UpdateMeshes(it->first, &verts, &uvs);
 	}
