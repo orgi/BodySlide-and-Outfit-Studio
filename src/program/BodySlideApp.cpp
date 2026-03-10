@@ -123,7 +123,7 @@ bool BodySlideApp::OnInit() {
 	std::string dataDir{wxStandardPaths::Get().GetDataDir().ToUTF8()};
 #endif
 
-	Config.LoadConfig(Config["AppDir"] + "./Config.xml");
+	Config.LoadConfig(dataDir + "/Config.xml");
 	BodySlideConfig.LoadConfig(dataDir + "/BodySlide.xml", "BodySlideConfig");
 
 	Config.SetDefaultValue("AppDir", dataDir);

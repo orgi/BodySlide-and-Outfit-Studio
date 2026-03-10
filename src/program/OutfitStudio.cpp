@@ -361,7 +361,7 @@ bool OutfitStudio::OnInit() {
 	Config.LoadConfig(dataDir + "/Config.xml");
 	OutfitStudioConfig.LoadConfig(dataDir + "/OutfitStudio.xml", "OutfitStudioConfig");
 
-	Config.SetDefaultValue("AppDir", dataDir);
+	Config.SetDefaultValue("AppDir", "./");
 
 	logger.Initialize(Config.GetIntValue("LogLevel", -1), dataDir + "/Log_OS.txt");
 	wxLogMessage("Initializing Outfit Studio...");
