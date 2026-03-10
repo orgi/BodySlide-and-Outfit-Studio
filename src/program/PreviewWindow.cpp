@@ -153,12 +153,11 @@ void PreviewWindow::AddMeshFromNif(NifFile* nif, char* shapeName) {
 	for (size_t i = 0; i < shapeList.size(); i++) {
 		std::string& shapeListName = shapeList[i];
 		if (!shapeName || (shapeName && shapeListName == shapeName)) {
-			Mesh* m = gls.AddMeshFromNif(nif, shapeListName);
+			Mesh* m = gls.AddMeshFromNif(nif, shapeListName, nullptr, false);
 			if (!m)
 				continue;
 
 			SetShapeVertexColors(nif, shapeListName, m);
-			m->BuildVertexAdjacency();
 			m->CreateBuffers();
 		}
 	}
@@ -172,12 +171,11 @@ void PreviewWindow::RefreshMeshFromNif(NifFile* nif, char* shapeName) {
 	for (size_t i = 0; i < shapeList.size(); i++) {
 		std::string& shapeListName = shapeList[i];
 		if (!shapeName || (shapeName && shapeListName == shapeName)) {
-			Mesh* m = gls.ReloadMeshFromNif(nif, shapeListName);
+			Mesh* m = gls.ReloadMeshFromNif(nif, shapeListName, false);
 			if (!m)
 				continue;
 
 			SetShapeVertexColors(nif, shapeListName, m);
-			m->BuildVertexAdjacency();
 			m->SmoothNormals();
 			m->CreateBuffers();
 

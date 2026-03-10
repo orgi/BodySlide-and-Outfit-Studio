@@ -1217,12 +1217,12 @@ void GLSurface::UpdateShaders(Mesh* m) {
 	}
 }
 
-Mesh* GLSurface::ReloadMeshFromNif(NifFile* nif, std::string shapeName) {
+Mesh* GLSurface::ReloadMeshFromNif(NifFile* nif, std::string shapeName, bool postProcess) {
 	DeleteMesh(shapeName);
-	return AddMeshFromNif(nif, shapeName);
+	return AddMeshFromNif(nif, shapeName, nullptr, postProcess);
 }
 
-Mesh* GLSurface::AddMeshFromNif(NifFile* nif, const std::string& shapeName, Vector3* color) {
+Mesh* GLSurface::AddMeshFromNif(NifFile* nif, const std::string& shapeName, Vector3* color, bool postProcess) {
 	auto shape = nif->FindBlockByName<NiShape>(shapeName);
 	if (!shape)
 		return nullptr;
@@ -1411,7 +1411,9 @@ Mesh* GLSurface::AddMeshFromNif(NifFile* nif, const std::string& shapeName, Vect
 	}
 
 	m->CalcTangentSpace();
-	m->CreateBVH();
+
+	if (postProcess)
+		m->CreateBVH();
 
 	if (color)
 		m->color = (*color);
