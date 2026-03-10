@@ -765,7 +765,6 @@ void GLSurface::RenderFullScreenQuad(GLMaterial* renderShader, unsigned int w, u
 	// bind the dummy array and send three fake positions to the shader.
 	glBindVertexArray(m_vertexArrayObject);
 	glDrawArrays(GL_TRIANGLES, 0, 3);
-	glFlush();
 
 	shader.End();
 

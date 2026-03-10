@@ -5,14 +5,15 @@ See the included LICENSE file
 
 #include "PlatformUtil.h"
 
+#ifndef _WINDOWS
+#include <sys/stat.h>
+#endif
+
 namespace {
-std::string backslash_to_slash(const std::string& s) {
-	std::string sc(s);
-	size_t len = sc.length();
-	for (size_t i = 0; i < len; ++i)
-		if (sc[i] == '\\')
-			sc[i] = '/';
-	return sc;
+void backslash_to_slash_inplace(std::string& s) {
+	for (auto& c : s)
+		if (c == '\\')
+			c = '/';
 }
 } // namespace
 
@@ -46,19 +47,23 @@ void OpenFileStream(std::fstream& file, const std::string& fileName, std::ios_ba
 	// Convert to std::wstring on Windows only
 	file.open(MultiByteToWideUTF8(fileName).c_str(), mode);
 #else
-	std::string fn_nobs = backslash_to_slash(fileName);
+	std::string fn_nobs(fileName);
+	backslash_to_slash_inplace(fn_nobs);
 	file.open(fn_nobs.c_str(), mode);
 #endif
 }
 
 bool FileExists(const std::string& fileName) {
+#ifdef _WINDOWS
 	std::fstream file;
 	PlatformUtil::OpenFileStream(file, fileName, std::ios::in | std::ios::binary);
-
-	if (!file)
-		return false;
-
-	return true;
+	return file.good();
+#else
+	std::string fn_nobs(fileName);
+	backslash_to_slash_inplace(fn_nobs);
+	struct stat buffer;
+	return (stat(fn_nobs.c_str(), &buffer) == 0);
+#endif
 }
 
 // Provide std::wstring function for Windows

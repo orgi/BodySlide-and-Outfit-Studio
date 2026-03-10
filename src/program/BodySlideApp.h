@@ -351,6 +351,7 @@ public:
 	void SetPresetChanged(bool changed = true);
 
 	void PopulateOutfitList(const wxArrayString& items, const wxString& selectItem);
+	void SelectOutfit(const wxString& selectItem);
 	void PopulatePresetList(const wxArrayString& items, const wxString& selectItem);
 
 	void SetSliderPosition(const wxString& name, float newValue, short HiLo);

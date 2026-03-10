@@ -17,6 +17,9 @@ See the included LICENSE file
 #include <ppl.h>
 #else
 #undef _PPL_H
+#include <future>
+#include <mutex>
+#include <vector>
 #endif
 
 using namespace nifly;
@@ -190,25 +193,43 @@ bool DiffDataSets::LoadData(const std::map<std::string, std::map<std::string, st
 
 		loaded[osd.first] = std::move(osdFile);
 	});
-#endif
+
 	for (auto& osd : osdNames) {
-#ifdef _PPL_H
 		auto kvp = loaded.find(osd.first);
 		if (kvp == loaded.end())
 			continue;
 
 		auto& osdFile = kvp->second;
-#else
-		auto osdFile = std::make_unique<OSDataFile>();
-		if (!osdFile->Read(osd.first))
-			continue;
-#endif
 		for (auto& dataNames : osd.second) {
 			auto diff = osdFile->GetDataDiff(dataNames.first);
 			if (diff)
 				MoveToSet(dataNames.first, dataNames.second, *diff);
 		}
 	}
+#else
+	// Parallel OSD file loading using std::async
+	std::map<std::string, std::future<std::unique_ptr<OSDataFile>>> futures;
+	for (auto& osd : osdNames) {
+		futures[osd.first] = std::async(std::launch::async, [&osd]() {
+			auto osdFile = std::make_unique<OSDataFile>();
+			if (!osdFile->Read(osd.first))
+				return std::unique_ptr<OSDataFile>();
+			return osdFile;
+		});
+	}
+
+	for (auto& osd : osdNames) {
+		auto osdFile = futures[osd.first].get();
+		if (!osdFile)
+			continue;
+
+		for (auto& dataNames : osd.second) {
+			auto diff = osdFile->GetDataDiff(dataNames.first);
+			if (diff)
+				MoveToSet(dataNames.first, dataNames.second, *diff);
+		}
+	}
+#endif
 	return true;
 }
 

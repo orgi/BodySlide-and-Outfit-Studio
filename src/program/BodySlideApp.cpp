@@ -32,6 +32,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <ppltasks.h>
 #else
 #undef _PPL_H
+#include <future>
+#include <mutex>
+#include <thread>
+#include <vector>
 #endif
 
 using namespace nifly;
@@ -634,7 +638,7 @@ void BodySlideApp::ActivateOutfit(const std::string& outfitName) {
 	if (error)
 		wxLogError("Failed to load set '%s' from slider set list (%d).", outfitName, error);
 
-	PopulateOutfitList(outfitName);
+	sliderView->SelectOutfit(wxString::FromUTF8(outfitName));
 
 	ActivatePreset(activePreset, false);
 	InitPreview();
@@ -3492,6 +3496,7 @@ void BodySlideFrame::PopulateOutfitList(const wxArrayString& items, const wxStri
 	if (!outfitChoice)
 		return;
 
+	outfitChoice->Freeze();
 	outfitChoice->Clear();
 	outfitChoice->Append(items);
 	if (!outfitChoice->SetStringSelection(selectItem)) {
@@ -3505,12 +3510,21 @@ void BodySlideFrame::PopulateOutfitList(const wxArrayString& items, const wxStri
 
 		outfitChoice->SetSelection(i);
 	}
+	outfitChoice->Thaw();
+}
+
+void BodySlideFrame::SelectOutfit(const wxString& selectItem) {
+	if (!outfitChoice)
+		return;
+
+	outfitChoice->SetStringSelection(selectItem);
 }
 
 void BodySlideFrame::PopulatePresetList(const wxArrayString& items, const wxString& selectItem) {
 	if (!presetChoice)
 		return;
 
+	presetChoice->Freeze();
 	presetChoice->Clear();
 	presetChoice->Append(items);
 	if (!presetChoice->SetStringSelection(selectItem)) {
@@ -3524,6 +3538,7 @@ void BodySlideFrame::PopulatePresetList(const wxArrayString& items, const wxStri
 
 		presetChoice->SetSelection(i);
 	}
+	presetChoice->Thaw();
 }
 
 void BodySlideFrame::SetSliderPosition(const wxString& name, float newValue, short HiLo) {
