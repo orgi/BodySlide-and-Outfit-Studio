@@ -3377,8 +3377,9 @@ void BodySlideFrame::OnEnterClose(wxKeyEvent& event) {
 
 void BodySlideFrame::OnEnterSliderWindow(wxMouseEvent& event) {
 	if (this->IsActive()) {
-		if (!this->FindFocus()->IsKindOf(wxClassInfo::FindClass("wxTextCtrl")) &&
-			!this->FindFocus()->IsKindOf(wxClassInfo::FindClass("wxSearchCtrl"))) {
+		wxWindow* focused = this->FindFocus();
+		if (focused && !focused->IsKindOf(wxClassInfo::FindClass("wxTextCtrl")) &&
+			!focused->IsKindOf(wxClassInfo::FindClass("wxSearchCtrl"))) {
 			wxScrolledWindow* sw = (wxScrolledWindow*)event.GetEventObject();
 			sw->SetFocusIgnoringChildren();
 		}
