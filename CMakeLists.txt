@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 find_package(wxWidgets REQUIRED gl core base net xrc adv qa html propgrid)
 find_package(OpenGL REQUIRED)
 find_package(GLEW REQUIRED)
-set(fbxsdk_dir $ENV{HOME}/repositories/fbxsdk)
+set(fbxsdk_dir ../fbxsdk)
 find_library(fbxsdk fbxsdk PATHS ${fbxsdk_dir}/lib/release)
 
 set(commonsources
