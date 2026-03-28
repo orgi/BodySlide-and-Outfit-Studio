@@ -5,6 +5,7 @@ See the included LICENSE file
 
 #include "BuildSelection.h"
 #include "../utils/PlatformUtil.h"
+#include "../utils/StringStuff.h"
 
 
 int BuildSelection::LoadBuildSelection(XMLElement* srcElement) {
@@ -18,7 +19,7 @@ int BuildSelection::LoadBuildSelection(XMLElement* srcElement) {
 			continue;
 		}
 
-		std::string sName = elem->Attribute("path");
+		std::string sName = ToOSSlashes(elem->Attribute("path"));
 		if (elem->Attribute("choice"))
 			outputChoice[sName] = elem->Attribute("choice");
 		else
