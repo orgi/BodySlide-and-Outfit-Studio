@@ -79,6 +79,12 @@ struct ArmorRecord {
 	std::vector<int> BodySlots() const;
 };
 
+struct AlternateTexture {
+	std::string shapeName;   // 3D shape name in the NIF
+	uint32_t texSetFormId = 0; // TXST FormID
+	uint32_t index3D = 0;    // 3D index
+};
+
 struct ArmorAddonRecord {
 	uint32_t formId = 0;
 	std::string editorId;
@@ -86,6 +92,14 @@ struct ArmorAddonRecord {
 	std::string modelFemale;  // MOD3 — female 3rd person worn mesh
 	uint32_t bodySlotFlags = 0;
 	uint32_t raceId = 0x00019;
+	std::vector<AlternateTexture> altTexFemale;  // MO3S — female model alternate textures
+	std::vector<AlternateTexture> altTexMale;    // MO2S — male model alternate textures
+};
+
+struct TextureSetRecord {
+	uint32_t formId = 0;
+	std::string editorId;
+	std::string textures[8]; // TX00-TX07: diffuse, normal, glow, parallax, env, envMask, multilayer, specular
 };
 
 struct LeveledItemEntry {
@@ -119,6 +133,7 @@ public:
 
 	std::vector<ArmorRecord> GetArmors() const;
 	std::vector<ArmorAddonRecord> GetArmorAddons() const;
+	std::vector<TextureSetRecord> GetTextureSets() const;
 	std::vector<LeveledItemRecord> GetLeveledItems() const;
 	std::vector<OutfitRecord> GetOutfits() const;
 

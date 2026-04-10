@@ -16,12 +16,19 @@
 
 namespace lldata {
 
+/// Per-shape texture override from ARMA MO3S alternate textures.
+struct TextureOverride {
+	std::string shapeName;
+	std::string textures[8]; // TX00-TX07 from TXST, empty = use NIF default
+};
+
 struct OutfitPiece {
 	std::string name;        // ARMO full name
 	uint32_t formId = 0;     // ARMO FormID
 	std::string nifPath;     // MOD2 (female model) path, relative to Data/
 	std::string armorType;   // "Light Armor", "Heavy Armor", "Clothing"
 	std::vector<int> bodySlots;
+	std::vector<TextureOverride> textureOverrides; // per-shape texture swaps from ARMA MO3S
 };
 
 struct OutfitEntry {
@@ -88,6 +95,7 @@ private:
 	// Cached parsed records from ESP
 	std::unordered_map<uint32_t, struct CachedArmo> armoCache;
 	std::unordered_map<uint32_t, struct CachedARMA> armaCache;
+	std::unordered_map<uint32_t, struct CachedTXST> txstCache;
 	std::unordered_map<uint32_t, struct CachedLVLI> lvliCache;
 	std::unordered_map<uint32_t, struct CachedOTFT> otftCache;
 };
@@ -104,10 +112,23 @@ struct CachedArmo {
 	std::vector<uint32_t> armatureIds; // MODL — ARMA references for worn meshes
 };
 
+struct CachedAlternateTexture {
+	std::string shapeName;
+	uint32_t txstFormId = 0;
+	uint32_t index3D = 0;
+};
+
 struct CachedARMA {
 	std::string editorId;
 	std::string modelMale;    // MOD2 — male 3rd person worn mesh
 	std::string modelFemale;  // MOD3 — female 3rd person worn mesh
+	std::vector<CachedAlternateTexture> altTexFemale; // MO3S
+	std::vector<CachedAlternateTexture> altTexMale;   // MO2S
+};
+
+struct CachedTXST {
+	std::string editorId;
+	std::string textures[8]; // TX00-TX07
 };
 
 struct CachedLVLI {

@@ -212,7 +212,33 @@ void LeveledListData::LoadRecordsFromESP(const std::string& filepath, const std:
 		cam.editorId = aa.editorId;
 		cam.modelMale = aa.modelMale;
 		cam.modelFemale = aa.modelFemale;
+		for (auto& at : aa.altTexFemale) {
+			CachedAlternateTexture cat;
+			cat.shapeName = at.shapeName;
+			cat.txstFormId = remapFid(at.texSetFormId);
+			cat.index3D = at.index3D;
+			cam.altTexFemale.push_back(std::move(cat));
+		}
+		for (auto& at : aa.altTexMale) {
+			CachedAlternateTexture cat;
+			cat.shapeName = at.shapeName;
+			cat.txstFormId = remapFid(at.texSetFormId);
+			cat.index3D = at.index3D;
+			cam.altTexMale.push_back(std::move(cat));
+		}
 		armaCache.emplace(remappedId, std::move(cam));
+	}
+
+	// Cache TXST records
+	for (auto& ts : reader.GetTextureSets()) {
+		uint32_t remappedId = remapFid(ts.formId);
+		if (txstCache.find(remappedId) != txstCache.end())
+			continue;
+		CachedTXST ct;
+		ct.editorId = ts.editorId;
+		for (int i = 0; i < 8; ++i)
+			ct.textures[i] = ts.textures[i];
+		txstCache.emplace(remappedId, std::move(ct));
 	}
 }
 
@@ -232,10 +258,9 @@ OutfitPiece LeveledListData::MakeStubPiece(uint32_t formId) {
 // ResolveModelPath — follow TNAM template chain to find a model
 // ---------------------------------------------------------------------------
 
-/// Resolve the worn mesh path for an ARMO by following ARMO → ARMA chain.
-/// Falls back to template chain (TNAM) if the ARMO has no armature IDs.
-/// Prefers female model (MOD3), falls back to male (MOD2).
-static std::string ResolveWornMeshPath(
+/// Resolve the worn mesh path and ARMA record for an ARMO.
+/// Returns the mesh path and a pointer to the matched ARMA (for alternate textures).
+static std::pair<std::string, const CachedARMA*> ResolveWornMesh(
 	const CachedArmo& armo,
 	const std::unordered_map<uint32_t, CachedArmo>& armoCache,
 	const std::unordered_map<uint32_t, CachedARMA>& armaCache) {
@@ -246,9 +271,9 @@ static std::string ResolveWornMeshPath(
 		if (it == armaCache.end())
 			continue;
 		if (!it->second.modelFemale.empty())
-			return it->second.modelFemale;
+			return {it->second.modelFemale, &it->second};
 		if (!it->second.modelMale.empty())
-			return it->second.modelMale;
+			return {it->second.modelMale, &it->second};
 	}
 
 	// Follow template chain (enchanted copies inherit from base armor)
@@ -264,33 +289,47 @@ static std::string ResolveWornMeshPath(
 			if (ait == armaCache.end())
 				continue;
 			if (!ait->second.modelFemale.empty())
-				return ait->second.modelFemale;
+				return {ait->second.modelFemale, &ait->second};
 			if (!ait->second.modelMale.empty())
-				return ait->second.modelMale;
+				return {ait->second.modelMale, &ait->second};
 		}
 
 		tid = tmpl.templateId;
 	}
 
-	// Do NOT fall back to ARMO's MOD2/MOD4 — those are ground/world models,
-	// not worn meshes. Return empty so the piece is skipped rather than
-	// showing a ground object (e.g. GND.nif).
-	return {};
+	return {{}, nullptr};
 }
 
 /// Build an OutfitPiece from a cached ARMO, resolving worn mesh through ARMA.
 static OutfitPiece MakePieceFromArmo(
 	uint32_t formId, const CachedArmo& armo,
 	const std::unordered_map<uint32_t, CachedArmo>& armoCache,
-	const std::unordered_map<uint32_t, CachedARMA>& armaCache) {
+	const std::unordered_map<uint32_t, CachedARMA>& armaCache,
+	const std::unordered_map<uint32_t, CachedTXST>& txstCache) {
 	OutfitPiece piece;
 	piece.formId = formId;
 	piece.name = armo.fullName;
 	piece.armorType = armo.armorType;
 	piece.bodySlots = DecodeBodySlots(armo.bodySlotFlags);
 
-	std::string modelPath = ResolveWornMeshPath(armo, armoCache, armaCache);
+	auto [modelPath, arma] = ResolveWornMesh(armo, armoCache, armaCache);
 	piece.nifPath = NormalizeMeshPath(modelPath);
+
+	// Resolve alternate textures from the matched ARMA
+	if (arma) {
+		auto& altTexList = arma->altTexFemale.empty() ? arma->altTexMale : arma->altTexFemale;
+		for (auto& at : altTexList) {
+			auto txstIt = txstCache.find(at.txstFormId);
+			if (txstIt == txstCache.end())
+				continue;
+			TextureOverride ovr;
+			ovr.shapeName = at.shapeName;
+			for (int i = 0; i < 8; ++i)
+				ovr.textures[i] = txstIt->second.textures[i];
+			piece.textureOverrides.push_back(std::move(ovr));
+		}
+	}
+
 	return piece;
 }
 
@@ -302,6 +341,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 	outfits.clear();
 	armoCache.clear();
 	armaCache.clear();
+	txstCache.clear();
 	lvliCache.clear();
 	otftCache.clear();
 	loadInfo.clear();
@@ -310,7 +350,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 
 	// Load the main ESP first
 	esp::ESPReader mainReader;
-	if (!mainReader.Load(filepath, {"ARMO", "ARMA", "LVLI", "OTFT"}))
+	if (!mainReader.Load(filepath, {"ARMO", "ARMA", "TXST", "LVLI", "OTFT"}))
 		return false;
 
 	espFilename = mainReader.GetFilename();
@@ -327,7 +367,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 		// Try same directory as the ESP
 		std::string masterPath = espDirectory + masterName;
 		if (wxFileName::FileExists(masterPath)) {
-			LoadRecordsFromESP(masterPath, {"ARMO", "ARMA"}, masterIdx, masters);
+			LoadRecordsFromESP(masterPath, {"ARMO", "ARMA", "TXST"}, masterIdx, masters);
 			++mastersLoaded;
 			continue;
 		}
@@ -336,7 +376,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 		if (!baseDataPath.empty()) {
 			masterPath = baseDataPath + masterName;
 			if (wxFileName::FileExists(masterPath)) {
-				LoadRecordsFromESP(masterPath, {"ARMO", "ARMA"}, masterIdx, masters);
+				LoadRecordsFromESP(masterPath, {"ARMO", "ARMA", "TXST"}, masterIdx, masters);
 				++mastersLoaded;
 				continue;
 			}
@@ -366,7 +406,29 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 		cam.editorId = aa.editorId;
 		cam.modelMale = aa.modelMale;
 		cam.modelFemale = aa.modelFemale;
+		for (auto& at : aa.altTexFemale) {
+			CachedAlternateTexture cat;
+			cat.shapeName = at.shapeName;
+			cat.txstFormId = at.texSetFormId;
+			cat.index3D = at.index3D;
+			cam.altTexFemale.push_back(std::move(cat));
+		}
+		for (auto& at : aa.altTexMale) {
+			CachedAlternateTexture cat;
+			cat.shapeName = at.shapeName;
+			cat.txstFormId = at.texSetFormId;
+			cat.index3D = at.index3D;
+			cam.altTexMale.push_back(std::move(cat));
+		}
 		armaCache[aa.formId] = std::move(cam);
+	}
+
+	for (auto& ts : mainReader.GetTextureSets()) {
+		CachedTXST ct;
+		ct.editorId = ts.editorId;
+		for (int i = 0; i < 8; ++i)
+			ct.textures[i] = ts.textures[i];
+		txstCache[ts.formId] = std::move(ct);
 	}
 
 	for (auto& li : mainReader.GetLeveledItems()) {
@@ -399,7 +461,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 			// Direct ARMO reference?
 			auto armoIt = armoCache.find(itemId);
 			if (armoIt != armoCache.end()) {
-				entry.pieces.push_back(MakePieceFromArmo(itemId, armoIt->second, armoCache, armaCache));
+				entry.pieces.push_back(MakePieceFromArmo(itemId, armoIt->second, armoCache, armaCache, txstCache));
 				++totalPieces;
 				continue;
 			}
@@ -418,7 +480,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 						continue;
 					}
 
-					entry.pieces.push_back(MakePieceFromArmo(armoId, ait->second, armoCache, armaCache));
+					entry.pieces.push_back(MakePieceFromArmo(armoId, ait->second, armoCache, armaCache, txstCache));
 					++totalPieces;
 
 					if (level > entry.minLevel)

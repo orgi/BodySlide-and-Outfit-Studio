@@ -322,6 +322,39 @@ static ArmorRecord ParseArmor(const Record& rec) {
 	return ar;
 }
 
+/// Parse an alternate texture array (MO2S, MO3S, MO4S, MO5S).
+/// Format: count (uint32), then count entries of:
+///   name_len (uint32), name (char[name_len]), txst_formid (uint32), 3d_index (uint32)
+static std::vector<AlternateTexture> ParseAlternateTextures(const Subrecord& sr) {
+	std::vector<AlternateTexture> result;
+	if (sr.data.size() < 4)
+		return result;
+
+	uint32_t count = ReadLE<uint32_t>(sr.data.data());
+	size_t off = 4;
+	for (uint32_t i = 0; i < count; ++i) {
+		if (off + 4 > sr.data.size())
+			break;
+		uint32_t nameLen = ReadLE<uint32_t>(sr.data.data() + off);
+		off += 4;
+		if (off + nameLen + 8 > sr.data.size())
+			break;
+
+		AlternateTexture at;
+		at.shapeName = std::string(reinterpret_cast<const char*>(sr.data.data() + off), nameLen);
+		// Trim null terminators
+		while (!at.shapeName.empty() && at.shapeName.back() == '\0')
+			at.shapeName.pop_back();
+		off += nameLen;
+		at.texSetFormId = ReadLE<uint32_t>(sr.data.data() + off);
+		at.index3D = ReadLE<uint32_t>(sr.data.data() + off + 4);
+		off += 8;
+
+		result.push_back(std::move(at));
+	}
+	return result;
+}
+
 static ArmorAddonRecord ParseArmorAddon(const Record& rec) {
 	ArmorAddonRecord aa;
 	aa.formId = rec.formId;
@@ -341,6 +374,14 @@ static ArmorAddonRecord ParseArmorAddon(const Record& rec) {
 	if (auto* mod3 = rec.GetSubrecord("MOD3"))
 		aa.modelFemale = ReadString(mod3->data);
 
+	// MO2S: male model alternate textures
+	if (auto* mo2s = rec.GetSubrecord("MO2S"))
+		aa.altTexMale = ParseAlternateTextures(*mo2s);
+
+	// MO3S: female model alternate textures
+	if (auto* mo3s = rec.GetSubrecord("MO3S"))
+		aa.altTexFemale = ParseAlternateTextures(*mo3s);
+
 	// RNAM: race
 	if (auto* rnam = rec.GetSubrecord("RNAM")) {
 		if (rnam->data.size() >= 4)
@@ -348,6 +389,19 @@ static ArmorAddonRecord ParseArmorAddon(const Record& rec) {
 	}
 
 	return aa;
+}
+
+static TextureSetRecord ParseTextureSet(const Record& rec) {
+	TextureSetRecord ts;
+	ts.formId = rec.formId;
+	ts.editorId = rec.EditorId();
+
+	const char* txNames[] = {"TX00", "TX01", "TX02", "TX03", "TX04", "TX05", "TX06", "TX07"};
+	for (int i = 0; i < 8; ++i) {
+		if (auto* sr = rec.GetSubrecord(txNames[i]))
+			ts.textures[i] = ReadString(sr->data);
+	}
+	return ts;
 }
 
 static LeveledItemRecord ParseLeveledItem(const Record& rec) {
@@ -482,6 +536,20 @@ std::vector<ArmorAddonRecord> ESPReader::GetArmorAddons() const {
 		auto rit = records.find(fid);
 		if (rit != records.end())
 			result.push_back(ParseArmorAddon(rit->second));
+	}
+	return result;
+}
+
+std::vector<TextureSetRecord> ESPReader::GetTextureSets() const {
+	std::vector<TextureSetRecord> result;
+	auto it = recordsByType.find("TXST");
+	if (it == recordsByType.end())
+		return result;
+
+	for (uint32_t fid : it->second) {
+		auto rit = records.find(fid);
+		if (rit != records.end())
+			result.push_back(ParseTextureSet(rit->second));
 	}
 	return result;
 }

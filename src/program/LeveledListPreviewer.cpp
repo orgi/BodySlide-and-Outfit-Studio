@@ -5,6 +5,8 @@
 #include "LeveledListPreviewer.h"
 #include "BodySlideApp.h"
 
+#include <algorithm>
+#include <cctype>
 #include <regex>
 #include <sstream>
 
@@ -422,7 +424,9 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 			}
 
 			m->CreateBuffers();
-			bool hasTexture = AddNifShapeTextures(&nif, shapeName);
+			const std::vector<lldata::TextureOverride>* overrides =
+				piece.textureOverrides.empty() ? nullptr : &piece.textureOverrides;
+			bool hasTexture = AddNifShapeTextures(&nif, m->shapeName, overrides);
 			if (!hasTexture) {
 				untexturedShapes.push_back(m->shapeName);
 				if (!showUntextured)
@@ -441,7 +445,8 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 // Texture loading (same pattern as PreviewWindow)
 // ---------------------------------------------------------------------------
 
-bool LeveledListPreviewer::AddNifShapeTextures(NifFile* fromNif, const std::string& shapeName) {
+bool LeveledListPreviewer::AddNifShapeTextures(NifFile* fromNif, const std::string& shapeName,
+												const std::vector<lldata::TextureOverride>* overrides) {
 	bool hasMat = false;
 	std::string matFile;
 
@@ -519,6 +524,22 @@ bool LeveledListPreviewer::AddNifShapeTextures(NifFile* fromNif, const std::stri
 	else if (shader) {
 		for (int i = 0; i < MAX_TEXTURE_PATHS; i++)
 			fromNif->GetTextureSlot(shape, texFiles[i], i);
+	}
+
+	// Apply alternate texture overrides from ESP (ARMA MO3S → TXST)
+	if (overrides) {
+		for (auto& ovr : *overrides) {
+			// Case-insensitive shape name comparison
+			if (ovr.shapeName.size() == shapeName.size() &&
+				std::equal(ovr.shapeName.begin(), ovr.shapeName.end(), shapeName.begin(),
+						   [](char a, char b) { return std::tolower(a) == std::tolower(b); })) {
+				for (int i = 0; i < 8; i++) {
+					if (!ovr.textures[i].empty())
+						texFiles[i] = ovr.textures[i];
+				}
+				break;
+			}
+		}
 	}
 
 	for (int i = 0; i < MAX_TEXTURE_PATHS; i++) {

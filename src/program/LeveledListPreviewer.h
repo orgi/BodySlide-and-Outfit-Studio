@@ -82,7 +82,8 @@ private:
 	void LoadESPFile(const std::string& filepath);
 	void RefreshOutfitList();
 	void LoadOutfitMeshes(const lldata::OutfitEntry& outfit);
-	bool AddNifShapeTextures(nifly::NifFile* nif, const std::string& shapeName);
+	bool AddNifShapeTextures(nifly::NifFile* nif, const std::string& shapeName,
+						  const std::vector<lldata::TextureOverride>* overrides = nullptr);
 	bool LoadNifFromPath(const std::string& relativePath, const std::string& prefix = "");
 	void LoadBodyMeshes();
 
