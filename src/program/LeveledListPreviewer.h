@@ -119,9 +119,8 @@ class LeveledListPreviewer : public wxFrame {
 	std::unordered_map<std::string, std::vector<nifly::Vector3>> outfitRefVerts;  // displayName → ref verts
 	std::unordered_map<std::string, std::vector<nifly::Vector3>> outfitGameVerts; // displayName → game verts
 
-	// Vertex count mismatch warnings (shape → detail string)
+	// Vertex count mismatch warnings (nif | shape → detail string, shown in overlay)
 	std::vector<std::string> morphWarnings_;
-	wxStaticText* warningLabel_ = nullptr;
 
 	// SMP physics simulation
 	std::unique_ptr<SmpSimulator> smpSimulator_;

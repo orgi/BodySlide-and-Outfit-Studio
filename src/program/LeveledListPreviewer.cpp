@@ -117,11 +117,6 @@ LeveledListPreviewer::LeveledListPreviewer(BodySlideApp* app)
 	smpSizer->Add(smpToggle_, 0, wxALIGN_CENTER_VERTICAL);
 	leftSizer->Add(smpSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
 
-	// Warning label for vertex count mismatches (hidden by default)
-	warningLabel_ = new wxStaticText(leftPanel, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxST_NO_AUTORESIZE);
-	warningLabel_->SetForegroundColour(wxColour(200, 80, 0)); // orange
-	warningLabel_->Hide();
-	leftSizer->Add(warningLabel_, 0, wxEXPAND | wxLEFT | wxRIGHT, 5);
 
 	// Outfit list
 	outfitList = new wxListCtrl(leftPanel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT | wxLC_SINGLE_SEL);
@@ -1345,9 +1340,14 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	outfitGameVerts.clear();
 	morphWarnings_.clear();
 
-	// Load body base layer first (body, hands, feet)
+	// Always load body meshes — this also populates allSliderProjects
+	// (needed for outfit piece morphing) and loads hands/feet.
+	// The auto-hide pass below will hide body parts whose slots are
+	// covered by the outfit (e.g. slot 32 = body).
 	if (showBody)
 		LoadBodyMeshes();
+	else
+		FindBodySliderProjects(); // still need slider projects for outfit morphing
 
 	std::string baseGamePath = Config["GameDataPath"];
 	if (!baseGamePath.empty() && baseGamePath.back() != '/' && baseGamePath.back() != '\\')
@@ -1494,32 +1494,16 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 					std::vector<Vector3> refVerts;
 					refNif.GetVertsForShape(refShape, refVerts);
 					if (static_cast<int>(refVerts.size()) != m->nVerts) {
-						// Vertex count mismatch: substitute the shape from the
-						// reference NIF so morphing can still be applied.
-						wxLogWarning("  Shape '%s': vertex count mismatch (game=%d, ref=%d) - substituting from reference NIF",
+						// Vertex count mismatch — keep the game mesh as-is (it was
+						// built with zap sliders or a different topology). Morphing
+						// is skipped for this shape; its built appearance is fine.
+						wxLogMessage("  Shape '%s' in '%s': vertex count mismatch (game=%d, ref=%d) — skipping morph",
 									 shapeName,
+									 piecePath,
 									 m->nVerts,
 									 static_cast<int>(refVerts.size()));
-						morphWarnings_.push_back(shapeName + ": verts game=" + std::to_string(m->nVerts) + " ref=" + std::to_string(static_cast<int>(refVerts.size())));
-
-						std::string displayName = m->shapeName;
-						GLMaterial* savedMat = m->material;
-
-						gls.DeleteMesh(displayName);
-
-						Mesh* refMesh = gls.AddMeshFromNif(&refNif, refShapeName, nullptr, false);
-						if (refMesh) {
-							refMesh->shapeName = displayName;
-							refMesh->CreateBuffers();
-							if (savedMat) {
-								refMesh->material = savedMat;
-								gls.UpdateShaders(refMesh);
-							}
-							m = refMesh;
-							matchedRefName = refShapeName;
-							matchedRefVerts = std::move(refVerts);
-							wxLogMessage("  Substituted '%s' from reference NIF (%d verts)", displayName, m->nVerts);
-						}
+						morphWarnings_.push_back(piecePath + " | " + shapeName + ": morph skipped (game verts=" + std::to_string(m->nVerts)
+												 + ", ref verts=" + std::to_string(static_cast<int>(refVerts.size())) + ")");
 						break;
 					}
 					matchedRefName = refShapeName;
@@ -1603,7 +1587,9 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	// pieces.  Skyrim replaces the base body with the outfit's own body
 	// meshes, so when an outfit covers slot N, any base-body shape that
 	// has partition N should be hidden (the outfit provides its own).
-	if (showBody && !bodyShapePartMap.empty()) {
+	// (Body loading is already skipped entirely when slot 32 is covered,
+	//  but this handles other body parts like hands/feet.)
+	if (!bodyShapePartMap.empty()) {
 		std::set<int> coveredSlots;
 		for (auto& piece : outfit.pieces)
 			for (int slot : piece.bodySlots)
@@ -1655,29 +1641,6 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	gls.RenderOneFrame();
 	wxLog::FlushActive();
 	SetStatusText(wxString::Format(_("Outfit: %s — %d meshes loaded"), outfit.name, loadedCount));
-
-	// Update vertex mismatch warning label
-	if (warningLabel_) {
-		if (morphWarnings_.empty()) {
-			warningLabel_->Hide();
-		}
-		else {
-			wxString text = wxString::Format(_("Note: %zu shape(s) substituted from reference NIF (vertex count mismatch with game mesh). Rebuild in BodySlide to fix."),
-											 morphWarnings_.size());
-			warningLabel_->SetLabel(text);
-			warningLabel_->Wrap(warningLabel_->GetParent()->GetClientSize().GetWidth() - 10);
-
-			wxString tip;
-			for (auto& w : morphWarnings_) {
-				if (!tip.empty())
-					tip += "\n";
-				tip += w;
-			}
-			warningLabel_->SetToolTip(tip);
-			warningLabel_->Show();
-		}
-		warningLabel_->GetParent()->Layout();
-	}
 
 	RefreshMeshOverlay();
 }
@@ -2040,13 +2003,33 @@ void LeveledListPreviewer::RefreshMeshOverlay() {
 		}
 	}
 
+	// Show morph warnings (vertex count mismatch) at the bottom
+	if (!morphWarnings_.empty()) {
+		sizer->AddSpacer(6);
+		wxStaticText* warnHeader = new wxStaticText(meshOverlayPanel, wxID_ANY, wxString::Format(_("Morph skipped (%zu):"), morphWarnings_.size()));
+		wxFont warnFont = warnHeader->GetFont();
+		warnFont.SetWeight(wxFONTWEIGHT_BOLD);
+		warnHeader->SetFont(warnFont);
+		warnHeader->SetForegroundColour(wxColour(200, 80, 0));
+		sizer->Add(warnHeader, 0, wxLEFT | wxTOP, 4);
+
+		for (auto& w : morphWarnings_) {
+			wxStaticText* line = new wxStaticText(meshOverlayPanel, wxID_ANY, wxString::FromUTF8(w));
+			line->SetForegroundColour(wxColour(200, 80, 0));
+			wxFont smallFont = line->GetFont();
+			smallFont.SetPointSize(smallFont.GetPointSize() - 1);
+			line->SetFont(smallFont);
+			sizer->Add(line, 0, wxLEFT, 12);
+		}
+	}
+
 	meshOverlayPanel->SetSizer(sizer);
 	meshOverlayPanel->FitInside();
 
 	// Size: content width + margin, use full canvas height
 	wxSize canvasSize = canvas ? canvas->GetSize() : wxSize(600, 400);
 	wxSize minSz = sizer->GetMinSize();
-	int panelW = std::min(std::max(minSz.GetWidth() + 20, 160), 340);
+	int panelW = std::min(std::max(minSz.GetWidth() + 20, 160), 400);
 	int totalH = minSz.GetHeight() + 12;
 	int panelH = std::min(totalH, canvasSize.GetHeight() - 10);
 
