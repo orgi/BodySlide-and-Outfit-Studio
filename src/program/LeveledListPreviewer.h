@@ -8,9 +8,9 @@
 #pragma once
 
 #include "../components/LeveledListData.h"
-#include "../components/SliderManager.h"
-#include "../components/SliderSet.h"
+#include "../components/SliderPresets.h"
 #include "../components/SmpSimulator.h"
+#include "../files/TriFile.h"
 #include "../render/GLSurface.h"
 #include "../utils/ConfigurationManager.h"
 
@@ -79,48 +79,22 @@ class LeveledListPreviewer : public wxFrame {
 
 	bool useHighWeight = true; // true = _1 (high), false = _0 (low)
 
-	// Body preset morphing
-	struct BodyProject {
-		std::string refNifPath;	   // slider set reference NIF (same for both weights)
-		std::string sliderSetFile; // .osp file path
-		std::string setName;	   // set name within .osp
-	};
-	std::vector<BodyProject> bodyProjects;
-
-	// Maps game body shape → slider project shape for morphing
-	struct BodyShapeMorphInfo {
-		size_t projectIdx;		  // index into bodyProjects
-		std::string refShapeName; // shape name in the reference NIF / SliderSet
-	};
-	std::unordered_map<std::string, BodyShapeMorphInfo> bodyShapeMorphMap;
-
-	// Game body verts (from built game body NIF) — used to reset to "(none)"
+	// Preset morphing via .tri files
+	// Game verts (from built game NIF) — base for morph computation and reset
 	std::unordered_map<std::string, std::vector<nifly::Vector3>> bodyGameVerts;
-	// Slider reference verts (from ShapeData reference NIF) — base for morph computation
-	std::unordered_map<std::string, std::vector<nifly::Vector3>> bodyRefVerts;
-	std::unordered_map<std::string, std::vector<nifly::Vector2>> bodyRefUVs;
 	std::string currentPresetName;
 
-	// All slider projects indexed by normalized output NIF path
-	std::unordered_map<std::string, BodyProject> allSliderProjects;
-	bool sliderProjectsCached = false; // true after first FindBodySliderProjects scan
+	// .tri file cache: NIF relative path → loaded TriFile
+	std::unordered_map<std::string, TriFile> triFileCache_;
 
 	// NPC skin texture overrides (resolved from WNAM → ARMO → ARMA → TXST)
 	std::array<std::string, 8> npcSkinTextures{};
 	bool hasNpcSkinTextures = false;
 
-	// Outfit piece preset morphing
-	struct OutfitShapeMorphInfo {
-		std::string sliderSetFile;
-		std::string setName;
-		std::string refShapeName; // shape name in reference NIF / SliderSet
-	};
-	std::unordered_map<std::string, OutfitShapeMorphInfo> outfitShapeMorphMap;	  // displayName → morph info
-	std::unordered_map<std::string, std::vector<nifly::Vector3>> outfitRefVerts;  // displayName → ref verts
+	// Outfit piece preset morphing via .tri files
 	std::unordered_map<std::string, std::vector<nifly::Vector3>> outfitGameVerts; // displayName → game verts
-
-	// Vertex count mismatch warnings (nif | shape → detail string, shown in overlay)
-	std::vector<std::string> morphWarnings_;
+	// displayName → original NIF shape name (for .tri morph lookup; strips formId prefix)
+	std::unordered_map<std::string, std::string> outfitShapeNifName_;
 
 	// SMP physics simulation
 	std::unique_ptr<SmpSimulator> smpSimulator_;
@@ -184,13 +158,12 @@ private:
 	bool AddNifShapeTextures(nifly::NifFile* nif, const std::string& shapeName, const std::vector<lldata::TextureOverride>* overrides = nullptr, const std::string& meshName = {});
 	bool LoadNifFromPath(const std::string& relativePath, const std::string& prefix = "");
 	void LoadBodyMeshes();
-	void FindBodySliderProjects();
 	void LoadHeadMesh(const lldata::NPCEntry& npc);
 	void ClearHeadMeshes();
 	void LoadPresetList();
 	void ApplyPresetToBody(const std::string& presetName);
 	void ApplyPresetToOutfit(const std::string& presetName);
-	static std::string NormalizeNifOutputPath(const std::string& path);
+	TriFile* GetOrLoadTriFile(const std::string& nifRelativePath);
 
 	// Mesh overlay helpers
 	void RefreshMeshOverlay();
