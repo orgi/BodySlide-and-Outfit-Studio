@@ -91,6 +91,17 @@ public:
 	/// Returns an array of 8 texture paths (TX00-TX07), empty strings for unresolved slots.
 	std::array<std::string, 8> ResolveSkinTextures(uint32_t wnamFormId) const;
 
+	/// Resolve body/hands/feet NIF paths for an NPC's WNAM (skin armor FormID).
+	/// Returns relative paths (e.g. "meshes/actors/character/character assets/femalebody_1.nif")
+	/// for each body slot covered by the skin ARMO's ARMAs. Keyed by slot bit (2=body, 3=hands, 37=feet mapped).
+	/// Empty map = use default paths.
+	struct BodyNifPaths {
+		std::string body;  // slot 32 (bit 2)
+		std::string hands; // slot 33 (bit 3)
+		std::string feet;  // slot 37 (bit 7)
+	};
+	BodyNifPaths ResolveBodyNifPaths(uint32_t wnamFormId, bool highWeight) const;
+
 	/// Get NPC skin cache (editorId -> remapped WNAM FormID from ESP masters).
 	const std::unordered_map<std::string, uint32_t>& GetNpcSkinCache() const { return npcSkinCache; }
 

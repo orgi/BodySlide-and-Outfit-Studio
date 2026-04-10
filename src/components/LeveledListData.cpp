@@ -771,6 +771,62 @@ std::array<std::string, 8> LeveledListData::ResolveSkinTextures(uint32_t wnamFor
 }
 
 // ---------------------------------------------------------------------------
+// ResolveBodyNifPaths — get body/hands/feet NIF paths from NPC skin ARMO
+// ---------------------------------------------------------------------------
+
+LeveledListData::BodyNifPaths LeveledListData::ResolveBodyNifPaths(uint32_t wnamFormId, bool highWeight) const {
+	BodyNifPaths result;
+	if (wnamFormId == 0)
+		return result;
+
+	auto armoIt = armoCache.find(wnamFormId);
+	if (armoIt == armoCache.end()) {
+		wxLogMessage("ResolveBodyNifPaths: WNAM ARMO %08X not in cache", wnamFormId);
+		return result;
+	}
+
+	const std::string suffix = highWeight ? "_1.nif" : "_0.nif";
+
+	for (uint32_t armaId : armoIt->second.armatureIds) {
+		auto armaIt = armaCache.find(armaId);
+		if (armaIt == armaCache.end())
+			continue;
+
+		auto& arma = armaIt->second;
+		const std::string& model = arma.modelFemale.empty() ? arma.modelMale : arma.modelFemale;
+		if (model.empty())
+			continue;
+
+		// Normalise model path: backslash → slash, ensure meshes/ prefix
+		std::string path = NormalizeMeshPath(model);
+
+		// Replace _1.nif / _0.nif suffix according to requested weight.
+		// Models are usually stored as _1.nif in the ESP; swap if needed.
+		if (path.size() >= 6) {
+			if (path.substr(path.size() - 6) == "_1.nif" || path.substr(path.size() - 6) == "_0.nif")
+				path = path.substr(0, path.size() - 6) + suffix;
+		}
+
+		// Assign to the right slot by body slot flags
+		// bit 2 = slot 32 (body), bit 3 = slot 33 (hands), bit 7 = slot 37 (feet)
+		if ((arma.bodySlotFlags & (1u << 2)) && result.body.empty()) {
+			result.body = path;
+			wxLogMessage("ResolveBodyNifPaths: body  → %s", path);
+		}
+		if ((arma.bodySlotFlags & (1u << 3)) && result.hands.empty()) {
+			result.hands = path;
+			wxLogMessage("ResolveBodyNifPaths: hands → %s", path);
+		}
+		if ((arma.bodySlotFlags & (1u << 7)) && result.feet.empty()) {
+			result.feet = path;
+			wxLogMessage("ResolveBodyNifPaths: feet  → %s", path);
+		}
+	}
+
+	return result;
+}
+
+// ---------------------------------------------------------------------------
 // ScanAllPluginsForNpcSkins — scan every ESP/ESM in Data dir for NPC_ WNAM
 // ---------------------------------------------------------------------------
 

@@ -467,14 +467,52 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 	bodyShapeMorphMap.clear();
 	bodyShapePartMap.clear();
 
-	// Always load body from game data — correct textures and consistent with outfits.
-	// Body part IDs are read from NIF partition data by LoadNifFromPath.
+	// Determine which body NIF paths to load.
+	// If an NPC is selected and has a WNAM skin armor, use that NPC's body meshes.
+	// Otherwise fall back to the default character assets.
 	const std::string suffix = useHighWeight ? "_1.nif" : "_0.nif";
-	std::vector<std::string> bodyNifs = {
-		"meshes/actors/character/character assets/femalebody" + suffix,
-		"meshes/actors/character/character assets/femalehands" + suffix,
-		"meshes/actors/character/character assets/femalefeet" + suffix,
+	static const std::vector<std::string> defaultBodyNifs = {
+		"meshes/actors/character/character assets/femalebody",
+		"meshes/actors/character/character assets/femalehands",
+		"meshes/actors/character/character assets/femalefeet",
 	};
+
+	std::vector<std::string> bodyNifs;
+
+	// Try NPC-specific paths from WNAM → ARMO → ARMA
+	if (!currentHeadEditorId.empty()) {
+		uint32_t wnamFormId = 0;
+		// Check override map first (mod-installed skin), then vanilla cache
+		auto& overrides = data.GetNpcSkinOverrides();
+		auto ovIt = overrides.find(currentHeadEditorId);
+		if (ovIt != overrides.end()) {
+			wnamFormId = ovIt->second.selfDefined ? ovIt->second.wnamRaw : ovIt->second.remappedWnam;
+		}
+		else {
+			auto& skinCache = data.GetNpcSkinCache();
+			auto scIt = skinCache.find(currentHeadEditorId);
+			if (scIt != skinCache.end())
+				wnamFormId = scIt->second;
+		}
+
+		if (wnamFormId != 0) {
+			auto paths = data.ResolveBodyNifPaths(wnamFormId, useHighWeight);
+			if (!paths.body.empty())  bodyNifs.push_back(paths.body);
+			if (!paths.hands.empty()) bodyNifs.push_back(paths.hands);
+			if (!paths.feet.empty())  bodyNifs.push_back(paths.feet);
+
+			if (!bodyNifs.empty())
+				wxLogMessage("LeveledListPreviewer: Using NPC '%s' body meshes (WNAM %08X)",
+							 currentHeadEditorId, wnamFormId);
+		}
+	}
+
+	// Fall back to defaults for any missing slots (or when no NPC selected)
+	if (bodyNifs.empty()) {
+		for (auto& base : defaultBodyNifs)
+			bodyNifs.push_back(base + suffix);
+	}
+
 	for (auto& nifPath : bodyNifs) {
 		if (!LoadNifFromPath(nifPath))
 			wxLogMessage("LeveledListPreviewer: Body part not found: %s", nifPath);
@@ -688,6 +726,19 @@ void LeveledListPreviewer::OnHeadEntered(wxCommandEvent& WXUNUSED(event)) {
 		currentHeadEditorId.clear();
 		hasNpcSkinTextures = false;
 		npcSkinTextures = {};
+		// Reload default body meshes
+		if (showBody) {
+			if (canvas && context)
+				canvas->SetCurrent(*context);
+			for (auto& name : bodyShapeNames)
+				gls.DeleteMesh(name);
+			bodyShapeNames.clear();
+			bodyRefVerts.clear();
+			bodyRefUVs.clear();
+			bodyGameVerts.clear();
+			bodyShapeMorphMap.clear();
+			LoadBodyMeshes();
+		}
 		gls.RenderOneFrame();
 		return;
 	}
@@ -728,20 +779,21 @@ void LeveledListPreviewer::OnHeadEntered(wxCommandEvent& WXUNUSED(event)) {
 	if (!npcSkinTextures[0].empty()) {
 		hasNpcSkinTextures = true;
 		wxLogMessage("LeveledListPreviewer: NPC '%s' skin texture resolved: %s", npc.editorId, npcSkinTextures[0]);
+	}
 
-		// Re-apply skin textures to existing body meshes
-		if (!bodyShapeNames.empty()) {
-			if (canvas && context)
-				canvas->SetCurrent(*context);
-			for (auto& name : bodyShapeNames)
-				gls.DeleteMesh(name);
-			bodyShapeNames.clear();
-			bodyRefVerts.clear();
-			bodyRefUVs.clear();
-			bodyGameVerts.clear();
-			bodyShapeMorphMap.clear();
-			LoadBodyMeshes();
-		}
+	// Always reload body meshes when NPC changes — the body mesh paths themselves
+	// may differ (e.g. a custom-race NPC uses a different femalebody NIF).
+	if (showBody) {
+		if (canvas && context)
+			canvas->SetCurrent(*context);
+		for (auto& name : bodyShapeNames)
+			gls.DeleteMesh(name);
+		bodyShapeNames.clear();
+		bodyRefVerts.clear();
+		bodyRefUVs.clear();
+		bodyGameVerts.clear();
+		bodyShapeMorphMap.clear();
+		LoadBodyMeshes();
 	}
 }
 
