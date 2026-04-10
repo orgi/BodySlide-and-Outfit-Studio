@@ -19,6 +19,7 @@ extern ConfigurationManager Config;
 wxBEGIN_EVENT_TABLE(LeveledListPreviewer, wxFrame)
 	EVT_CLOSE(LeveledListPreviewer::OnClose)
 	EVT_MENU(LeveledListPreviewer::ID_LoadESP, LeveledListPreviewer::OnLoadESP)
+	EVT_MENU(LeveledListPreviewer::ID_ToggleUntextured, LeveledListPreviewer::OnToggleUntextured)
 wxEND_EVENT_TABLE()
 
 // ---------------------------------------------------------------------------
@@ -35,6 +36,12 @@ LeveledListPreviewer::LeveledListPreviewer(BodySlideApp* app)
 	wxMenu* fileMenu = new wxMenu();
 	fileMenu->Append(ID_LoadESP, _("&Open ESP...\tCtrl+O"), _("Load a generated leveled list ESP"));
 	menuBar->Append(fileMenu, _("&File"));
+
+	wxMenu* viewMenu = new wxMenu();
+	viewMenu->AppendCheckItem(ID_ToggleUntextured, _("Show &Untextured Meshes\tU"), _("Show collision and other meshes without textures"));
+	viewMenu->Check(ID_ToggleUntextured, false);
+	menuBar->Append(viewMenu, _("&View"));
+
 	SetMenuBar(menuBar);
 
 	// Main splitter: left panel (controls + list) | right panel (GL canvas)
@@ -255,6 +262,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 
 	gls.Cleanup();
 	shapeMaterials.clear();
+	untexturedShapes.clear();
 
 	std::string baseGamePath = Config["GameDataPath"];
 	if (!baseGamePath.empty() && baseGamePath.back() != '/' && baseGamePath.back() != '\\')
@@ -324,7 +332,12 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 			}
 
 			m->CreateBuffers();
-			AddNifShapeTextures(&nif, shapeName);
+			bool hasTexture = AddNifShapeTextures(&nif, shapeName);
+			if (!hasTexture) {
+				untexturedShapes.push_back(m->shapeName);
+				if (!showUntextured)
+					gls.SetMeshVisibility(m->shapeName, false);
+			}
 			++loadedCount;
 		}
 	}
@@ -338,7 +351,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 // Texture loading (same pattern as PreviewWindow)
 // ---------------------------------------------------------------------------
 
-void LeveledListPreviewer::AddNifShapeTextures(NifFile* fromNif, const std::string& shapeName) {
+bool LeveledListPreviewer::AddNifShapeTextures(NifFile* fromNif, const std::string& shapeName) {
 	bool hasMat = false;
 	std::string matFile;
 
@@ -424,7 +437,16 @@ void LeveledListPreviewer::AddNifShapeTextures(NifFile* fromNif, const std::stri
 			texFiles[i] = std::regex_replace(texFiles[i], std::regex("^(.*?)/textures/", std::regex_constants::icase), "");
 			texFiles[i] = std::regex_replace(texFiles[i], std::regex("^/+"), "");
 			texFiles[i] = std::regex_replace(texFiles[i], std::regex("^(?!^textures/)", std::regex_constants::icase), "textures/");
-			texFiles[i] = baseGamePath + texFiles[i];
+
+			// Try exact path first, then case-insensitive resolution for Linux
+			std::string fullPath = baseGamePath + texFiles[i];
+			if (wxFileName::FileExists(fullPath)) {
+				texFiles[i] = fullPath;
+			}
+			else {
+				std::string resolved = lldata::LeveledListData::ResolveCaseInsensitive(baseGamePath, texFiles[i]);
+				texFiles[i] = resolved.empty() ? fullPath : resolved;
+			}
 		}
 	}
 
@@ -441,9 +463,29 @@ void LeveledListPreviewer::AddNifShapeTextures(NifFile* fromNif, const std::stri
 		fShader = Config["AppDir"] + "/res/shaders/ob_default.frag";
 	}
 
+	// Check if we have a diffuse texture (slot 0)
+	bool hasDiffuse = false;
+	if (!texFiles[0].empty()) {
+		if (wxFileName::FileExists(texFiles[0])) {
+			hasDiffuse = true;
+		}
+		else {
+			// Check BSA/BA2 for diffuse texture
+			std::string relTex = texFiles[0];
+			if (relTex.size() > baseGamePath.size() && relTex.substr(0, baseGamePath.size()) == baseGamePath)
+				relTex = relTex.substr(baseGamePath.size());
+			for (FSArchiveFile* archive : FSManager::archiveList()) {
+				if (archive && archive->hasFile(relTex)) {
+					hasDiffuse = true;
+					break;
+				}
+			}
+		}
+	}
+
 	Mesh* m = gls.GetMesh(shapeName);
 	if (!m)
-		return;
+		return false;
 
 	GLMaterial* glMat = gls.AddMaterial(texFiles, vShader, fShader);
 	if (glMat) {
@@ -455,6 +497,19 @@ void LeveledListPreviewer::AddNifShapeTextures(NifFile* fromNif, const std::stri
 
 		gls.UpdateShaders(m);
 	}
+
+	return hasDiffuse;
+}
+
+// ---------------------------------------------------------------------------
+// Toggle untextured meshes
+// ---------------------------------------------------------------------------
+
+void LeveledListPreviewer::OnToggleUntextured(wxCommandEvent& event) {
+	showUntextured = event.IsChecked();
+	for (auto& name : untexturedShapes)
+		gls.SetMeshVisibility(name, showUntextured);
+	gls.RenderOneFrame();
 }
 
 // ---------------------------------------------------------------------------
@@ -526,6 +581,18 @@ void LLPreviewCanvas::OnKeyUp(wxKeyEvent& event) {
 	switch (event.GetKeyCode()) {
 		case 'T': previewer->ToggleTextures(); break;
 		case 'W': previewer->ToggleWireframe(); break;
+		case 'U': {
+			// Toggle via menu so the checkmark stays in sync
+			wxMenuBar* mb = previewer->GetMenuBar();
+			if (mb) {
+				bool newState = !mb->IsChecked(LeveledListPreviewer::ID_ToggleUntextured);
+				mb->Check(LeveledListPreviewer::ID_ToggleUntextured, newState);
+				wxCommandEvent evt(wxEVT_MENU, LeveledListPreviewer::ID_ToggleUntextured);
+				evt.SetInt(newState ? 1 : 0);
+				previewer->GetEventHandler()->ProcessEvent(evt);
+			}
+			break;
+		}
 	}
 }
 

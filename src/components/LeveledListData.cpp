@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <set>
 
+#include <wx/dir.h>
 #include <wx/filename.h>
 #include <wx/log.h>
 
@@ -76,26 +77,106 @@ static std::string DirectoryOf(const std::string& filepath) {
 	return "";
 }
 
+std::string LeveledListData::ResolveCaseInsensitive(const std::string& baseDir, const std::string& relativePath) {
+	if (baseDir.empty() || relativePath.empty())
+		return {};
+
+	// Split relative path into components
+	std::vector<std::string> components;
+	std::string remaining = relativePath;
+	std::replace(remaining.begin(), remaining.end(), '\\', '/');
+	size_t pos = 0;
+	while ((pos = remaining.find('/')) != std::string::npos) {
+		std::string comp = remaining.substr(0, pos);
+		if (!comp.empty())
+			components.push_back(comp);
+		remaining = remaining.substr(pos + 1);
+	}
+	if (!remaining.empty())
+		components.push_back(remaining);
+
+	// Walk from baseDir, matching each component case-insensitively
+	wxString current = wxString::FromUTF8(baseDir);
+	if (!current.EndsWith("/") && !current.EndsWith("\\"))
+		current += "/";
+
+	for (size_t i = 0; i < components.size(); ++i) {
+		wxString target = wxString::FromUTF8(components[i]);
+		wxString targetLower = target.Lower();
+		bool isLast = (i == components.size() - 1);
+
+		// Try exact match first (fast path)
+		wxString exact = current + target;
+		if (isLast ? wxFileName::FileExists(exact) : wxFileName::DirExists(exact)) {
+			current = exact + (isLast ? "" : "/");
+			continue;
+		}
+
+		// Case-insensitive scan of current directory
+		bool found = false;
+		wxDir dir(current);
+		if (!dir.IsOpened())
+			return {};
+
+		wxString entry;
+		// Check files and dirs
+		bool hasEntry = dir.GetFirst(&entry, wxEmptyString, wxDIR_FILES | wxDIR_DIRS | wxDIR_HIDDEN);
+		while (hasEntry) {
+			if (entry.Lower() == targetLower) {
+				current = current + entry + (isLast ? "" : "/");
+				found = true;
+				break;
+			}
+			hasEntry = dir.GetNext(&entry);
+		}
+
+		if (!found)
+			return {};
+	}
+
+	return current.ToStdString();
+}
+
 // ---------------------------------------------------------------------------
 // LoadRecordsFromESP — load records from a single file into caches
 // ---------------------------------------------------------------------------
 
-void LeveledListData::LoadRecordsFromESP(const std::string& filepath, const std::set<std::string>& types, uint8_t masterIndex) {
+void LeveledListData::LoadRecordsFromESP(const std::string& filepath, const std::set<std::string>& types,
+										  uint8_t masterIndex, const std::vector<std::string>& mainMasters) {
 	esp::ESPReader reader;
 	if (!reader.Load(filepath, types)) {
 		wxLogWarning("LeveledListData: Failed to load %s", filepath);
 		return;
 	}
 
-	// Build FormID remapping: records originating from this file have
-	// top byte == len(its masters). We remap that to masterIndex.
+	// Build FormID remapping table.
+	// This file's own records have top byte == len(its masters) → remap to masterIndex.
+	// Its masters' records need to be remapped to the main ESP's master indices.
 	uint8_t selfIndex = static_cast<uint8_t>(reader.GetMasters().size());
+	auto& fileMasters = reader.GetMasters();
+
+	// Build a map: this file's master index → main ESP's master index
+	// by matching filenames (case-insensitive).
+	std::unordered_map<uint8_t, uint8_t> masterRemap;
+	for (size_t fi = 0; fi < fileMasters.size(); ++fi) {
+		std::string fileMasterLower = ToLower(fileMasters[fi]);
+		for (size_t mi = 0; mi < mainMasters.size(); ++mi) {
+			if (ToLower(mainMasters[mi]) == fileMasterLower) {
+				masterRemap[static_cast<uint8_t>(fi)] = static_cast<uint8_t>(mi);
+				break;
+			}
+		}
+	}
 
 	auto remapFid = [&](uint32_t fid) -> uint32_t {
 		uint8_t topByte = (fid >> 24) & 0xFF;
 		uint32_t baseId = fid & 0x00FFFFFF;
 		if (topByte == selfIndex) {
 			return (static_cast<uint32_t>(masterIndex) << 24) | baseId;
+		}
+		auto it = masterRemap.find(topByte);
+		if (it != masterRemap.end()) {
+			return (static_cast<uint32_t>(it->second) << 24) | baseId;
 		}
 		return fid;
 	};
@@ -191,12 +272,9 @@ static std::string ResolveWornMeshPath(
 		tid = tmpl.templateId;
 	}
 
-	// Last resort: ARMO's own world model (ground object)
-	if (!armo.modelFemale.empty())
-		return armo.modelFemale;
-	if (!armo.modelMale.empty())
-		return armo.modelMale;
-
+	// Do NOT fall back to ARMO's MOD2/MOD4 — those are ground/world models,
+	// not worn meshes. Return empty so the piece is skipped rather than
+	// showing a ground object (e.g. GND.nif).
 	return {};
 }
 
@@ -249,7 +327,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 		// Try same directory as the ESP
 		std::string masterPath = espDirectory + masterName;
 		if (wxFileName::FileExists(masterPath)) {
-			LoadRecordsFromESP(masterPath, {"ARMO", "ARMA"}, masterIdx);
+			LoadRecordsFromESP(masterPath, {"ARMO", "ARMA"}, masterIdx, masters);
 			++mastersLoaded;
 			continue;
 		}
@@ -258,7 +336,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 		if (!baseDataPath.empty()) {
 			masterPath = baseDataPath + masterName;
 			if (wxFileName::FileExists(masterPath)) {
-				LoadRecordsFromESP(masterPath, {"ARMO", "ARMA"}, masterIdx);
+				LoadRecordsFromESP(masterPath, {"ARMO", "ARMA"}, masterIdx, masters);
 				++mastersLoaded;
 				continue;
 			}
@@ -463,12 +541,17 @@ std::string LeveledListData::ResolveNifPath(const std::string& relativePath) con
 	if (relativePath.empty())
 		return {};
 
-	// Try loose file first
+	// Try loose file first (exact case)
 	std::string fullPath = baseDataPath + relativePath;
 	if (wxFileName::FileExists(fullPath))
 		return fullPath;
 
-	// Try BSA/BA2 archives
+	// Try loose file with case-insensitive resolution (needed on Linux)
+	std::string resolved = ResolveCaseInsensitive(baseDataPath, relativePath);
+	if (!resolved.empty())
+		return resolved;
+
+	// Try BSA/BA2 archives (already case-insensitive internally)
 	for (FSArchiveFile* archive : FSManager::archiveList()) {
 		if (archive && archive->hasFile(relativePath))
 			return relativePath; // FSManager can load it from archive

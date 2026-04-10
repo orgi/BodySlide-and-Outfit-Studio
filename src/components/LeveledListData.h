@@ -56,14 +56,19 @@ public:
 	/// Checks loose files first, then BSA/BA2 archives via FSManager.
 	std::string ResolveNifPath(const std::string& relativePath) const;
 
+	/// Case-insensitive file resolution for Linux.
+	/// Walks path components from baseDir and finds case-insensitive matches on disk.
+	static std::string ResolveCaseInsensitive(const std::string& baseDir, const std::string& relativePath);
+
 	/// Get the loaded ESP filename.
 	const std::string& GetFilename() const { return espFilename; }
 
 private:
 	/// Load records from a single ESP/ESM into the caches.
 	/// masterIndex: the index of this file in the main ESP's master list.
-	/// Records originating from this file are remapped to have masterIndex as top byte.
-	void LoadRecordsFromESP(const std::string& filepath, const std::set<std::string>& types, uint8_t masterIndex);
+	/// mainMasters: the master list of the main ESP, used to remap cross-references.
+	void LoadRecordsFromESP(const std::string& filepath, const std::set<std::string>& types,
+							uint8_t masterIndex, const std::vector<std::string>& mainMasters);
 
 	/// Resolve LVLI entries recursively to collect referenced FormIDs and their levels.
 	/// Collects both resolved ARMOs and unresolved FormIDs.

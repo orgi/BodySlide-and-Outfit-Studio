@@ -30,6 +30,8 @@ class LeveledListPreviewer : public wxFrame {
 
 	GLSurface gls;
 	std::unordered_map<std::string, GLMaterial*> shapeMaterials;
+	std::vector<std::string> untexturedShapes; // shapes with no diffuse texture
+	bool showUntextured = false;
 
 	// UI controls
 	wxSearchCtrl* searchCtrl = nullptr;
@@ -69,15 +71,19 @@ public:
 
 	void ToggleTextures() { gls.ToggleTextures(); gls.RenderOneFrame(); }
 	void ToggleWireframe() { gls.ToggleWireframe(); gls.RenderOneFrame(); }
+	void OnToggleUntextured(wxCommandEvent& event);
+
+	friend class LLPreviewCanvas;
 
 private:
 	void LoadESPFile(const std::string& filepath);
 	void RefreshOutfitList();
 	void LoadOutfitMeshes(const lldata::OutfitEntry& outfit);
-	void AddNifShapeTextures(nifly::NifFile* nif, const std::string& shapeName);
+	bool AddNifShapeTextures(nifly::NifFile* nif, const std::string& shapeName);
 
 	enum {
 		ID_LoadESP = wxID_HIGHEST + 500,
+		ID_ToggleUntextured,
 	};
 };
 
