@@ -1260,6 +1260,15 @@ std::string LeveledListPreviewer::NormalizeNifOutputPath(const std::string& path
 	std::string result = path;
 	// Normalize separators
 	std::replace(result.begin(), result.end(), '\\', '/');
+	// Collapse consecutive slashes (e.g. from trailing slash in OutputPath + separator)
+	std::string collapsed;
+	collapsed.reserve(result.size());
+	for (size_t i = 0; i < result.size(); ++i) {
+		if (result[i] == '/' && i > 0 && result[i - 1] == '/')
+			continue;
+		collapsed += result[i];
+	}
+	result = std::move(collapsed);
 	// Remove _0.nif or _1.nif suffix
 	if (result.size() > 6) {
 		std::string ending = result.substr(result.size() - 6);
@@ -1460,9 +1469,15 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 			++loadedCount;
 
 			// Cache game verts and match to reference NIF for morphing.
-			// Match by exact shape name only — vertex count matching is unreliable
-			// because different shapes (e.g. mirrored MainL/MainR) can share the same count.
+			// First try exact shape name match, then fall back to vertex count
+			// only when there is exactly one reference shape with the same count.
+			// Ambiguous vertex-count matches (e.g. mirrored MainL/MainR both having
+			// the same count) are skipped to avoid applying the wrong morph diffs.
 			if (hasSliderProject && m->nVerts > 0) {
+				std::string matchedRefName;
+				std::vector<Vector3> matchedRefVerts;
+
+				// Pass 1: exact name match
 				for (auto& refShapeName : refNif.GetShapeNames()) {
 					if (refShapeName != shapeName)
 						continue;
@@ -1471,21 +1486,53 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 						continue;
 					std::vector<Vector3> refVerts;
 					refNif.GetVertsForShape(refShape, refVerts);
-					if (static_cast<int>(refVerts.size()) != m->nVerts)
-						continue;
+					if (static_cast<int>(refVerts.size()) != m->nVerts) {
+						wxLogWarning("  Shape '%s': vertex count mismatch (game=%d, ref=%d) - rebuild in BodySlide to fix morphing",
+									 shapeName,
+									 m->nVerts,
+									 static_cast<int>(refVerts.size()));
+						break;
+					}
+					matchedRefName = refShapeName;
+					matchedRefVerts = std::move(refVerts);
+					break;
+				}
 
+				// Pass 2: fall back to unique vertex count match
+				if (matchedRefName.empty()) {
+					int countMatches = 0;
+					std::string candidateName;
+					std::vector<Vector3> candidateVerts;
+					for (auto& refShapeName : refNif.GetShapeNames()) {
+						auto* refShape = refNif.FindBlockByName<NiShape>(refShapeName);
+						if (!refShape)
+							continue;
+						std::vector<Vector3> refVerts;
+						refNif.GetVertsForShape(refShape, refVerts);
+						if (static_cast<int>(refVerts.size()) != m->nVerts)
+							continue;
+						++countMatches;
+						candidateName = refShapeName;
+						candidateVerts = std::move(refVerts);
+					}
+					if (countMatches == 1) {
+						matchedRefName = std::move(candidateName);
+						matchedRefVerts = std::move(candidateVerts);
+					}
+				}
+
+				if (!matchedRefName.empty()) {
 					std::vector<Vector3> gameVerts(m->nVerts);
 					for (int i = 0; i < m->nVerts; i++)
 						gameVerts[i] = Mesh::TransformPosMeshToNif(m->verts[i]);
 					outfitGameVerts[m->shapeName] = std::move(gameVerts);
-					outfitRefVerts[m->shapeName] = std::move(refVerts);
+					outfitRefVerts[m->shapeName] = std::move(matchedRefVerts);
 					OutfitShapeMorphInfo info;
 					info.sliderSetFile = projIt->second.sliderSetFile;
 					info.setName = projIt->second.setName;
-					info.refShapeName = refShapeName;
+					info.refShapeName = matchedRefName;
 					outfitShapeMorphMap[m->shapeName] = std::move(info);
-					wxLogMessage("  Outfit morph: '%s' matched ref '%s' (%d verts, project '%s')", m->shapeName, refShapeName, m->nVerts, projIt->second.setName);
-					break;
+					wxLogMessage("  Outfit morph: '%s' matched ref '%s' (%d verts, project '%s')", m->shapeName, matchedRefName, m->nVerts, projIt->second.setName);
 				}
 			}
 		}
