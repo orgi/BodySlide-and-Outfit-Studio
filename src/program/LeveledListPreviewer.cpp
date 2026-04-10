@@ -32,7 +32,7 @@ wxEND_EVENT_TABLE()
 // ---------------------------------------------------------------------------
 
 LeveledListPreviewer::LeveledListPreviewer(BodySlideApp* app)
-	: wxFrame(nullptr, wxID_ANY, _("Leveled List Previewer"), wxDefaultPosition, wxSize(1200, 800))
+	: wxFrame(nullptr, wxID_ANY, _("Leveled List Previewer"), wxDefaultPosition, wxDefaultSize)
 	, app(app) {
 	SetIcon(wxIcon(wxString::FromUTF8(Config["AppDir"]) + "/res/images/BodySlide.png", wxBITMAP_TYPE_PNG));
 
@@ -53,7 +53,7 @@ LeveledListPreviewer::LeveledListPreviewer(BodySlideApp* app)
 	SetMenuBar(menuBar);
 
 	// Main splitter: left panel (controls + list) | right panel (GL canvas)
-	wxSplitterWindow* splitter = new wxSplitterWindow(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxSP_3D | wxSP_LIVE_UPDATE);
+	splitter = new wxSplitterWindow(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxSP_3D | wxSP_LIVE_UPDATE);
 
 	// --- Left panel ---
 	wxPanel* leftPanel = new wxPanel(splitter);
@@ -82,9 +82,14 @@ LeveledListPreviewer::LeveledListPreviewer(BodySlideApp* app)
 
 	// Outfit list
 	outfitList = new wxListCtrl(leftPanel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT | wxLC_SINGLE_SEL);
-	outfitList->AppendColumn(_("Name"), wxLIST_FORMAT_LEFT, 200);
-	outfitList->AppendColumn(_("Level"), wxLIST_FORMAT_RIGHT, 50);
-	outfitList->AppendColumn(_("Pieces"), wxLIST_FORMAT_RIGHT, 50);
+	{
+		int w0 = Config.GetIntValue("LLPreviewer/ColW0");
+		int w1 = Config.GetIntValue("LLPreviewer/ColW1");
+		int w2 = Config.GetIntValue("LLPreviewer/ColW2");
+		outfitList->AppendColumn(_("Name"),   wxLIST_FORMAT_LEFT,  w0 > 0 ? w0 : 200);
+		outfitList->AppendColumn(_("Level"),  wxLIST_FORMAT_RIGHT, w1 > 0 ? w1 : 50);
+		outfitList->AppendColumn(_("Pieces"), wxLIST_FORMAT_RIGHT, w2 > 0 ? w2 : 50);
+	}
 	outfitList->Bind(wxEVT_LIST_ITEM_SELECTED, &LeveledListPreviewer::OnOutfitSelected, this);
 	leftSizer->Add(outfitList, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
 
@@ -111,6 +116,24 @@ LeveledListPreviewer::LeveledListPreviewer(BodySlideApp* app)
 	// Restore last directory from config
 	lastESPDirectory = wxString::FromUTF8(Config["LLPreviewer/LastESPDir"]);
 	std::string lastFile = Config["LLPreviewer/LastESPFile"];
+
+	// Restore window size and position
+	{
+		int x = Config.GetIntValue("LLPreviewer/WindowX");
+		int y = Config.GetIntValue("LLPreviewer/WindowY");
+		int w = Config.GetIntValue("LLPreviewer/WindowW");
+		int h = Config.GetIntValue("LLPreviewer/WindowH");
+		if (w > 0 && h > 0)
+			SetSize(x, y, w, h);
+		else
+			SetSize(wxDefaultCoord, wxDefaultCoord, 1200, 800);
+		if (Config["LLPreviewer/Maximized"] == "true")
+			Maximize();
+	}
+	{
+		int sash = Config.GetIntValue("LLPreviewer/SashPos");
+		splitter->SetSashPosition(sash > 0 ? sash : 320);
+	}
 
 	Show();
 
@@ -726,6 +749,29 @@ void LeveledListPreviewer::OnClose(wxCloseEvent& WXUNUSED(event)) {
 
 	gls.Cleanup();
 	shapeMaterials.clear();
+
+	// Persist window layout
+	bool maximized = IsMaximized();
+	Config.SetBoolValue("LLPreviewer/Maximized", maximized);
+	if (!maximized) {
+		wxPoint pos = GetPosition();
+		wxSize  sz  = GetSize();
+		Config.SetValue("LLPreviewer/WindowX", pos.x);
+		Config.SetValue("LLPreviewer/WindowY", pos.y);
+		Config.SetValue("LLPreviewer/WindowW", sz.x);
+		Config.SetValue("LLPreviewer/WindowH", sz.y);
+	}
+	if (splitter)
+		Config.SetValue("LLPreviewer/SashPos", splitter->GetSashPosition());
+	if (outfitList) {
+		Config.SetValue("LLPreviewer/ColW0", outfitList->GetColumnWidth(0));
+		Config.SetValue("LLPreviewer/ColW1", outfitList->GetColumnWidth(1));
+		Config.SetValue("LLPreviewer/ColW2", outfitList->GetColumnWidth(2));
+	}
+
+	int ret = Config.SaveConfig(Config["AppDir"] + "/Config.xml");
+	if (ret)
+		wxLogWarning("LeveledListPreviewer: failed to save Config.xml (%d).", ret);
 
 	Destroy();
 	if (app)

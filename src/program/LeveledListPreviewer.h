@@ -37,6 +37,7 @@ class LeveledListPreviewer : public wxFrame {
 	bool showBody = true;
 
 	// UI controls
+	wxSplitterWindow* splitter = nullptr;
 	wxSearchCtrl* searchCtrl = nullptr;
 	wxSpinCtrl* levelMinSpin = nullptr;
 	wxSpinCtrl* levelMaxSpin = nullptr;
