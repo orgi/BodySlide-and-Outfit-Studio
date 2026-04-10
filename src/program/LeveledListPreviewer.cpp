@@ -441,6 +441,20 @@ bool LeveledListPreviewer::LoadNifFromPath(const std::string& relativePath, cons
 		m->CreateBuffers();
 		AddNifShapeTextures(&nif, m->shapeName);
 		bodyShapeNames.push_back(m->shapeName);
+
+		// Extract partition body part IDs from NIF dismember skin
+		auto* shape = nif.FindBlockByName<NiShape>(shapeName);
+		if (shape) {
+			NiVector<BSDismemberSkinInstance::PartitionInfo> partInfo;
+			std::vector<int> triParts;
+			if (nif.GetShapePartitions(shape, partInfo, triParts)) {
+				std::set<uint16_t> partIds;
+				for (size_t i = 0; i < partInfo.size(); ++i)
+					partIds.insert(partInfo[i].partID);
+				bodyShapePartMap[m->shapeName] = std::move(partIds);
+				wxLogMessage("  Body shape '%s' partition IDs: %zu entries", m->shapeName, bodyShapePartMap[m->shapeName].size());
+			}
+		}
 	}
 
 	return true;
@@ -454,23 +468,16 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 	bodyShapePartMap.clear();
 
 	// Always load body from game data — correct textures and consistent with outfits.
+	// Body part IDs are read from NIF partition data by LoadNifFromPath.
 	const std::string suffix = useHighWeight ? "_1.nif" : "_0.nif";
-	struct PartDef {
-		std::string path;
-		BodyPartType type;
+	std::vector<std::string> bodyNifs = {
+		"meshes/actors/character/character assets/femalebody" + suffix,
+		"meshes/actors/character/character assets/femalehands" + suffix,
+		"meshes/actors/character/character assets/femalefeet" + suffix,
 	};
-	std::vector<PartDef> bodyParts = {
-		{"meshes/actors/character/character assets/femalebody" + suffix, BP_BODY},
-		{"meshes/actors/character/character assets/femalehands" + suffix, BP_HANDS},
-		{"meshes/actors/character/character assets/femalefeet" + suffix, BP_FEET},
-	};
-	for (auto& part : bodyParts) {
-		size_t before = bodyShapeNames.size();
-		if (!LoadNifFromPath(part.path))
-			wxLogMessage("LeveledListPreviewer: Body part not found: %s", part.path);
-		// Tag newly added shapes with their body part type
-		for (size_t i = before; i < bodyShapeNames.size(); ++i)
-			bodyShapePartMap[bodyShapeNames[i]] = part.type;
+	for (auto& nifPath : bodyNifs) {
+		if (!LoadNifFromPath(nifPath))
+			wxLogMessage("LeveledListPreviewer: Body part not found: %s", nifPath);
 	}
 
 	if (bodyShapeNames.empty())
@@ -482,8 +489,8 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 		if (!baseGamePath.empty() && baseGamePath.back() != '/' && baseGamePath.back() != '\\')
 			baseGamePath += '/';
 
-		for (auto& [name, partType] : bodyShapePartMap) {
-			if (partType != BP_BODY)
+		for (auto& [name, partIds] : bodyShapePartMap) {
+			if (!partIds.count(32)) // SBP_32_BODY
 				continue;
 
 			Mesh* m = gls.GetMesh(name);
@@ -711,36 +718,29 @@ void LeveledListPreviewer::OnHeadEntered(wxCommandEvent& WXUNUSED(event)) {
 	hasNpcSkinTextures = false;
 	npcSkinTextures = {};
 
-	// First try WNAM from cached ESP data (picks up mod overrides)
-	uint32_t wnam = 0;
-	auto& skinCache = data.GetNpcSkinCache();
-	auto skinIt = skinCache.find(npc.editorId);
-	if (skinIt != skinCache.end())
-		wnam = skinIt->second;
-	// Fallback to the vanilla NPC's own WNAM
-	if (wnam == 0)
-		wnam = npc.wnamFormId;
+	// Use the all-plugins scanner to find the definitive WNAM for this NPC
+	npcSkinTextures = data.ResolveSkinTexturesForNPC(npc.editorId);
 
-	if (wnam != 0) {
-		npcSkinTextures = data.ResolveSkinTextures(wnam);
-		if (!npcSkinTextures[0].empty()) {
-			hasNpcSkinTextures = true;
-			wxLogMessage("LeveledListPreviewer: NPC '%s' skin texture resolved: %s", npc.editorId, npcSkinTextures[0]);
+	// Fallback: try the vanilla NPC's own WNAM via the master cache
+	if (npcSkinTextures[0].empty() && npc.wnamFormId != 0)
+		npcSkinTextures = data.ResolveSkinTextures(npc.wnamFormId);
 
-			// Re-apply skin textures to existing body meshes
-			if (!bodyShapeNames.empty()) {
-				// Reload body to apply new skin textures
-				if (canvas && context)
-					canvas->SetCurrent(*context);
-				for (auto& name : bodyShapeNames)
-					gls.DeleteMesh(name);
-				bodyShapeNames.clear();
-				bodyRefVerts.clear();
-				bodyRefUVs.clear();
-				bodyGameVerts.clear();
-				bodyShapeMorphMap.clear();
-				LoadBodyMeshes();
-			}
+	if (!npcSkinTextures[0].empty()) {
+		hasNpcSkinTextures = true;
+		wxLogMessage("LeveledListPreviewer: NPC '%s' skin texture resolved: %s", npc.editorId, npcSkinTextures[0]);
+
+		// Re-apply skin textures to existing body meshes
+		if (!bodyShapeNames.empty()) {
+			if (canvas && context)
+				canvas->SetCurrent(*context);
+			for (auto& name : bodyShapeNames)
+				gls.DeleteMesh(name);
+			bodyShapeNames.clear();
+			bodyRefVerts.clear();
+			bodyRefUVs.clear();
+			bodyGameVerts.clear();
+			bodyShapeMorphMap.clear();
+			LoadBodyMeshes();
 		}
 	}
 }
@@ -1115,7 +1115,19 @@ void LeveledListPreviewer::OnHighWeightChanged(wxCommandEvent& event) {
 		return;
 	}
 
-	// No preset active (or no morph maps) — full reload needed for correct verts
+	// No preset active (or no morph maps) — full reload of body and outfit needed
+	// for correct weight variant NIFs.
+	{
+		long sel = outfitList ? outfitList->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED) : -1;
+		if (sel >= 0 && sel < static_cast<long>(filteredOutfits.size())) {
+			// Reload entire outfit (which also reloads body)
+			LoadOutfitMeshes(*filteredOutfits[sel]);
+			gls.RenderOneFrame();
+			return;
+		}
+	}
+
+	// Fallback: no outfit selected, just reload body
 	for (auto& name : bodyShapeNames)
 		gls.DeleteMesh(name);
 	bodyShapeNames.clear();
@@ -1125,10 +1137,6 @@ void LeveledListPreviewer::OnHighWeightChanged(wxCommandEvent& event) {
 	bodyShapeMorphMap.clear();
 
 	LoadBodyMeshes();
-
-	// Re-apply preset to outfit at new weight
-	if (presetActive)
-		ApplyPresetToOutfit(currentPresetName);
 
 	gls.RenderOneFrame();
 }
@@ -1218,9 +1226,25 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 
 		wxLogMessage("  Piece '%s' [%08X]: nifPath=%s", piece.name, piece.formId, piece.nifPath);
 
-		std::string resolvedPath = data.ResolveNifPath(piece.nifPath);
+		// When in low weight mode, try the _0.nif variant of the piece
+		std::string piecePath = piece.nifPath;
+		if (!useHighWeight && piecePath.size() > 6) {
+			std::string ending = piecePath.substr(piecePath.size() - 6);
+			std::string endingLower = ending;
+			std::transform(endingLower.begin(), endingLower.end(), endingLower.begin(), ::tolower);
+			if (endingLower == "_1.nif") {
+				std::string lowPath = piecePath.substr(0, piecePath.size() - 6) + "_0.nif";
+				std::string resolvedLow = data.ResolveNifPath(lowPath);
+				if (!resolvedLow.empty()) {
+					piecePath = lowPath;
+					wxLogMessage("  Using low weight variant: %s", piecePath);
+				}
+			}
+		}
+
+		std::string resolvedPath = data.ResolveNifPath(piecePath);
 		if (resolvedPath.empty()) {
-			wxLogWarning("  NIF not found: %s", piece.nifPath);
+			wxLogWarning("  NIF not found: %s", piecePath);
 			continue;
 		}
 
@@ -1231,12 +1255,12 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 		std::string fullPath = resolvedPath;
 
 		// If resolvedPath is relative (from archive), try loading from archive
-		if (resolvedPath == piece.nifPath) {
+		if (resolvedPath == piecePath) {
 			// Try loading from BSA/BA2
 			for (FSArchiveFile* archive : FSManager::archiveList()) {
-				if (archive && archive->hasFile(piece.nifPath)) {
+				if (archive && archive->hasFile(piecePath)) {
 					wxMemoryBuffer outData;
-					archive->fileContents(piece.nifPath, outData);
+					archive->fileContents(piecePath, outData);
 					if (!outData.IsEmpty()) {
 						std::string content(static_cast<char*>(outData.GetData()), outData.GetDataLen());
 						std::istringstream stream(content, std::istringstream::binary);
@@ -1338,22 +1362,23 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	if (!outfitShapeMorphMap.empty() && !currentPresetName.empty() && currentPresetName != "(none)")
 		ApplyPresetToOutfit(currentPresetName);
 
-	// Auto-hide body parts that are covered by outfit pieces
+	// Auto-hide base body parts whose partition IDs are covered by outfit
+	// pieces.  Skyrim replaces the base body with the outfit's own body
+	// meshes, so when an outfit covers slot N, any base-body shape that
+	// has partition N should be hidden (the outfit provides its own).
 	if (showBody && !bodyShapePartMap.empty()) {
 		std::set<int> coveredSlots;
 		for (auto& piece : outfit.pieces)
 			for (int slot : piece.bodySlots)
 				coveredSlots.insert(slot);
 
-		for (auto& [shapeName, partType] : bodyShapePartMap) {
-			bool hide = false;
-			if (partType == BP_HANDS && coveredSlots.count(33))
-				hide = true;
-			else if (partType == BP_FEET && coveredSlots.count(37))
-				hide = true;
-			if (hide) {
-				wxLogMessage("  Auto-hiding body part '%s' (covered by outfit)", shapeName);
-				gls.SetMeshVisibility(shapeName, false);
+		for (auto& [shapeName, partIds] : bodyShapePartMap) {
+			for (uint16_t pid : partIds) {
+				if (coveredSlots.count(pid)) {
+					wxLogMessage("  Auto-hiding base body '%s' (partition %u covered by outfit)", shapeName, pid);
+					gls.SetMeshVisibility(shapeName, false);
+					break;
+				}
 			}
 		}
 	}
@@ -1364,6 +1389,27 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 		for (auto& npc : npcs) {
 			if (npc.editorId == currentHeadEditorId) {
 				LoadHeadMesh(npc);
+
+				// Resolve NPC skin textures if not yet done
+				if (!hasNpcSkinTextures) {
+					npcSkinTextures = data.ResolveSkinTexturesForNPC(npc.editorId);
+					if (npcSkinTextures[0].empty() && npc.wnamFormId != 0)
+						npcSkinTextures = data.ResolveSkinTextures(npc.wnamFormId);
+					if (!npcSkinTextures[0].empty()) {
+						hasNpcSkinTextures = true;
+						wxLogMessage("LeveledListPreviewer: NPC '%s' skin texture resolved (deferred): %s", npc.editorId, npcSkinTextures[0]);
+						// Body meshes already loaded above — need to reload with skin textures
+						for (auto& name : bodyShapeNames)
+							gls.DeleteMesh(name);
+						bodyShapeNames.clear();
+						bodyRefVerts.clear();
+						bodyRefUVs.clear();
+						bodyGameVerts.clear();
+						bodyShapeMorphMap.clear();
+						bodyShapePartMap.clear();
+						LoadBodyMeshes();
+					}
+				}
 				break;
 			}
 		}

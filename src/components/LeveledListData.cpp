@@ -428,6 +428,9 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 	lvliCache.clear();
 	otftCache.clear();
 	npcSkinCache.clear();
+	npcSkinOverrides.clear();
+	npcSkinsScanned = false;
+	espMasters.clear();
 	loadInfo.clear();
 
 	espDirectory = DirectoryOf(filepath);
@@ -444,6 +447,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 	// or from the game data path.
 	// Also load NPC_ records from masters for skin texture resolution.
 	auto masters = mainReader.GetMasters();
+	espMasters = masters; // Store for FormID remapping in skin texture resolution
 	int mastersLoaded = 0;
 	for (size_t mi = 0; mi < masters.size(); ++mi) {
 		auto& masterName = masters[mi];
@@ -763,6 +767,291 @@ std::array<std::string, 8> LeveledListData::ResolveSkinTextures(uint32_t wnamFor
 	}
 
 	wxLogMessage("ResolveSkinTextures: No body ARMA with textures found for WNAM %08X", wnamFormId);
+	return textures;
+}
+
+// ---------------------------------------------------------------------------
+// ScanAllPluginsForNpcSkins — scan every ESP/ESM in Data dir for NPC_ WNAM
+// ---------------------------------------------------------------------------
+
+void LeveledListData::ScanAllPluginsForNpcSkins() {
+	npcSkinOverrides.clear();
+	npcSkinsScanned = true;
+
+	if (baseDataPath.empty()) {
+		wxLogMessage("ScanAllPluginsForNpcSkins: no baseDataPath set");
+		return;
+	}
+
+	// Build lookup: lowercase master name → index in espMasters
+	std::unordered_map<std::string, uint8_t> masterNameToIdx;
+	for (size_t i = 0; i < espMasters.size(); ++i)
+		masterNameToIdx[ToLower(espMasters[i])] = static_cast<uint8_t>(i);
+
+	// Scan all plugin files in Data directory
+	wxArrayString pluginFiles;
+	wxDir::GetAllFiles(wxString::FromUTF8(baseDataPath), &pluginFiles, "*.esp", wxDIR_FILES);
+	wxDir::GetAllFiles(wxString::FromUTF8(baseDataPath), &pluginFiles, "*.esm", wxDIR_FILES);
+	wxDir::GetAllFiles(wxString::FromUTF8(baseDataPath), &pluginFiles, "*.esl", wxDIR_FILES);
+
+	size_t pluginsWithNpcs = 0;
+
+	for (auto& pluginWx : pluginFiles) {
+		std::string pluginPath = pluginWx.ToStdString();
+
+		esp::ESPReader reader;
+		if (!reader.Load(pluginPath, {"NPC_"}))
+			continue;
+
+		auto npcs = reader.GetNPCs();
+		if (npcs.empty())
+			continue;
+		++pluginsWithNpcs;
+
+		auto& srcMasters = reader.GetMasters();
+		uint8_t selfIdx = static_cast<uint8_t>(srcMasters.size());
+
+		// Check if this ESP is itself a master of the generated ESP
+		std::string pluginName = wxFileName(pluginWx).GetFullName().ToStdString();
+		auto selfMasterIt = masterNameToIdx.find(ToLower(pluginName));
+		bool isMaster = (selfMasterIt != masterNameToIdx.end());
+		uint8_t selfMasterIdx = isMaster ? selfMasterIt->second : 0;
+
+		// Build remap: source ESP master idx → generated ESP master idx
+		std::unordered_map<uint8_t, uint8_t> masterRemap;
+		for (size_t i = 0; i < srcMasters.size(); ++i) {
+			auto it = masterNameToIdx.find(ToLower(srcMasters[i]));
+			if (it != masterNameToIdx.end())
+				masterRemap[static_cast<uint8_t>(i)] = it->second;
+		}
+
+		for (auto& npc : npcs) {
+			if (npc.editorId.empty() || npc.wnamFormId == 0)
+				continue;
+
+			uint8_t topByte = (npc.wnamFormId >> 24) & 0xFF;
+			uint32_t baseId = npc.wnamFormId & 0x00FFFFFF;
+
+			NpcSkinInfo info;
+			info.sourcePlugin = pluginPath;
+
+			if (topByte == selfIdx) {
+				// Self-defined ARMO
+				if (isMaster) {
+					// This ESP is a master of the generated ESP → can remap
+					info.remappedWnam = (static_cast<uint32_t>(selfMasterIdx) << 24) | baseId;
+					info.selfDefined = false;
+				}
+				else {
+					// Not a master → need on-demand loading
+					info.wnamRaw = npc.wnamFormId;
+					info.selfDefined = true;
+				}
+			}
+			else {
+				// References a master
+				auto remapIt = masterRemap.find(topByte);
+				if (remapIt != masterRemap.end()) {
+					info.remappedWnam = (static_cast<uint32_t>(remapIt->second) << 24) | baseId;
+					info.selfDefined = false;
+				}
+				else {
+					// Can't remap — store raw and resolve on demand
+					info.wnamRaw = npc.wnamFormId;
+					info.selfDefined = true;
+				}
+			}
+
+			// Last writer wins (later plugins override earlier ones)
+			npcSkinOverrides[npc.editorId] = info;
+		}
+	}
+
+	wxLogMessage("ScanAllPluginsForNpcSkins: scanned %zu plugins (%zu with NPCs), %zu NPC skin overrides", pluginFiles.size(), pluginsWithNpcs, npcSkinOverrides.size());
+}
+
+// ---------------------------------------------------------------------------
+// ResolveSkinTexturesForNPC — on-demand skin texture resolution per NPC
+// ---------------------------------------------------------------------------
+
+std::array<std::string, 8> LeveledListData::ResolveSkinTexturesForNPC(const std::string& npcEditorId) {
+	std::array<std::string, 8> textures{};
+
+	// Lazy scan: first call triggers the all-plugins scan
+	if (!npcSkinsScanned)
+		ScanAllPluginsForNpcSkins();
+
+	auto ovIt = npcSkinOverrides.find(npcEditorId);
+	if (ovIt == npcSkinOverrides.end())
+		return textures;
+
+	auto& info = ovIt->second;
+
+	// If WNAM was remapped to main cache space, use the existing cache-based resolver
+	if (!info.selfDefined) {
+		textures = ResolveSkinTextures(info.remappedWnam);
+		if (!textures[0].empty())
+			wxLogMessage("ResolveSkinTexturesForNPC: NPC '%s' resolved from cache (WNAM %08X): %s", npcEditorId, info.remappedWnam, textures[0]);
+		return textures;
+	}
+
+	// Self-defined WNAM from a non-master ESP — load the source ESP on demand
+	wxLogMessage("ResolveSkinTexturesForNPC: loading '%s' for NPC '%s' WNAM raw=%08X",
+				 wxFileName(wxString::FromUTF8(info.sourcePlugin)).GetFullName().ToStdString(),
+				 npcEditorId,
+				 info.wnamRaw);
+
+	esp::ESPReader reader;
+	if (!reader.Load(info.sourcePlugin, {"ARMO", "ARMA", "TXST"})) {
+		wxLogMessage("ResolveSkinTexturesForNPC: failed to load %s", info.sourcePlugin);
+		return textures;
+	}
+
+	auto armors = reader.GetArmors();
+	auto armorAddons = reader.GetArmorAddons();
+	auto texSets = reader.GetTextureSets();
+
+	// Build local lookups indexed by raw FormID
+	std::unordered_map<uint32_t, size_t> localArmos, localArmas, localTxsts;
+	for (size_t i = 0; i < armors.size(); ++i)
+		localArmos[armors[i].formId] = i;
+	for (size_t i = 0; i < armorAddons.size(); ++i)
+		localArmas[armorAddons[i].formId] = i;
+	for (size_t i = 0; i < texSets.size(); ++i)
+		localTxsts[texSets[i].formId] = i;
+
+	// Build remap for cross-references to masters (source ESP master → espMasters index)
+	auto& srcMasters = reader.GetMasters();
+	uint8_t selfIdx = static_cast<uint8_t>(srcMasters.size());
+
+	std::unordered_map<std::string, uint8_t> masterNameToIdx;
+	for (size_t i = 0; i < espMasters.size(); ++i)
+		masterNameToIdx[ToLower(espMasters[i])] = static_cast<uint8_t>(i);
+
+	std::unordered_map<uint8_t, uint8_t> masterRemap;
+	for (size_t i = 0; i < srcMasters.size(); ++i) {
+		auto it = masterNameToIdx.find(ToLower(srcMasters[i]));
+		if (it != masterNameToIdx.end())
+			masterRemap[static_cast<uint8_t>(i)] = it->second;
+	}
+
+	// Remap a raw FormID from source ESP space → main cache space.
+	// Returns 0 for self-defined records (must use local lookup).
+	auto toMainCache = [&](uint32_t fid) -> uint32_t {
+		uint8_t top = (fid >> 24) & 0xFF;
+		if (top == selfIdx)
+			return 0; // self-defined, use local lookup
+		uint32_t base = fid & 0x00FFFFFF;
+		auto it = masterRemap.find(top);
+		if (it != masterRemap.end())
+			return (static_cast<uint32_t>(it->second) << 24) | base;
+		return 0; // can't remap
+	};
+
+	// Step 1: Find WNAM ARMO
+	uint32_t wnamFid = info.wnamRaw;
+	const std::vector<uint32_t>* espArmaIds = nullptr;
+	const std::vector<uint32_t>* cacheArmaIds = nullptr;
+
+	auto lArmoIt = localArmos.find(wnamFid);
+	if (lArmoIt != localArmos.end()) {
+		espArmaIds = &armors[lArmoIt->second].armatureIds;
+	}
+	if (!espArmaIds || espArmaIds->empty()) {
+		uint32_t remapped = toMainCache(wnamFid);
+		if (remapped != 0) {
+			auto cIt = armoCache.find(remapped);
+			if (cIt != armoCache.end())
+				cacheArmaIds = &cIt->second.armatureIds;
+		}
+	}
+
+	if ((!espArmaIds || espArmaIds->empty()) && (!cacheArmaIds || cacheArmaIds->empty())) {
+		wxLogMessage("ResolveSkinTexturesForNPC: ARMO not found for WNAM %08X", wnamFid);
+		return textures;
+	}
+
+	// Collect all ARMA IDs to check
+	std::vector<uint32_t> allArmaIds;
+	if (espArmaIds && !espArmaIds->empty())
+		allArmaIds.insert(allArmaIds.end(), espArmaIds->begin(), espArmaIds->end());
+	if (cacheArmaIds && !cacheArmaIds->empty())
+		allArmaIds.insert(allArmaIds.end(), cacheArmaIds->begin(), cacheArmaIds->end());
+
+	// Step 2: Find body ARMA (slot 32) with alternate textures
+	for (uint32_t armaId : allArmaIds) {
+		// Try local ARMA first
+		auto lArmaIt = localArmas.find(armaId);
+		if (lArmaIt != localArmas.end()) {
+			auto& arma = armorAddons[lArmaIt->second];
+			if (!(arma.bodySlotFlags & (1u << 2)))
+				continue;
+
+			auto& altTex = arma.altTexFemale.empty() ? arma.altTexMale : arma.altTexFemale;
+			if (altTex.empty())
+				continue;
+
+			for (auto& at : altTex) {
+				// Try local TXST
+				auto lTxIt = localTxsts.find(at.texSetFormId);
+				if (lTxIt != localTxsts.end()) {
+					auto& ts = texSets[lTxIt->second];
+					for (int i = 0; i < 8; ++i)
+						if (!ts.textures[i].empty())
+							textures[i] = ts.textures[i];
+					if (!textures[0].empty()) {
+						wxLogMessage("ResolveSkinTexturesForNPC: found textures (local): %s", textures[0]);
+						return textures;
+					}
+				}
+				// Try main cache TXST
+				uint32_t remapped = toMainCache(at.texSetFormId);
+				if (remapped != 0) {
+					auto cIt = txstCache.find(remapped);
+					if (cIt != txstCache.end()) {
+						for (int i = 0; i < 8; ++i)
+							if (!cIt->second.textures[i].empty())
+								textures[i] = cIt->second.textures[i];
+						if (!textures[0].empty()) {
+							wxLogMessage("ResolveSkinTexturesForNPC: found textures (cached TXST): %s", textures[0]);
+							return textures;
+						}
+					}
+				}
+			}
+			continue;
+		}
+
+		// Try main cache ARMA
+		uint32_t remapped = toMainCache(armaId);
+		if (remapped != 0) {
+			auto cArmaIt = armaCache.find(remapped);
+			if (cArmaIt != armaCache.end()) {
+				auto& cachedArma = cArmaIt->second;
+				if (!(cachedArma.bodySlotFlags & (1u << 2)))
+					continue;
+
+				auto& altTex = cachedArma.altTexFemale.empty() ? cachedArma.altTexMale : cachedArma.altTexFemale;
+				if (altTex.empty())
+					continue;
+
+				for (auto& at : altTex) {
+					auto tIt = txstCache.find(at.txstFormId);
+					if (tIt != txstCache.end()) {
+						for (int i = 0; i < 8; ++i)
+							if (!tIt->second.textures[i].empty())
+								textures[i] = tIt->second.textures[i];
+						if (!textures[0].empty()) {
+							wxLogMessage("ResolveSkinTexturesForNPC: found textures (cached ARMA+TXST): %s", textures[0]);
+							return textures;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	wxLogMessage("ResolveSkinTexturesForNPC: no body textures found for '%s'", npcEditorId);
 	return textures;
 }
 

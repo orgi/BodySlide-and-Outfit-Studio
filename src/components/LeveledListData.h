@@ -94,6 +94,25 @@ public:
 	/// Get NPC skin cache (editorId -> remapped WNAM FormID from ESP masters).
 	const std::unordered_map<std::string, uint32_t>& GetNpcSkinCache() const { return npcSkinCache; }
 
+	/// Info about an NPC's skin override found by scanning all plugins.
+	struct NpcSkinInfo {
+		uint32_t remappedWnam = 0; // WNAM remapped to espMasters index space (when !selfDefined)
+		uint32_t wnamRaw = 0;	   // WNAM raw FormID from source ESP (when selfDefined)
+		std::string sourcePlugin;  // Full path to the ESP that defines this NPC/WNAM
+		bool selfDefined = false;  // true = WNAM is self-defined in a non-master ESP
+	};
+
+	/// Scan ALL plugins in the Data directory for NPC_ WNAM overrides.
+	/// Populates npcSkinOverrides. Call after LoadESP() and LoadNPCs().
+	void ScanAllPluginsForNpcSkins();
+
+	/// Resolve skin textures for a specific NPC by editorId.
+	/// Uses the pre-scanned plugin data for on-demand ESP loading when needed.
+	std::array<std::string, 8> ResolveSkinTexturesForNPC(const std::string& npcEditorId);
+
+	/// Get NPC skin overrides map (editorId -> skin info from all plugins).
+	const std::unordered_map<std::string, NpcSkinInfo>& GetNpcSkinOverrides() const { return npcSkinOverrides; }
+
 private:
 	/// Load records from a single ESP/ESM into the caches.
 	/// masterIndex: the index of this file in the main ESP's master list.
@@ -120,7 +139,10 @@ private:
 	std::unordered_map<uint32_t, struct CachedTXST> txstCache;
 	std::unordered_map<uint32_t, struct CachedLVLI> lvliCache;
 	std::unordered_map<uint32_t, struct CachedOTFT> otftCache;
-	std::unordered_map<std::string, uint32_t> npcSkinCache; // editorId → remapped WNAM FormID
+	std::unordered_map<std::string, uint32_t> npcSkinCache;		   // editorId → remapped WNAM FormID
+	std::unordered_map<std::string, NpcSkinInfo> npcSkinOverrides; // editorId → skin info from all plugins
+	std::vector<std::string> espMasters;						   // Master list of the loaded generated ESP
+	bool npcSkinsScanned = false;
 };
 
 // Internal cache structs (defined in .cpp)

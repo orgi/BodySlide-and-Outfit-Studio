@@ -13,7 +13,9 @@
 #include "../render/GLSurface.h"
 #include "../utils/ConfigurationManager.h"
 
-#include <array>\n#include <memory>
+#include <array>
+#include <memory>
+#include <set>
 #include <wx/combobox.h>
 #include <wx/fswatcher.h>
 #include <wx/listctrl.h>
@@ -42,9 +44,9 @@ class LeveledListPreviewer : public wxFrame {
 	bool showUntextured = false;
 	bool showBody = true;
 
-	// Body part tracking for auto-hiding (0=body, 1=hands, 2=feet)
-	enum BodyPartType : uint8_t { BP_BODY = 0, BP_HANDS = 1, BP_FEET = 2 };
-	std::unordered_map<std::string, BodyPartType> bodyShapePartMap;
+	// Body part tracking: shape name → set of NIF partition body part IDs
+	// (e.g. 32=SBP_32_BODY, 33=SBP_33_HANDS, 37=SBP_37_FEET)
+	std::unordered_map<std::string, std::set<uint16_t>> bodyShapePartMap;
 
 	// UI controls
 	wxSplitterWindow* splitter = nullptr;
