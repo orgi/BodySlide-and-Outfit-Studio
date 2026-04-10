@@ -195,6 +195,7 @@ void LeveledListData::LoadNPCs() {
 			entry.editorId = npc.editorId;
 			entry.formId = npc.formId;
 			entry.plugin = vanillaESMs[i];
+			entry.wnamFormId = npc.wnamFormId;
 
 			// FULL is LSTRING for most vanilla NPCs; show inline name when available
 			if (!npc.fullName.empty() && npc.fullName[0] != '[')
@@ -291,6 +292,7 @@ void LeveledListData::LoadRecordsFromESP(const std::string& filepath, const std:
 		cam.editorId = aa.editorId;
 		cam.modelMale = aa.modelMale;
 		cam.modelFemale = aa.modelFemale;
+		cam.bodySlotFlags = aa.bodySlotFlags;
 		for (auto& at : aa.altTexFemale) {
 			CachedAlternateTexture cat;
 			cat.shapeName = at.shapeName;
@@ -318,6 +320,14 @@ void LeveledListData::LoadRecordsFromESP(const std::string& filepath, const std:
 		for (int i = 0; i < 8; ++i)
 			ct.textures[i] = ts.textures[i];
 		txstCache.emplace(remappedId, std::move(ct));
+	}
+
+	// Cache NPC_ WNAM references (editorId → remapped WNAM FormID)
+	for (auto& npc : reader.GetNPCs()) {
+		if (npc.editorId.empty() || npc.wnamFormId == 0)
+			continue;
+		// Always overwrite: later masters/plugins take priority
+		npcSkinCache[npc.editorId] = remapFid(npc.wnamFormId);
 	}
 }
 
@@ -425,6 +435,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 	txstCache.clear();
 	lvliCache.clear();
 	otftCache.clear();
+	npcSkinCache.clear();
 	loadInfo.clear();
 
 	espDirectory = DirectoryOf(filepath);
@@ -439,6 +450,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 	// Load master files (in order, so FormID indices are correct)
 	// Masters are loaded from the same directory as the main ESP,
 	// or from the game data path.
+	// Also load NPC_ records from masters for skin texture resolution.
 	auto masters = mainReader.GetMasters();
 	int mastersLoaded = 0;
 	for (size_t mi = 0; mi < masters.size(); ++mi) {
@@ -448,7 +460,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 		// Try same directory as the ESP
 		std::string masterPath = espDirectory + masterName;
 		if (wxFileName::FileExists(masterPath)) {
-			LoadRecordsFromESP(masterPath, {"ARMO", "ARMA", "TXST"}, masterIdx, masters);
+			LoadRecordsFromESP(masterPath, {"ARMO", "ARMA", "TXST", "NPC_"}, masterIdx, masters);
 			++mastersLoaded;
 			continue;
 		}
@@ -457,7 +469,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 		if (!baseDataPath.empty()) {
 			masterPath = baseDataPath + masterName;
 			if (wxFileName::FileExists(masterPath)) {
-				LoadRecordsFromESP(masterPath, {"ARMO", "ARMA", "TXST"}, masterIdx, masters);
+				LoadRecordsFromESP(masterPath, {"ARMO", "ARMA", "TXST", "NPC_"}, masterIdx, masters);
 				++mastersLoaded;
 				continue;
 			}
@@ -491,6 +503,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 		cam.editorId = aa.editorId;
 		cam.modelMale = aa.modelMale;
 		cam.modelFemale = aa.modelFemale;
+		cam.bodySlotFlags = aa.bodySlotFlags;
 		for (auto& at : aa.altTexFemale) {
 			CachedAlternateTexture cat;
 			cat.shapeName = at.shapeName;
@@ -705,6 +718,61 @@ std::string LeveledListData::ResolveNifPath(const std::string& relativePath) con
 	}
 
 	return {};
+}
+
+// ---------------------------------------------------------------------------
+// Skin texture resolution for NPC body display
+// ---------------------------------------------------------------------------
+
+std::array<std::string, 8> LeveledListData::ResolveSkinTextures(uint32_t wnamFormId) const {
+	std::array<std::string, 8> textures{};
+	if (wnamFormId == 0)
+		return textures;
+
+	auto armoIt = armoCache.find(wnamFormId);
+	if (armoIt == armoCache.end()) {
+		wxLogMessage("ResolveSkinTextures: WNAM ARMO %08X not in cache", wnamFormId);
+		return textures;
+	}
+
+	auto& armo = armoIt->second;
+
+	// Find an ARMA covering body slot 32 (bit 2)
+	for (uint32_t armaId : armo.armatureIds) {
+		auto armaIt = armaCache.find(armaId);
+		if (armaIt == armaCache.end())
+			continue;
+
+		auto& arma = armaIt->second;
+		if (!(arma.bodySlotFlags & (1u << 2))) // bit 2 = slot 32 = Body
+			continue;
+
+		// Use female alternate textures (fallback to male)
+		auto& altTexList = arma.altTexFemale.empty() ? arma.altTexMale : arma.altTexFemale;
+		if (altTexList.empty()) {
+			// No alternate textures — try the ARMA's own model NIF textures
+			// This is the common case for vanilla skin ARMAs
+			wxLogMessage("ResolveSkinTextures: ARMA %08X has body slot but no alt textures", armaId);
+			continue;
+		}
+
+		for (auto& at : altTexList) {
+			auto txstIt = txstCache.find(at.txstFormId);
+			if (txstIt == txstCache.end())
+				continue;
+
+			for (int i = 0; i < 8; ++i) {
+				if (!txstIt->second.textures[i].empty())
+					textures[i] = txstIt->second.textures[i];
+			}
+			wxLogMessage("ResolveSkinTextures: Found body textures from ARMA %08X (%s), TXST %08X (%s): diffuse='%s'",
+						 armaId, arma.editorId, at.txstFormId, txstIt->second.editorId, textures[0]);
+			return textures;
+		}
+	}
+
+	wxLogMessage("ResolveSkinTextures: No body ARMA with textures found for WNAM %08X", wnamFormId);
+	return textures;
 }
 
 } // namespace lldata

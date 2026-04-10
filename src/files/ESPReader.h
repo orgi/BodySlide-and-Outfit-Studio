@@ -127,6 +127,7 @@ struct NPCRecord {
 	uint32_t formId = 0;
 	std::string editorId;
 	std::string fullName;
+	uint32_t wnamFormId = 0; // WNAM: skin/worn armor FormID
 };
 
 // ---------------------------------------------------------------------------

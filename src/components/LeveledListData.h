@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <set>
 #include <string>
@@ -21,7 +22,8 @@ struct NPCEntry {
 	std::string displayName; // "EditorID" or "Full Name [EditorID]"
 	std::string editorId;
 	uint32_t formId = 0;
-	std::string plugin; // e.g. "Skyrim.esm"
+	std::string plugin;       // e.g. "Skyrim.esm"
+	uint32_t wnamFormId = 0;  // WNAM: skin/worn armor FormID (0 = use race default)
 };
 
 /// Per-shape texture override from ARMA MO3S alternate textures.
@@ -85,6 +87,13 @@ public:
 	/// Get the loaded ESP filename.
 	const std::string& GetFilename() const { return espFilename; }
 
+	/// Resolve body skin textures for an NPC's WNAM (skin armor FormID).
+	/// Returns an array of 8 texture paths (TX00-TX07), empty strings for unresolved slots.
+	std::array<std::string, 8> ResolveSkinTextures(uint32_t wnamFormId) const;
+
+	/// Get NPC skin cache (editorId -> remapped WNAM FormID from ESP masters).
+	const std::unordered_map<std::string, uint32_t>& GetNpcSkinCache() const { return npcSkinCache; }
+
 private:
 	/// Load records from a single ESP/ESM into the caches.
 	/// masterIndex: the index of this file in the main ESP's master list.
@@ -114,6 +123,7 @@ private:
 	std::unordered_map<uint32_t, struct CachedTXST> txstCache;
 	std::unordered_map<uint32_t, struct CachedLVLI> lvliCache;
 	std::unordered_map<uint32_t, struct CachedOTFT> otftCache;
+	std::unordered_map<std::string, uint32_t> npcSkinCache; // editorId → remapped WNAM FormID
 };
 
 // Internal cache structs (defined in .cpp)
@@ -138,6 +148,7 @@ struct CachedARMA {
 	std::string editorId;
 	std::string modelMale;    // MOD2 — male 3rd person worn mesh
 	std::string modelFemale;  // MOD3 — female 3rd person worn mesh
+	uint32_t bodySlotFlags = 0;
 	std::vector<CachedAlternateTexture> altTexFemale; // MO3S
 	std::vector<CachedAlternateTexture> altTexMale;   // MO2S
 };

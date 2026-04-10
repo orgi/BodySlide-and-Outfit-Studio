@@ -462,6 +462,13 @@ static NPCRecord ParseNPC(const Record& rec) {
 	npc.formId = rec.formId;
 	npc.editorId = rec.EditorId();
 	npc.fullName = rec.FullName();
+
+	// WNAM: skin/worn armor FormID
+	if (auto* wnam = rec.GetSubrecord("WNAM")) {
+		if (wnam->data.size() >= 4)
+			npc.wnamFormId = ReadLE<uint32_t>(wnam->data.data());
+	}
+
 	return npc;
 }
 

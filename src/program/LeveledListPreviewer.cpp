@@ -451,21 +451,82 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 	bodyRefUVs.clear();
 	bodyGameVerts.clear();
 	bodyShapeMorphMap.clear();
+	bodyShapePartMap.clear();
 
 	// Always load body from game data — correct textures and consistent with outfits.
 	const std::string suffix = useHighWeight ? "_1.nif" : "_0.nif";
-	std::vector<std::string> bodyParts = {
-		"meshes/actors/character/character assets/femalebody" + suffix,
-		"meshes/actors/character/character assets/femalehands" + suffix,
-		"meshes/actors/character/character assets/femalefeet" + suffix,
+	struct PartDef { std::string path; BodyPartType type; };
+	std::vector<PartDef> bodyParts = {
+		{"meshes/actors/character/character assets/femalebody" + suffix, BP_BODY},
+		{"meshes/actors/character/character assets/femalehands" + suffix, BP_HANDS},
+		{"meshes/actors/character/character assets/femalefeet" + suffix, BP_FEET},
 	};
 	for (auto& part : bodyParts) {
-		if (!LoadNifFromPath(part))
-			wxLogMessage("LeveledListPreviewer: Body part not found: %s", part);
+		size_t before = bodyShapeNames.size();
+		if (!LoadNifFromPath(part.path))
+			wxLogMessage("LeveledListPreviewer: Body part not found: %s", part.path);
+		// Tag newly added shapes with their body part type
+		for (size_t i = before; i < bodyShapeNames.size(); ++i)
+			bodyShapePartMap[bodyShapeNames[i]] = part.type;
 	}
 
 	if (bodyShapeNames.empty())
 		return;
+
+	// Apply NPC skin textures if available
+	if (hasNpcSkinTextures) {
+		std::string baseGamePath = Config["GameDataPath"];
+		if (!baseGamePath.empty() && baseGamePath.back() != '/' && baseGamePath.back() != '\\')
+			baseGamePath += '/';
+
+		for (auto& [name, partType] : bodyShapePartMap) {
+			if (partType != BP_BODY)
+				continue;
+
+			Mesh* m = gls.GetMesh(name);
+			if (!m)
+				continue;
+
+			// Build texture file list from NPC skin textures
+			const uint8_t MAX_TEX = 10;
+			std::vector<std::string> texFiles(MAX_TEX);
+			for (int i = 0; i < 8; ++i) {
+				if (npcSkinTextures[i].empty())
+					continue;
+				std::string tf = npcSkinTextures[i];
+				// Normalize path
+				std::replace(tf.begin(), tf.end(), '\\', '/');
+				if (tf.find("textures/") == std::string::npos)
+					tf = "textures/" + tf;
+				// Resolve
+				std::string fullPath = baseGamePath + tf;
+				if (wxFileName::FileExists(fullPath)) {
+					texFiles[i] = fullPath;
+				}
+				else {
+					std::string resolved = lldata::LeveledListData::ResolveCaseInsensitive(baseGamePath, tf);
+					texFiles[i] = resolved.empty() ? fullPath : resolved;
+				}
+			}
+
+			if (!texFiles[0].empty()) {
+				std::string vShader = Config["AppDir"] + "/res/shaders/default.vert";
+				std::string fShader = Config["AppDir"] + "/res/shaders/default.frag";
+				TargetGame targetGame = (TargetGame)Config.GetIntValue("TargetGame");
+				if (targetGame == FO4 || targetGame == FO4VR || targetGame == FO76) {
+					vShader = Config["AppDir"] + "/res/shaders/fo4_default.vert";
+					fShader = Config["AppDir"] + "/res/shaders/fo4_default.frag";
+				}
+				GLMaterial* glMat = gls.AddMaterial(texFiles, vShader, fShader);
+				if (glMat) {
+					m->material = glMat;
+					shapeMaterials[name] = glMat;
+					gls.UpdateShaders(m);
+					wxLogMessage("LeveledListPreviewer: Applied NPC skin texture to '%s': %s", name, texFiles[0]);
+				}
+			}
+		}
+	}
 
 	// Cache game body verts for reset to "(none)".
 	for (auto& name : bodyShapeNames) {
@@ -615,6 +676,8 @@ void LeveledListPreviewer::OnHeadEntered(wxCommandEvent& WXUNUSED(event)) {
 	if (text.empty()) {
 		ClearHeadMeshes();
 		currentHeadEditorId.clear();
+		hasNpcSkinTextures = false;
+		npcSkinTextures = {};
 		gls.RenderOneFrame();
 		return;
 	}
@@ -640,6 +703,43 @@ void LeveledListPreviewer::OnHeadEntered(wxCommandEvent& WXUNUSED(event)) {
 	auto& npc = data.GetNPCs()[it->second];
 	currentHeadEditorId = npc.editorId;
 	LoadHeadMesh(npc);
+
+	// Resolve NPC skin textures for body display
+	hasNpcSkinTextures = false;
+	npcSkinTextures = {};
+
+	// First try WNAM from cached ESP data (picks up mod overrides)
+	uint32_t wnam = 0;
+	auto& skinCache = data.GetNpcSkinCache();
+	auto skinIt = skinCache.find(npc.editorId);
+	if (skinIt != skinCache.end())
+		wnam = skinIt->second;
+	// Fallback to the vanilla NPC's own WNAM
+	if (wnam == 0)
+		wnam = npc.wnamFormId;
+
+	if (wnam != 0) {
+		npcSkinTextures = data.ResolveSkinTextures(wnam);
+		if (!npcSkinTextures[0].empty()) {
+			hasNpcSkinTextures = true;
+			wxLogMessage("LeveledListPreviewer: NPC '%s' skin texture resolved: %s", npc.editorId, npcSkinTextures[0]);
+
+			// Re-apply skin textures to existing body meshes
+			if (!bodyShapeNames.empty()) {
+				// Reload body to apply new skin textures
+				if (canvas && context)
+					canvas->SetCurrent(*context);
+				for (auto& name : bodyShapeNames)
+					gls.DeleteMesh(name);
+				bodyShapeNames.clear();
+				bodyRefVerts.clear();
+				bodyRefUVs.clear();
+				bodyGameVerts.clear();
+				bodyShapeMorphMap.clear();
+				LoadBodyMeshes();
+			}
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -683,7 +783,21 @@ void LeveledListPreviewer::LoadPresetList() {
 
 void LeveledListPreviewer::FindBodySliderProjects() {
 	bodyProjects.clear();
-	allSliderProjects.clear();
+
+	// Cache the full slider project scan across outfit changes.
+	// Only bodyProjects (body-specific subset) are rebuilt each time.
+	if (sliderProjectsCached) {
+		// Still need to identify body projects from cached allSliderProjects
+		static const std::set<std::string> bodyOutputFiles = {"femalebody", "femalehands", "femalefeet"};
+		for (auto& [normalizedOut, proj] : allSliderProjects) {
+			auto pos = normalizedOut.find_last_of('/');
+			std::string outFile = (pos != std::string::npos) ? normalizedOut.substr(pos + 1) : normalizedOut;
+			if (bodyOutputFiles.count(outFile))
+				bodyProjects.push_back(proj);
+		}
+		wxLogMessage("LeveledListPreviewer: %zu body projects (from cache of %zu total)", bodyProjects.size(), allSliderProjects.size());
+		return;
+	}
 
 	std::string projectPath = Config["ProjectPath"];
 	if (projectPath.empty())
@@ -750,6 +864,7 @@ void LeveledListPreviewer::FindBodySliderProjects() {
 	}
 
 	wxLogMessage("LeveledListPreviewer: Found %zu body slider project(s), %zu total slider projects", bodyProjects.size(), allSliderProjects.size());
+	sliderProjectsCached = true;
 }
 
 void LeveledListPreviewer::ApplyPresetToBody(const std::string& presetName) {
@@ -985,7 +1100,19 @@ void LeveledListPreviewer::OnHighWeightChanged(wxCommandEvent& event) {
 	if (canvas && context)
 		canvas->SetCurrent(*context);
 
-	// Remove old body meshes from GL
+	// Optimization: if a preset is active and morph maps are populated,
+	// we can just re-apply presets with the new weight slider set (slidersBig vs
+	// slidersSmall) without reloading body NIFs from disk. The mesh topology,
+	// UVs, and textures are identical between _0 and _1.
+	bool presetActive = !currentPresetName.empty() && currentPresetName != "(none)";
+	if (presetActive && !bodyShapeMorphMap.empty()) {
+		ApplyPresetToBody(currentPresetName);
+		ApplyPresetToOutfit(currentPresetName);
+		gls.RenderOneFrame();
+		return;
+	}
+
+	// No preset active (or no morph maps) — full reload needed for correct verts
 	for (auto& name : bodyShapeNames)
 		gls.DeleteMesh(name);
 	bodyShapeNames.clear();
@@ -994,11 +1121,10 @@ void LeveledListPreviewer::OnHighWeightChanged(wxCommandEvent& event) {
 	bodyGameVerts.clear();
 	bodyShapeMorphMap.clear();
 
-	// Reload body at new weight (handles both slider-project and fallback paths)
 	LoadBodyMeshes();
 
 	// Re-apply preset to outfit at new weight
-	if (!currentPresetName.empty() && currentPresetName != "(none)")
+	if (presetActive)
 		ApplyPresetToOutfit(currentPresetName);
 
 	gls.RenderOneFrame();
@@ -1042,15 +1168,33 @@ void LeveledListPreviewer::OnOutfitSelected(wxListEvent& event) {
 }
 
 void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
-	// Clear existing meshes
 	if (canvas && context)
 		canvas->SetCurrent(*context);
 
-	gls.Cleanup();
-	shapeMaterials.clear();
-	untexturedShapes.clear();
+	// Selectively clear outfit and body meshes, keeping head meshes
+	for (auto& name : outfitShapeNames)
+		gls.DeleteMesh(name);
+	for (auto& name : bodyShapeNames)
+		gls.DeleteMesh(name);
+
+	// Clean up tracking for deleted shapes
+	// Remove non-head entries from untexturedShapes and shapeMaterials
+	{
+		std::set<std::string> headSet(headShapeNames.begin(), headShapeNames.end());
+		untexturedShapes.erase(
+			std::remove_if(untexturedShapes.begin(), untexturedShapes.end(),
+						   [&](const std::string& s) { return headSet.find(s) == headSet.end(); }),
+			untexturedShapes.end());
+		for (auto it = shapeMaterials.begin(); it != shapeMaterials.end();) {
+			if (headSet.find(it->first) == headSet.end())
+				it = shapeMaterials.erase(it);
+			else
+				++it;
+		}
+	}
+
 	bodyShapeNames.clear();
-	headShapeNames.clear();
+	outfitShapeNames.clear();
 	outfitShapeMorphMap.clear();
 	outfitRefVerts.clear();
 	outfitGameVerts.clear();
@@ -1156,6 +1300,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 					gls.SetMeshVisibility(m->shapeName, false);
 				}
 			}
+			outfitShapeNames.push_back(m->shapeName);
 			++loadedCount;
 
 			// Cache game verts and match to reference NIF for morphing
@@ -1192,8 +1337,28 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	if (!outfitShapeMorphMap.empty() && !currentPresetName.empty() && currentPresetName != "(none)")
 		ApplyPresetToOutfit(currentPresetName);
 
-	// Reload head mesh for the currently selected NPC
-	if (!currentHeadEditorId.empty()) {
+	// Auto-hide body parts that are covered by outfit pieces
+	if (showBody && !bodyShapePartMap.empty()) {
+		std::set<int> coveredSlots;
+		for (auto& piece : outfit.pieces)
+			for (int slot : piece.bodySlots)
+				coveredSlots.insert(slot);
+
+		for (auto& [shapeName, partType] : bodyShapePartMap) {
+			bool hide = false;
+			if (partType == BP_HANDS && coveredSlots.count(33))
+				hide = true;
+			else if (partType == BP_FEET && coveredSlots.count(37))
+				hide = true;
+			if (hide) {
+				wxLogMessage("  Auto-hiding body part '%s' (covered by outfit)", shapeName);
+				gls.SetMeshVisibility(shapeName, false);
+			}
+		}
+	}
+
+	// Head mesh is preserved across outfit changes — only reload if not yet loaded
+	if (headShapeNames.empty() && !currentHeadEditorId.empty()) {
 		auto& npcs = data.GetNPCs();
 		for (auto& npc : npcs) {
 			if (npc.editorId == currentHeadEditorId) {

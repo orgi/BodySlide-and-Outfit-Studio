@@ -13,7 +13,7 @@
 #include "../render/GLSurface.h"
 #include "../utils/ConfigurationManager.h"
 
-#include <memory>
+#include <array>\n#include <memory>
 #include <wx/combobox.h>
 #include <wx/fswatcher.h>
 #include <wx/listctrl.h>
@@ -37,9 +37,14 @@ class LeveledListPreviewer : public wxFrame {
 	std::unordered_map<std::string, GLMaterial*> shapeMaterials;
 	std::vector<std::string> untexturedShapes; // shapes with no diffuse texture
 	std::vector<std::string> bodyShapeNames;   // shapes loaded as body base layer
+	std::vector<std::string> outfitShapeNames; // shapes loaded as outfit pieces
 	std::vector<std::string> headShapeNames;   // shapes loaded as NPC head layer
 	bool showUntextured = false;
 	bool showBody = true;
+
+	// Body part tracking for auto-hiding (0=body, 1=hands, 2=feet)
+	enum BodyPartType : uint8_t { BP_BODY = 0, BP_HANDS = 1, BP_FEET = 2 };
+	std::unordered_map<std::string, BodyPartType> bodyShapePartMap;
 
 	// UI controls
 	wxSplitterWindow* splitter = nullptr;
@@ -88,6 +93,11 @@ class LeveledListPreviewer : public wxFrame {
 
 	// All slider projects indexed by normalized output NIF path
 	std::unordered_map<std::string, BodyProject> allSliderProjects;
+	bool sliderProjectsCached = false; // true after first FindBodySliderProjects scan
+
+	// NPC skin texture overrides (resolved from WNAM → ARMO → ARMA → TXST)
+	std::array<std::string, 8> npcSkinTextures{};
+	bool hasNpcSkinTextures = false;
 
 	// Outfit piece preset morphing
 	struct OutfitShapeMorphInfo {
