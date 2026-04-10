@@ -10,6 +10,7 @@
 #include "../components/LeveledListData.h"
 #include "../components/SliderManager.h"
 #include "../components/SliderSet.h"
+#include "../components/SmpSimulator.h"
 #include "../render/GLSurface.h"
 #include "../utils/ConfigurationManager.h"
 
@@ -23,6 +24,7 @@
 #include <wx/splitter.h>
 #include <wx/srchctrl.h>
 #include <wx/textcompleter.h>
+#include <wx/timer.h>
 #include <wx/wx.h>
 
 class BodySlideApp;
@@ -117,6 +119,14 @@ class LeveledListPreviewer : public wxFrame {
 	std::unordered_map<std::string, std::vector<nifly::Vector3>> outfitRefVerts;  // displayName → ref verts
 	std::unordered_map<std::string, std::vector<nifly::Vector3>> outfitGameVerts; // displayName → game verts
 
+	// SMP physics simulation
+	std::unique_ptr<SmpSimulator> smpSimulator_;
+	wxTimer smpTimer_;
+	wxCheckBox* smpToggle_ = nullptr;
+	bool smpRunning_ = false;
+	// SMP XML paths discovered for the current outfit (displayName → xmlPath)
+	std::unordered_map<std::string, std::string> smpXmlPaths_;
+
 	wxDECLARE_EVENT_TABLE();
 
 public:
@@ -159,6 +169,8 @@ public:
 	}
 	void OnToggleUntextured(wxCommandEvent& event);
 	void OnToggleBody(wxCommandEvent& event);
+	void OnToggleSmp(wxCommandEvent& event);
+	void OnSmpTimer(wxTimerEvent& event);
 
 	friend class LLPreviewCanvas;
 
@@ -182,6 +194,12 @@ private:
 	void SyncMeshOverlayStates();
 	void RepositionMeshOverlay();
 
+	// SMP physics helpers
+	void SetupSmpSimulation();
+	void StopSmpSimulation();
+	std::string FindSmpXml(nifly::NifFile& nif, const std::string& nifRelativePath);
+	std::string FindSkeletonNifPath();
+
 	enum {
 		ID_LoadESP = wxID_HIGHEST + 500,
 		ID_ReloadESP,
@@ -190,6 +208,8 @@ private:
 		ID_HeadNPC,
 		ID_Preset,
 		ID_HighWeight,
+		ID_ToggleSmp,
+		ID_SmpTimer,
 	};
 };
 

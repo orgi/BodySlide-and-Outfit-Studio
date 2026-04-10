@@ -1,0 +1,274 @@
+/*
+ * SmpSimulator — Standalone SMP (Skinned Mesh Physics) simulator for
+ * real-time cloth/hair physics preview.
+ *
+ * Parses HDT-SMP XML configs, builds a Bullet3 rigid body + constraint
+ * system from the skeleton NIF, and computes skinned vertex positions
+ * each physics step.
+ *
+ * Designed to work without SKSE or the game runtime — uses only nifly
+ * for NIF data and TinyXML-2 for XML parsing.
+ */
+
+#pragma once
+
+#include <btBulletDynamicsCommon.h>
+#include <BulletCollision/CollisionDispatch/btDefaultCollisionConfiguration.h>
+#include <BulletDynamics/ConstraintSolver/btSequentialImpulseConstraintSolver.h>
+#include <BulletDynamics/ConstraintSolver/btGeneric6DofSpring2Constraint.h>
+#include <BulletCollision/BroadphaseCollision/btDbvtBroadphase.h>
+
+#include <NifFile.hpp>
+#include <Object3d.hpp>
+
+#include <deque>
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+namespace tinyxml2 {
+class XMLElement;
+}
+
+class SmpSimulator {
+public:
+	SmpSimulator();
+	~SmpSimulator();
+
+	// Non-copyable, movable
+	SmpSimulator(const SmpSimulator&) = delete;
+	SmpSimulator& operator=(const SmpSimulator&) = delete;
+	SmpSimulator(SmpSimulator&&) = default;
+	SmpSimulator& operator=(SmpSimulator&&) = default;
+
+	// ---------------------------------------------------------------
+	// Configuration
+	// ---------------------------------------------------------------
+
+	/// Load a skeleton NIF (e.g. skeleton_female_sse.nif).
+	/// Populates the bone hierarchy used by the physics system.
+	bool LoadSkeleton(const std::string& skeletonNifPath);
+
+	/// Load an SMP XML config file for one outfit piece.
+	/// The shapeName should match the shape(s) in the outfit NIF that
+	/// this XML applies to. Can be called multiple times for multiple
+	/// outfit pieces.
+	bool LoadSmpConfig(const std::string& xmlPath);
+
+	/// Load skinning data for a shape from a NIF file.
+	/// After loading the SMP config, call this for each shape that
+	/// has per-vertex or per-triangle physics bodies.
+	bool LoadShapeSkinning(nifly::NifFile& nif, nifly::NiShape* shape,
+						   const std::string& displayName);
+
+	// ---------------------------------------------------------------
+	// Simulation
+	// ---------------------------------------------------------------
+
+	/// Initialise the Bullet physics world and place all bones in their
+	/// rest pose. Must be called after LoadSkeleton + LoadSmpConfig.
+	bool Initialise();
+
+	/// Advance the simulation by `dt` seconds (typically 1/60).
+	void Step(float dt);
+
+	/// Reset all dynamic bones back to their initial skeleton pose.
+	void Reset();
+
+	/// Set gravity (default: Skyrim's gravity ~ 9.81 m/s² downward in NIF space).
+	void SetGravity(const nifly::Vector3& g);
+
+	/// Set wind velocity for cloth simulation.
+	void SetWind(const nifly::Vector3& wind);
+
+	// ---------------------------------------------------------------
+	// Output — vertex positions after physics
+	// ---------------------------------------------------------------
+
+	/// Returns true if the given display-name shape is SMP-affected.
+	bool HasPhysics(const std::string& displayName) const;
+
+	/// Get the current skinned vertex positions in NIF space for
+	/// an SMP-driven shape. Returns empty vector if not found.
+	const std::vector<nifly::Vector3>& GetSkinnedVerts(const std::string& displayName) const;
+
+	/// Get list of all shape display names that have physics.
+	std::vector<std::string> GetPhysicsShapeNames() const;
+
+private:
+	// ---------------------------------------------------------------
+	// Internal types
+	// ---------------------------------------------------------------
+
+	struct BoneInfo {
+		std::string name;
+		btTransform worldTransform;		// current world transform
+		btTransform origWorldTransform; // rest-pose world transform
+		btTransform localToRig;			// center-of-mass offset
+		btTransform rigToLocal;			// inverse of above
+		float mass = 0.0f;
+		float gravityFactor = 1.0f;
+		float marginMultiplier = 1.0f;
+		std::unique_ptr<btCollisionShape> collisionShape; // owned shape (unique, created for this bone)
+		std::shared_ptr<btCollisionShape> sharedCollisionShape; // shared shape from template (keeps it alive)
+		std::unique_ptr<btRigidBody> rigidBody;
+		std::unique_ptr<btDefaultMotionState> motionState; // heap-allocated: bones_ vector may reallocate
+		int parentIdx = -1; // parent bone index in bones_ vector
+	};
+
+	// Template data parsed from XML <bone-default>
+	struct BoneTemplate {
+		float mass = 0.0f;
+		btVector3 localInertia{0, 0, 0};
+		btTransform centerOfMassTransform = btTransform::getIdentity();
+		float linearDamping = 0.0f;
+		float angularDamping = 0.0f;
+		float friction = 0.5f;
+		float rollingFriction = 0.0f;
+		float restitution = 0.0f;
+		float marginMultiplier = 1.0f;
+		float gravityFactor = 1.0f;
+		std::shared_ptr<btCollisionShape> collisionShapeTemplate;
+		int collisionFilter = 0;
+	};
+
+	struct GenericConstraintTemplate {
+		btVector3 linearLowerLimit{0, 0, 0};
+		btVector3 linearUpperLimit{0, 0, 0};
+		btVector3 angularLowerLimit{0, 0, 0};
+		btVector3 angularUpperLimit{0, 0, 0};
+		btVector3 linearStiffness{0, 0, 0};
+		btVector3 angularStiffness{0, 0, 0};
+		btVector3 linearDamping{0, 0, 0};
+		btVector3 angularDamping{0, 0, 0};
+		btVector3 linearEquilibrium{0, 0, 0};
+		btVector3 angularEquilibrium{0, 0, 0};
+		btVector3 linearBounce{0, 0, 0};
+		btVector3 angularBounce{0, 0, 0};
+		// Frame definition
+		enum FrameType { FrameInA, FrameInB, FrameInLerp };
+		FrameType frameType = FrameInA;
+		btTransform frame = btTransform::getIdentity();
+		bool useLinearReferenceFrameA = false;
+	};
+
+	struct StiffSpringConstraintTemplate {
+		float minDistanceFactor = 1.0f;
+		float maxDistanceFactor = 1.0f;
+		float stiffness = 0.0f;
+		float damping = 0.0f;
+		float equilibriumFactor = 0.5f;
+	};
+
+	struct ConeTwistConstraintTemplate {
+		GenericConstraintTemplate::FrameType frameType = GenericConstraintTemplate::FrameInA;
+		btTransform frame = btTransform::getIdentity();
+		bool angularOnly = false;
+		float swingSpan1 = 0.0f;
+		float swingSpan2 = 0.0f;
+		float twistSpan = 0.0f;
+		float limitSoftness = 1.0f;
+		float biasFactor = 0.3f;
+		float relaxationFactor = 1.0f;
+	};
+
+	// Skinning data for one shape
+	struct SkinnedShape {
+		std::string displayName;
+
+		struct SkinBone {
+			int boneIdx; // index into bones_
+			nifly::MatTransform skinToBone; // skin-space → bone-space
+		};
+		std::vector<SkinBone> skinBones;
+
+		struct VertexSkin {
+			nifly::Vector3 skinPos; // position in skin coordinate space
+			int boneIdx[4]{-1, -1, -1, -1};
+			float weight[4]{0, 0, 0, 0};
+		};
+		std::vector<VertexSkin> vertices;
+
+		// Output: updated positions each frame (NIF space)
+		std::vector<nifly::Vector3> currentVerts;
+	};
+
+	// ---------------------------------------------------------------
+	// Internal helpers
+	// ---------------------------------------------------------------
+
+	// Skeleton
+	int FindBoneIdx(const std::string& name) const;
+	int GetOrCreateBone(const std::string& name);
+	btTransform GetBoneWorldTransform(int idx) const;
+
+	// XML parsing
+	bool ParseXml(const std::string& xmlPath);
+	void ParseBoneTemplate(tinyxml2::XMLElement* elem, BoneTemplate& tmpl);
+	void ParseBone(tinyxml2::XMLElement* elem);
+	void ParseGenericConstraintTemplate(tinyxml2::XMLElement* elem, GenericConstraintTemplate& tmpl);
+	void ParseGenericConstraint(tinyxml2::XMLElement* elem);
+	void ParseStiffSpringConstraintTemplate(tinyxml2::XMLElement* elem, StiffSpringConstraintTemplate& tmpl);
+	void ParseStiffSpringConstraint(tinyxml2::XMLElement* elem);
+	void ParseConeTwistConstraintTemplate(tinyxml2::XMLElement* elem, ConeTwistConstraintTemplate& tmpl);
+	void ParseConeTwistConstraint(tinyxml2::XMLElement* elem);
+	std::shared_ptr<btCollisionShape> ParseShape(tinyxml2::XMLElement* elem);
+
+	// Constraint frame computation
+	void CalcFrame(GenericConstraintTemplate::FrameType type,
+				   const btTransform& frame,
+				   const btTransform& trA, const btTransform& trB,
+				   btTransform& frameA, btTransform& frameB);
+
+	// Skinning
+	void SkinVertices();
+
+	// Coordinate conversion helpers (nifly ↔ Bullet)
+	static btVector3 ToBt(const nifly::Vector3& v);
+	static btMatrix3x3 ToBt(const nifly::Matrix3& m);
+	static btTransform ToBt(const nifly::MatTransform& t);
+	static nifly::Vector3 ToNif(const btVector3& v);
+
+	// XML element reading helpers
+	static float ReadFloat(tinyxml2::XMLElement* elem, float defaultVal = 0.0f);
+	static btVector3 ReadVector3(tinyxml2::XMLElement* elem);
+	static btTransform ReadTransform(tinyxml2::XMLElement* elem);
+	static bool ReadBool(tinyxml2::XMLElement* elem, bool defaultVal = false);
+
+	// ---------------------------------------------------------------
+	// Data
+	// ---------------------------------------------------------------
+
+	// Skeleton
+	std::unique_ptr<nifly::NifFile> skeletonNif_;
+	std::unordered_map<std::string, int> boneNameToIdx_;
+	std::deque<BoneInfo> bones_;
+
+	// Templates parsed from XML
+	std::unordered_map<std::string, BoneTemplate> boneTemplates_;
+	std::unordered_map<std::string, GenericConstraintTemplate> genericConstraintTemplates_;
+	std::unordered_map<std::string, StiffSpringConstraintTemplate> stiffSpringConstraintTemplates_;
+	std::unordered_map<std::string, ConeTwistConstraintTemplate> coneTwistConstraintTemplates_;
+
+	// Constraints
+	std::vector<std::unique_ptr<btTypedConstraint>> constraints_;
+	// Shared collision shapes referenced by templates
+	std::vector<std::shared_ptr<btCollisionShape>> shapeRefs_;
+
+	// Skinned shapes
+	std::vector<SkinnedShape> skinnedShapes_;
+
+	// Bullet physics world
+	std::unique_ptr<btDefaultCollisionConfiguration> collisionConfig_;
+	std::unique_ptr<btCollisionDispatcher> dispatcher_;
+	std::unique_ptr<btDbvtBroadphase> broadphase_;
+	std::unique_ptr<btSequentialImpulseConstraintSolver> solver_;
+	std::unique_ptr<btDiscreteDynamicsWorld> world_;
+
+	btVector3 wind_{0, 0, 0};
+	bool initialised_ = false;
+
+	// Empty result for GetSkinnedVerts when shape not found
+	static const std::vector<nifly::Vector3> emptyVerts_;
+};

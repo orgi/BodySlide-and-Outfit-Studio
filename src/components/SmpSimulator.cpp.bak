@@ -1,0 +1,1287 @@
+/*
+ * SmpSimulator — Implementation
+ *
+ * Standalone HDT-SMP physics simulator using Bullet3.
+ * Parses SMP XML, builds physics world from skeleton NIF, skins vertices.
+ */
+
+#include "SmpSimulator.h"
+
+#include <tinyxml2.h>
+#include <wx/log.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
+
+using namespace nifly;
+using namespace tinyxml2;
+
+// ---------------------------------------------------------------------------
+// Static members
+// ---------------------------------------------------------------------------
+
+const std::vector<Vector3> SmpSimulator::emptyVerts_;
+
+// ---------------------------------------------------------------------------
+// Construction / destruction
+// ---------------------------------------------------------------------------
+
+SmpSimulator::SmpSimulator() = default;
+
+SmpSimulator::~SmpSimulator() {
+	// Remove objects from world before destroying everything
+	if (world_) {
+		for (auto& c : constraints_)
+			world_->removeConstraint(c.get());
+		for (auto& b : bones_) {
+			if (b.rigidBody)
+				world_->removeRigidBody(b.rigidBody.get());
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Coordinate conversion helpers
+// ---------------------------------------------------------------------------
+
+btVector3 SmpSimulator::ToBt(const Vector3& v) {
+	return btVector3(v.x, v.y, v.z);
+}
+
+btMatrix3x3 SmpSimulator::ToBt(const Matrix3& m) {
+	// nifly Matrix3 is row-major: m[row][col]
+	// btMatrix3x3 constructor takes rows
+	return btMatrix3x3(
+		m[0].x, m[0].y, m[0].z,
+		m[1].x, m[1].y, m[1].z,
+		m[2].x, m[2].y, m[2].z);
+}
+
+btTransform SmpSimulator::ToBt(const MatTransform& t) {
+	btTransform bt;
+	bt.setBasis(ToBt(t.rotation));
+	bt.setOrigin(ToBt(t.translation));
+	// Note: btTransform has no scale. Scale must be handled separately.
+	return bt;
+}
+
+Vector3 SmpSimulator::ToNif(const btVector3& v) {
+	return Vector3(v.x(), v.y(), v.z());
+}
+
+// ---------------------------------------------------------------------------
+// XML reading helpers
+// ---------------------------------------------------------------------------
+
+float SmpSimulator::ReadFloat(XMLElement* elem, float defaultVal) {
+	if (!elem)
+		return defaultVal;
+	const char* text = elem->GetText();
+	if (!text)
+		return defaultVal;
+	char* end = nullptr;
+	float val = std::strtof(text, &end);
+	return (end != text) ? val : defaultVal;
+}
+
+btVector3 SmpSimulator::ReadVector3(XMLElement* elem) {
+	if (!elem)
+		return btVector3(0, 0, 0);
+
+	// SMP XML format: <someElement x="1.0" y="2.0" z="3.0" />
+	float x = 0, y = 0, z = 0;
+	elem->QueryFloatAttribute("x", &x);
+	elem->QueryFloatAttribute("y", &y);
+	elem->QueryFloatAttribute("z", &z);
+	return btVector3(x, y, z);
+}
+
+btTransform SmpSimulator::ReadTransform(XMLElement* elem) {
+	btTransform t;
+	t.setIdentity();
+	if (!elem)
+		return t;
+
+	for (auto* child = elem->FirstChildElement(); child; child = child->NextSiblingElement()) {
+		std::string name = child->Name();
+		if (name == "basis" || name == "basis-axis-angle") {
+			// SMP XML format: <basis x="0" y="0" z="0" w="1" /> — quaternion (x,y,z,w)
+			float qx = 0, qy = 0, qz = 0, qw = 1;
+			if (name == "basis-axis-angle") {
+				// axis-angle: x,y,z = axis, angle = rotation angle in radians
+				float ax = 0, ay = 0, az = 1, angle = 0;
+				child->QueryFloatAttribute("x", &ax);
+				child->QueryFloatAttribute("y", &ay);
+				child->QueryFloatAttribute("z", &az);
+				child->QueryFloatAttribute("angle", &angle);
+				btQuaternion q;
+				btVector3 axis(ax, ay, az);
+				if (axis.fuzzyZero())
+					axis.setValue(1, 0, 0);
+				else
+					axis.normalize();
+				q.setRotation(axis, angle);
+				t.setRotation(q);
+			}
+			else {
+				child->QueryFloatAttribute("x", &qx);
+				child->QueryFloatAttribute("y", &qy);
+				child->QueryFloatAttribute("z", &qz);
+				child->QueryFloatAttribute("w", &qw);
+				btQuaternion q(qx, qy, qz, qw);
+				if (q.length2() < 1e-6f)
+					q = btQuaternion::getIdentity();
+				else
+					q.normalize();
+				t.setRotation(q);
+			}
+		}
+		else if (name == "origin") {
+			// SMP XML format: <origin x="0" y="0" z="0" />
+			t.setOrigin(ReadVector3(child));
+		}
+	}
+	return t;
+}
+
+bool SmpSimulator::ReadBool(XMLElement* elem, bool defaultVal) {
+	if (!elem)
+		return defaultVal;
+	const char* text = elem->GetText();
+	if (!text)
+		return defaultVal;
+	std::string s = text;
+	std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+	if (s == "true" || s == "1")
+		return true;
+	if (s == "false" || s == "0")
+		return false;
+	return defaultVal;
+}
+
+// ---------------------------------------------------------------------------
+// Skeleton loading
+// ---------------------------------------------------------------------------
+
+bool SmpSimulator::LoadSkeleton(const std::string& skeletonNifPath) {
+	skeletonNif_ = std::make_unique<NifFile>();
+	if (skeletonNif_->Load(skeletonNifPath) != 0) {
+		wxLogError("SmpSimulator: Failed to load skeleton NIF: %s", skeletonNifPath);
+		skeletonNif_.reset();
+		return false;
+	}
+
+	// Build bone hierarchy from all nodes in the skeleton NIF
+	auto nodes = skeletonNif_->GetNodes();
+	boneNameToIdx_.reserve(nodes.size());
+
+	for (auto* node : nodes) {
+		if (!node)
+			continue;
+		std::string nodeName = skeletonNif_->GetNodeName(skeletonNif_->GetBlockID(node));
+		if (nodeName.empty())
+			continue;
+
+		// Skip if already added
+		if (boneNameToIdx_.count(nodeName))
+			continue;
+
+		BoneInfo bi;
+		bi.name = nodeName;
+
+		// Get world transform for this bone
+		MatTransform globalXf;
+		if (skeletonNif_->GetNodeTransformToGlobal(nodeName, globalXf)) {
+			bi.worldTransform = ToBt(globalXf);
+			bi.origWorldTransform = bi.worldTransform;
+		}
+		else {
+			bi.worldTransform.setIdentity();
+			bi.origWorldTransform.setIdentity();
+		}
+
+		// Find parent
+		auto* parent = skeletonNif_->GetParentNode(node);
+		if (parent) {
+			std::string parentName = skeletonNif_->GetNodeName(skeletonNif_->GetBlockID(parent));
+			auto it = boneNameToIdx_.find(parentName);
+			if (it != boneNameToIdx_.end())
+				bi.parentIdx = it->second;
+		}
+
+		int idx = static_cast<int>(bones_.size());
+		boneNameToIdx_[nodeName] = idx;
+		bones_.push_back(std::move(bi));
+	}
+
+	wxLogMessage("SmpSimulator: Loaded skeleton with %zu bones from %s", bones_.size(), skeletonNifPath);
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Bone lookup / creation
+// ---------------------------------------------------------------------------
+
+int SmpSimulator::FindBoneIdx(const std::string& name) const {
+	auto it = boneNameToIdx_.find(name);
+	return (it != boneNameToIdx_.end()) ? it->second : -1;
+}
+
+int SmpSimulator::GetOrCreateBone(const std::string& name) {
+	int idx = FindBoneIdx(name);
+	if (idx >= 0)
+		return idx;
+
+	// Create a new bone with identity transform (kinematic, mass=0)
+	BoneInfo bi;
+	bi.name = name;
+	bi.worldTransform.setIdentity();
+	bi.origWorldTransform.setIdentity();
+	bi.mass = 0.0f;
+
+	idx = static_cast<int>(bones_.size());
+	boneNameToIdx_[name] = idx;
+	bones_.push_back(std::move(bi));
+	return idx;
+}
+
+btTransform SmpSimulator::GetBoneWorldTransform(int idx) const {
+	if (idx < 0 || idx >= static_cast<int>(bones_.size()))
+		return btTransform::getIdentity();
+	return bones_[idx].worldTransform;
+}
+
+// ---------------------------------------------------------------------------
+// SMP XML parsing
+// ---------------------------------------------------------------------------
+
+bool SmpSimulator::LoadSmpConfig(const std::string& xmlPath) {
+	return ParseXml(xmlPath);
+}
+
+bool SmpSimulator::ParseXml(const std::string& xmlPath) {
+	XMLDocument doc;
+	if (doc.LoadFile(xmlPath.c_str()) != XML_SUCCESS) {
+		wxLogError("SmpSimulator: Failed to parse XML: %s — %s", xmlPath, doc.ErrorStr());
+		return false;
+	}
+
+	auto* root = doc.FirstChildElement("system");
+	if (!root) {
+		wxLogError("SmpSimulator: No <system> root element in %s", xmlPath);
+		return false;
+	}
+
+	for (auto* elem = root->FirstChildElement(); elem; elem = elem->NextSiblingElement()) {
+		std::string tagName = elem->Name();
+
+		if (tagName == "bone") {
+			ParseBone(elem);
+		}
+		else if (tagName == "bone-default") {
+			const char* clsName = elem->Attribute("name");
+			const char* ext = elem->Attribute("extends");
+			std::string cls = clsName ? clsName : "";
+			std::string extends = ext ? ext : "";
+			BoneTemplate tmpl = boneTemplates_[extends]; // copy from parent
+			ParseBoneTemplate(elem, tmpl);
+			boneTemplates_[cls] = std::move(tmpl);
+		}
+		else if (tagName == "generic-constraint") {
+			ParseGenericConstraint(elem);
+		}
+		else if (tagName == "generic-constraint-default") {
+			const char* clsName = elem->Attribute("name");
+			const char* ext = elem->Attribute("extends");
+			std::string cls = clsName ? clsName : "";
+			std::string extends = ext ? ext : "";
+			GenericConstraintTemplate tmpl = genericConstraintTemplates_[extends];
+			ParseGenericConstraintTemplate(elem, tmpl);
+			genericConstraintTemplates_[cls] = std::move(tmpl);
+		}
+		else if (tagName == "stiffspring-constraint") {
+			ParseStiffSpringConstraint(elem);
+		}
+		else if (tagName == "stiffspring-constraint-default") {
+			const char* clsName = elem->Attribute("name");
+			const char* ext = elem->Attribute("extends");
+			std::string cls = clsName ? clsName : "";
+			std::string extends = ext ? ext : "";
+			StiffSpringConstraintTemplate tmpl = stiffSpringConstraintTemplates_[extends];
+			ParseStiffSpringConstraintTemplate(elem, tmpl);
+			stiffSpringConstraintTemplates_[cls] = std::move(tmpl);
+		}
+		else if (tagName == "conetwist-constraint") {
+			ParseConeTwistConstraint(elem);
+		}
+		else if (tagName == "conetwist-constraint-default") {
+			const char* clsName = elem->Attribute("name");
+			const char* ext = elem->Attribute("extends");
+			std::string cls = clsName ? clsName : "";
+			std::string extends = ext ? ext : "";
+			ConeTwistConstraintTemplate tmpl = coneTwistConstraintTemplates_[extends];
+			ParseConeTwistConstraintTemplate(elem, tmpl);
+			coneTwistConstraintTemplates_[cls] = std::move(tmpl);
+		}
+		else if (tagName == "per-vertex-shape" || tagName == "per-triangle-shape") {
+			// These define collision shapes for mesh bodies.
+			// We don't do mesh-mesh collision — we just note that
+			// shapes with these names are physics-driven and need skinning.
+			// The actual skinning is done via LoadShapeSkinning.
+			wxLogMessage("SmpSimulator: Note: %s shape '%s' defined in XML",
+						 tagName, elem->Attribute("name") ? elem->Attribute("name") : "?");
+		}
+		else if (tagName == "constraint-group") {
+			// Parse constraints inside the group
+			for (auto* gc = elem->FirstChildElement(); gc; gc = gc->NextSiblingElement()) {
+				std::string gcName = gc->Name();
+				if (gcName == "generic-constraint")
+					ParseGenericConstraint(gc);
+				else if (gcName == "stiffspring-constraint")
+					ParseStiffSpringConstraint(gc);
+				else if (gcName == "conetwist-constraint")
+					ParseConeTwistConstraint(gc);
+				else if (gcName == "generic-constraint-default") {
+					const char* n = gc->Attribute("name");
+					const char* e = gc->Attribute("extends");
+					GenericConstraintTemplate tmpl = genericConstraintTemplates_[e ? e : ""];
+					ParseGenericConstraintTemplate(gc, tmpl);
+					genericConstraintTemplates_[n ? n : ""] = std::move(tmpl);
+				}
+				else if (gcName == "stiffspring-constraint-default") {
+					const char* n = gc->Attribute("name");
+					const char* e = gc->Attribute("extends");
+					StiffSpringConstraintTemplate tmpl = stiffSpringConstraintTemplates_[e ? e : ""];
+					ParseStiffSpringConstraintTemplate(gc, tmpl);
+					stiffSpringConstraintTemplates_[n ? n : ""] = std::move(tmpl);
+				}
+				else if (gcName == "conetwist-constraint-default") {
+					const char* n = gc->Attribute("name");
+					const char* e = gc->Attribute("extends");
+					ConeTwistConstraintTemplate tmpl = coneTwistConstraintTemplates_[e ? e : ""];
+					ParseConeTwistConstraintTemplate(gc, tmpl);
+					coneTwistConstraintTemplates_[n ? n : ""] = std::move(tmpl);
+				}
+			}
+		}
+		// shape, bone-default already handled above
+	}
+
+	wxLogMessage("SmpSimulator: Parsed XML %s — %zu bones with physics data, %zu constraints",
+				 xmlPath, bones_.size(), constraints_.size());
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Collision shape parsing
+// ---------------------------------------------------------------------------
+
+std::shared_ptr<btCollisionShape> SmpSimulator::ParseShape(XMLElement* elem) {
+	if (!elem)
+		return nullptr;
+
+	const char* typeAttr = elem->Attribute("type");
+	if (!typeAttr)
+		return nullptr;
+	std::string type = typeAttr;
+
+	if (type == "sphere") {
+		float radius = 1.0f;
+		float margin = 0.0f;
+		for (auto* child = elem->FirstChildElement(); child; child = child->NextSiblingElement()) {
+			std::string n = child->Name();
+			if (n == "radius")
+				radius = ReadFloat(child, 1.0f);
+			else if (n == "margin")
+				margin = ReadFloat(child, 0.0f);
+		}
+		auto shape = std::make_shared<btSphereShape>(radius);
+		if (margin > 0.0f)
+			shape->setMargin(margin);
+		return shape;
+	}
+	if (type == "box") {
+		btVector3 halfExtents(1, 1, 1);
+		float margin = 0.0f;
+		for (auto* child = elem->FirstChildElement(); child; child = child->NextSiblingElement()) {
+			std::string n = child->Name();
+			if (n == "extent")
+				halfExtents = ReadVector3(child);
+			else if (n == "margin")
+				margin = ReadFloat(child, 0.0f);
+		}
+		auto shape = std::make_shared<btBoxShape>(halfExtents);
+		if (margin > 0.0f)
+			shape->setMargin(margin);
+		return shape;
+	}
+	if (type == "capsule") {
+		float radius = 1.0f, height = 2.0f;
+		float margin = 0.0f;
+		for (auto* child = elem->FirstChildElement(); child; child = child->NextSiblingElement()) {
+			std::string n = child->Name();
+			if (n == "radius")
+				radius = ReadFloat(child, 1.0f);
+			else if (n == "height")
+				height = ReadFloat(child, 2.0f);
+			else if (n == "margin")
+				margin = ReadFloat(child, 0.0f);
+		}
+		auto shape = std::make_shared<btCapsuleShape>(radius, height);
+		if (margin > 0.0f)
+			shape->setMargin(margin);
+		return shape;
+	}
+	if (type == "cylinder") {
+		float radius = 1.0f, height = 2.0f;
+		float margin = 0.0f;
+		for (auto* child = elem->FirstChildElement(); child; child = child->NextSiblingElement()) {
+			std::string n = child->Name();
+			if (n == "radius")
+				radius = ReadFloat(child, 1.0f);
+			else if (n == "height")
+				height = ReadFloat(child, 2.0f);
+			else if (n == "margin")
+				margin = ReadFloat(child, 0.0f);
+		}
+		auto shape = std::make_shared<btCylinderShape>(btVector3(radius, height, radius));
+		if (margin > 0.0f)
+			shape->setMargin(margin);
+		return shape;
+	}
+
+	wxLogWarning("SmpSimulator: Unknown shape type '%s'", type);
+	return nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// Bone template parsing
+// ---------------------------------------------------------------------------
+
+void SmpSimulator::ParseBoneTemplate(XMLElement* elem, BoneTemplate& tmpl) {
+	for (auto* child = elem->FirstChildElement(); child; child = child->NextSiblingElement()) {
+		std::string name = child->Name();
+		if (name == "mass")
+			tmpl.mass = ReadFloat(child);
+		else if (name == "inertia")
+			tmpl.localInertia = ReadVector3(child);
+		else if (name == "centerOfMassTransform")
+			tmpl.centerOfMassTransform = ReadTransform(child);
+		else if (name == "linearDamping")
+			tmpl.linearDamping = ReadFloat(child);
+		else if (name == "angularDamping")
+			tmpl.angularDamping = ReadFloat(child);
+		else if (name == "friction")
+			tmpl.friction = ReadFloat(child);
+		else if (name == "rollingFriction")
+			tmpl.rollingFriction = ReadFloat(child);
+		else if (name == "restitution")
+			tmpl.restitution = ReadFloat(child);
+		else if (name == "margin-multiplier")
+			tmpl.marginMultiplier = ReadFloat(child, 1.0f);
+		else if (name == "gravity-factor")
+			tmpl.gravityFactor = std::clamp(ReadFloat(child, 1.0f), 0.0f, 1.0f);
+		else if (name == "shape") {
+			auto shape = ParseShape(child);
+			if (shape) {
+				shapeRefs_.push_back(shape);
+				tmpl.collisionShapeTemplate = shape;
+			}
+		}
+		else if (name == "collision-filter")
+			tmpl.collisionFilter = static_cast<int>(ReadFloat(child));
+		// can-collide-with-bone, no-collide-with-bone: skip for preview
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Bone parsing
+// ---------------------------------------------------------------------------
+
+void SmpSimulator::ParseBone(XMLElement* elem) {
+	const char* nameAttr = elem->Attribute("name");
+	if (!nameAttr) {
+		wxLogWarning("SmpSimulator: <bone> without name attribute, skipped");
+		return;
+	}
+	std::string boneName = nameAttr;
+
+	// Get or create bone entry
+	int boneIdx = GetOrCreateBone(boneName);
+	BoneInfo& bi = bones_[boneIdx];
+
+	// If this bone already has a rigid body (e.g. defined in a previously-loaded XML),
+	// don't replace it — doing so would invalidate any constraints already referencing it.
+	if (bi.rigidBody) {
+		wxLogMessage("SmpSimulator: Bone '%s' already has a rigid body, skipping duplicate definition", boneName);
+		return;
+	}
+
+	// Get template
+	const char* tmplAttr = elem->Attribute("template");
+	std::string tmplName = tmplAttr ? tmplAttr : "";
+	BoneTemplate tmpl = boneTemplates_[tmplName]; // copy defaults
+
+	// Parse inline bone properties (overrides template)
+	ParseBoneTemplate(elem, tmpl);
+
+	// Apply template to bone info
+	bi.mass = tmpl.mass;
+	bi.gravityFactor = tmpl.gravityFactor;
+	bi.marginMultiplier = tmpl.marginMultiplier;
+	bi.localToRig = tmpl.centerOfMassTransform;
+	bi.rigToLocal = tmpl.centerOfMassTransform.inverse();
+
+	// Collision shape
+	if (tmpl.collisionShapeTemplate) {
+		bi.collisionShape.reset();
+		// btRigidBody will reference the shared shape directly
+	}
+
+	// The rigid body will be created in Initialise()
+	// Store template data needed for rigid body creation
+	// We'll use mass, inertia, damping etc. from tmpl
+	// Store the template in a way we can retrieve it later
+	// Since we've already applied all template fields to BoneInfo,
+	// we need to also store the physics construction params.
+	// Let's store the full template data we need:
+
+	// Create the collision shape
+	btCollisionShape* colShape = nullptr;
+	if (tmpl.collisionShapeTemplate) {
+		// Keep the shared_ptr alive in BoneInfo so the shape outlives this function
+		bi.sharedCollisionShape = tmpl.collisionShapeTemplate;
+		colShape = bi.sharedCollisionShape.get();
+	}
+	else {
+		// Default: small sphere shape for kinematic bones, or empty shape
+		if (tmpl.mass > 0.0f) {
+			auto sphere = std::make_shared<btSphereShape>(0.5f);
+			shapeRefs_.push_back(sphere);
+			colShape = sphere.get();
+		}
+		else {
+			auto empty = std::make_shared<btEmptyShape>();
+			shapeRefs_.push_back(empty);
+			colShape = empty.get();
+		}
+	}
+
+	// Compute local inertia
+	btVector3 localInertia = tmpl.localInertia;
+	if (tmpl.mass > 0.0f && localInertia.isZero()) {
+		colShape->calculateLocalInertia(tmpl.mass, localInertia);
+	}
+
+	// Create rigid body
+	bi.motionState = std::make_unique<btDefaultMotionState>();
+	btRigidBody::btRigidBodyConstructionInfo rbInfo(
+		tmpl.mass, bi.motionState.get(), colShape, localInertia);
+	rbInfo.m_linearDamping = tmpl.linearDamping;
+	rbInfo.m_angularDamping = tmpl.angularDamping;
+	rbInfo.m_friction = tmpl.friction;
+	rbInfo.m_rollingFriction = tmpl.rollingFriction;
+	rbInfo.m_restitution = tmpl.restitution;
+
+	bi.rigidBody = std::make_unique<btRigidBody>(rbInfo);
+
+	// Set kinematic flag for mass=0 bones
+	if (tmpl.mass <= 0.0f) {
+		bi.rigidBody->setCollisionFlags(
+			bi.rigidBody->getCollisionFlags() | btCollisionObject::CF_KINEMATIC_OBJECT);
+	}
+	else {
+		bi.rigidBody->setCollisionFlags(0);
+	}
+
+	bi.rigidBody->setActivationState(DISABLE_DEACTIVATION);
+
+	// Set initial transform
+	btTransform dest = bi.worldTransform * bi.localToRig;
+	bi.motionState->setWorldTransform(dest);
+	bi.rigidBody->setWorldTransform(dest);
+	bi.rigidBody->setInterpolationWorldTransform(dest);
+	bi.rigidBody->setLinearVelocity(btVector3(0, 0, 0));
+	bi.rigidBody->setAngularVelocity(btVector3(0, 0, 0));
+
+	wxLogMessage("SmpSimulator: Bone '%s' mass=%.3f kinematic=%d",
+				 boneName, tmpl.mass, tmpl.mass <= 0.0f ? 1 : 0);
+}
+
+// ---------------------------------------------------------------------------
+// Generic constraint parsing
+// ---------------------------------------------------------------------------
+
+void SmpSimulator::ParseGenericConstraintTemplate(XMLElement* elem, GenericConstraintTemplate& tmpl) {
+	for (auto* child = elem->FirstChildElement(); child; child = child->NextSiblingElement()) {
+		std::string name = child->Name();
+		if (name == "frameInA") {
+			tmpl.frameType = GenericConstraintTemplate::FrameInA;
+			tmpl.frame = ReadTransform(child);
+		}
+		else if (name == "frameInB") {
+			tmpl.frameType = GenericConstraintTemplate::FrameInB;
+			tmpl.frame = ReadTransform(child);
+		}
+		else if (name == "frameInLerp") {
+			tmpl.frameType = GenericConstraintTemplate::FrameInLerp;
+			tmpl.frame.setIdentity();
+			auto* tlElem = child->FirstChildElement("translationLerp");
+			auto* rlElem = child->FirstChildElement("rotationLerp");
+			float tl = tlElem ? ReadFloat(tlElem, 0.5f) : 0.5f;
+			float rl = rlElem ? ReadFloat(rlElem, 0.5f) : 0.5f;
+			tmpl.frame.getOrigin().setX(tl);
+			tmpl.frame.getOrigin().setY(rl);
+		}
+		else if (name == "useLinearReferenceFrameA")
+			tmpl.useLinearReferenceFrameA = ReadBool(child);
+		else if (name == "linearLowerLimit")
+			tmpl.linearLowerLimit = ReadVector3(child);
+		else if (name == "linearUpperLimit")
+			tmpl.linearUpperLimit = ReadVector3(child);
+		else if (name == "angularLowerLimit")
+			tmpl.angularLowerLimit = ReadVector3(child);
+		else if (name == "angularUpperLimit")
+			tmpl.angularUpperLimit = ReadVector3(child);
+		else if (name == "linearStiffness")
+			tmpl.linearStiffness = ReadVector3(child);
+		else if (name == "angularStiffness")
+			tmpl.angularStiffness = ReadVector3(child);
+		else if (name == "linearDamping")
+			tmpl.linearDamping = ReadVector3(child);
+		else if (name == "angularDamping")
+			tmpl.angularDamping = ReadVector3(child);
+		else if (name == "linearEquilibrium")
+			tmpl.linearEquilibrium = ReadVector3(child);
+		else if (name == "angularEquilibrium")
+			tmpl.angularEquilibrium = ReadVector3(child);
+		else if (name == "linearBounce")
+			tmpl.linearBounce = ReadVector3(child);
+		else if (name == "angularBounce")
+			tmpl.angularBounce = ReadVector3(child);
+	}
+}
+
+void SmpSimulator::CalcFrame(GenericConstraintTemplate::FrameType type,
+							 const btTransform& frame,
+							 const btTransform& trA, const btTransform& trB,
+							 btTransform& frameA, btTransform& frameB) {
+	switch (type) {
+	case GenericConstraintTemplate::FrameInA:
+		frameA = frame;
+		frameB = trB.inverse() * trA * frame;
+		break;
+	case GenericConstraintTemplate::FrameInB:
+		frameB = frame;
+		frameA = trA.inverse() * trB * frame;
+		break;
+	case GenericConstraintTemplate::FrameInLerp: {
+		btVector3 trans = trA.getOrigin().lerp(trB.getOrigin(), frame.getOrigin().x());
+		btQuaternion qA, qB;
+		trA.getBasis().getRotation(qA);
+		trB.getBasis().getRotation(qB);
+		btQuaternion rot = qA.slerp(qB, frame.getOrigin().y());
+		btTransform frameInWorld;
+		frameInWorld.setRotation(rot);
+		frameInWorld.setOrigin(trans);
+		frameA = trA.inverse() * frameInWorld;
+		frameB = trB.inverse() * frameInWorld;
+		break;
+	}
+	}
+}
+
+void SmpSimulator::ParseGenericConstraint(XMLElement* elem) {
+	const char* bodyAName = elem->Attribute("bodyA");
+	const char* bodyBName = elem->Attribute("bodyB");
+	if (!bodyAName || !bodyBName) {
+		wxLogWarning("SmpSimulator: generic-constraint missing bodyA/bodyB");
+		return;
+	}
+
+	int idxA = FindBoneIdx(bodyAName);
+	int idxB = FindBoneIdx(bodyBName);
+	if (idxA < 0) {
+		idxA = GetOrCreateBone(bodyAName);
+		// Ensure it has a rigid body (kinematic default)
+		if (!bones_[idxA].rigidBody) {
+			auto empty = std::make_shared<btEmptyShape>();
+			shapeRefs_.push_back(empty);
+			btTransform dest = bones_[idxA].worldTransform * bones_[idxA].localToRig;
+			bones_[idxA].motionState = std::make_unique<btDefaultMotionState>();
+			bones_[idxA].motionState->setWorldTransform(dest);
+			btRigidBody::btRigidBodyConstructionInfo ci(0.0f, bones_[idxA].motionState.get(), empty.get());
+			bones_[idxA].rigidBody = std::make_unique<btRigidBody>(ci);
+			bones_[idxA].rigidBody->setCollisionFlags(btCollisionObject::CF_KINEMATIC_OBJECT);
+			bones_[idxA].rigidBody->setActivationState(DISABLE_DEACTIVATION);
+			bones_[idxA].rigidBody->setWorldTransform(dest);
+			bones_[idxA].rigidBody->setInterpolationWorldTransform(dest);
+		}
+	}
+	if (idxB < 0) {
+		idxB = GetOrCreateBone(bodyBName);
+		if (!bones_[idxB].rigidBody) {
+			auto empty = std::make_shared<btEmptyShape>();
+			shapeRefs_.push_back(empty);
+			btTransform dest = bones_[idxB].worldTransform * bones_[idxB].localToRig;
+			bones_[idxB].motionState = std::make_unique<btDefaultMotionState>();
+			bones_[idxB].motionState->setWorldTransform(dest);
+			btRigidBody::btRigidBodyConstructionInfo ci(0.0f, bones_[idxB].motionState.get(), empty.get());
+			bones_[idxB].rigidBody = std::make_unique<btRigidBody>(ci);
+			bones_[idxB].rigidBody->setCollisionFlags(btCollisionObject::CF_KINEMATIC_OBJECT);
+			bones_[idxB].rigidBody->setActivationState(DISABLE_DEACTIVATION);
+			bones_[idxB].rigidBody->setWorldTransform(dest);
+			bones_[idxB].rigidBody->setInterpolationWorldTransform(dest);
+		}
+	}
+
+	if (idxA == idxB) {
+		wxLogWarning("SmpSimulator: constraint between same bone '%s', skipped", bodyAName);
+		return;
+	}
+
+	auto& boneA = bones_[idxA];
+	auto& boneB = bones_[idxB];
+
+	if (!boneA.rigidBody || !boneB.rigidBody) {
+		wxLogWarning("SmpSimulator: constraint bones '%s'/'%s' missing rigid bodies", bodyAName, bodyBName);
+		return;
+	}
+
+	// Skip constraints between two kinematic objects
+	if (boneA.rigidBody->isKinematicObject() && boneB.rigidBody->isKinematicObject()) {
+		wxLogMessage("SmpSimulator: Skipping constraint between two kinematic bones '%s' <-> '%s'", bodyAName, bodyBName);
+		return;
+	}
+
+	// Get template
+	const char* tmplAttr = elem->Attribute("template");
+	std::string tmplName = tmplAttr ? tmplAttr : "";
+	GenericConstraintTemplate tmpl = genericConstraintTemplates_[tmplName];
+	ParseGenericConstraintTemplate(elem, tmpl);
+
+	// Calculate constraint frames (in bone-local space)
+	btTransform trA = boneA.worldTransform;
+	btTransform trB = boneB.worldTransform;
+	btTransform frameA, frameB;
+	CalcFrame(tmpl.frameType, tmpl.frame, trA, trB, frameA, frameB);
+
+	// Create 6DOF spring2 constraint — matches hdtSMP64's Generic6DofConstraint which inherits
+	// from btGeneric6DofSpring2Constraint. Spring2 is more numerically stable than Spring1.
+	// When useLinearReferenceFrameA is true, hdtSMP64 swaps A/B (since Spring2 has no such flag,
+	// it always uses body A as reference). We do the same.
+	std::unique_ptr<btGeneric6DofSpring2Constraint> constraint;
+	if (tmpl.useLinearReferenceFrameA) {
+		// Apply rigToLocal to swapped frames
+		btTransform fB = boneB.rigToLocal * frameB;
+		btTransform fA = boneA.rigToLocal * frameA;
+		constraint = std::make_unique<btGeneric6DofSpring2Constraint>(
+			*boneB.rigidBody, *boneA.rigidBody, fB, fA, RO_XYZ);
+	}
+	else {
+		btTransform fA = boneA.rigToLocal * frameA;
+		btTransform fB = boneB.rigToLocal * frameB;
+		constraint = std::make_unique<btGeneric6DofSpring2Constraint>(
+			*boneA.rigidBody, *boneB.rigidBody, fA, fB, RO_XYZ);
+	}
+
+	constraint->setLinearLowerLimit(tmpl.linearLowerLimit);
+	constraint->setLinearUpperLimit(tmpl.linearUpperLimit);
+	constraint->setAngularLowerLimit(tmpl.angularLowerLimit);
+	constraint->setAngularUpperLimit(tmpl.angularUpperLimit);
+
+	// Enable all springs by default (matches hdtSMP64 constructor), then set values
+	for (int i = 0; i < 6; i++)
+		constraint->enableSpring(i, true);
+
+	for (int i = 0; i < 3; i++) {
+		constraint->setStiffness(i, tmpl.linearStiffness[i]);
+		constraint->setStiffness(i + 3, tmpl.angularStiffness[i]);
+		constraint->setDamping(i, tmpl.linearDamping[i]);
+		constraint->setDamping(i + 3, tmpl.angularDamping[i]);
+		constraint->setEquilibriumPoint(i, tmpl.linearEquilibrium[i]);
+		constraint->setEquilibriumPoint(i + 3, tmpl.angularEquilibrium[i]);
+	}
+
+	constraints_.push_back(std::move(constraint));
+	wxLogMessage("SmpSimulator: Generic constraint '%s' <-> '%s'", bodyAName, bodyBName);
+}
+
+// ---------------------------------------------------------------------------
+// Stiff spring constraint parsing
+// ---------------------------------------------------------------------------
+
+void SmpSimulator::ParseStiffSpringConstraintTemplate(XMLElement* elem, StiffSpringConstraintTemplate& tmpl) {
+	for (auto* child = elem->FirstChildElement(); child; child = child->NextSiblingElement()) {
+		std::string name = child->Name();
+		if (name == "minDistanceFactor")
+			tmpl.minDistanceFactor = std::max(ReadFloat(child, 1.0f), 0.0f);
+		else if (name == "maxDistanceFactor")
+			tmpl.maxDistanceFactor = std::max(ReadFloat(child, 1.0f), 0.0f);
+		else if (name == "stiffness")
+			tmpl.stiffness = std::max(ReadFloat(child), 0.0f);
+		else if (name == "damping")
+			tmpl.damping = std::max(ReadFloat(child), 0.0f);
+		else if (name == "equilibrium")
+			tmpl.equilibriumFactor = std::clamp(ReadFloat(child, 0.5f), 0.0f, 1.0f);
+	}
+}
+
+void SmpSimulator::ParseStiffSpringConstraint(XMLElement* elem) {
+	const char* bodyAName = elem->Attribute("bodyA");
+	const char* bodyBName = elem->Attribute("bodyB");
+	if (!bodyAName || !bodyBName) {
+		wxLogWarning("SmpSimulator: stiffspring-constraint missing bodyA/bodyB");
+		return;
+	}
+
+	int idxA = FindBoneIdx(bodyAName);
+	int idxB = FindBoneIdx(bodyBName);
+	if (idxA < 0 || idxB < 0) {
+		wxLogWarning("SmpSimulator: stiffspring-constraint bone not found: '%s' or '%s'", bodyAName, bodyBName);
+		return;
+	}
+	if (idxA == idxB)
+		return;
+
+	auto& boneA = bones_[idxA];
+	auto& boneB = bones_[idxB];
+	if (!boneA.rigidBody || !boneB.rigidBody)
+		return;
+	if (boneA.rigidBody->isKinematicObject() && boneB.rigidBody->isKinematicObject())
+		return;
+
+	const char* tmplAttr = elem->Attribute("template");
+	std::string tmplName = tmplAttr ? tmplAttr : "";
+	StiffSpringConstraintTemplate tmpl = stiffSpringConstraintTemplates_[tmplName];
+	ParseStiffSpringConstraintTemplate(elem, tmpl);
+
+	// Distance between bones at rest
+	float restDist = (boneA.worldTransform.getOrigin() - boneB.worldTransform.getOrigin()).length();
+	float minDist = restDist * tmpl.minDistanceFactor;
+	float maxDist = restDist * tmpl.maxDistanceFactor;
+
+	// Implement as a generic 6DOF spring constraint with linear limits only
+	btTransform frameA, frameB;
+	frameA.setIdentity();
+	frameB.setIdentity();
+
+	auto constraint = std::make_unique<btGeneric6DofSpringConstraint>(
+		*boneA.rigidBody, *boneB.rigidBody, frameA, frameB, true);
+
+	// Set linear limits based on distance
+	float equil = minDist * tmpl.equilibriumFactor + maxDist * (1.0f - tmpl.equilibriumFactor);
+	btVector3 lower(-maxDist, -maxDist, -maxDist);
+	btVector3 upper(maxDist, maxDist, maxDist);
+	constraint->setLinearLowerLimit(lower);
+	constraint->setLinearUpperLimit(upper);
+
+	for (int i = 0; i < 3; i++) {
+		constraint->enableSpring(i, tmpl.stiffness > 0.0f);
+		constraint->setStiffness(i, tmpl.stiffness);
+		constraint->setDamping(i, tmpl.damping);
+		constraint->setEquilibriumPoint(i, 0.0f);
+	}
+
+	constraints_.push_back(std::move(constraint));
+	wxLogMessage("SmpSimulator: StiffSpring '%s' <-> '%s' (dist=%.3f)", bodyAName, bodyBName, restDist);
+}
+
+// ---------------------------------------------------------------------------
+// Cone twist constraint parsing
+// ---------------------------------------------------------------------------
+
+void SmpSimulator::ParseConeTwistConstraintTemplate(XMLElement* elem, ConeTwistConstraintTemplate& tmpl) {
+	for (auto* child = elem->FirstChildElement(); child; child = child->NextSiblingElement()) {
+		std::string name = child->Name();
+		if (name == "frameInA") {
+			tmpl.frameType = GenericConstraintTemplate::FrameInA;
+			tmpl.frame = ReadTransform(child);
+		}
+		else if (name == "frameInB") {
+			tmpl.frameType = GenericConstraintTemplate::FrameInB;
+			tmpl.frame = ReadTransform(child);
+		}
+		else if (name == "angularOnly")
+			tmpl.angularOnly = ReadBool(child);
+		else if (name == "swingSpan1" || name == "coneLimit" || name == "limitZ")
+			tmpl.swingSpan1 = std::max(ReadFloat(child), 0.0f);
+		else if (name == "swingSpan2" || name == "planeLimit" || name == "limitY")
+			tmpl.swingSpan2 = std::max(ReadFloat(child), 0.0f);
+		else if (name == "twistSpan" || name == "twistLimit" || name == "limitX")
+			tmpl.twistSpan = std::max(ReadFloat(child), 0.0f);
+		else if (name == "limitSoftness")
+			tmpl.limitSoftness = std::clamp(ReadFloat(child, 1.0f), 0.0f, 1.0f);
+		else if (name == "biasFactor")
+			tmpl.biasFactor = std::clamp(ReadFloat(child, 0.3f), 0.0f, 1.0f);
+		else if (name == "relaxationFactor")
+			tmpl.relaxationFactor = std::clamp(ReadFloat(child, 1.0f), 0.0f, 1.0f);
+	}
+}
+
+void SmpSimulator::ParseConeTwistConstraint(XMLElement* elem) {
+	const char* bodyAName = elem->Attribute("bodyA");
+	const char* bodyBName = elem->Attribute("bodyB");
+	if (!bodyAName || !bodyBName) {
+		wxLogWarning("SmpSimulator: conetwist-constraint missing bodyA/bodyB");
+		return;
+	}
+
+	int idxA = FindBoneIdx(bodyAName);
+	int idxB = FindBoneIdx(bodyBName);
+	if (idxA < 0 || idxB < 0) {
+		wxLogWarning("SmpSimulator: conetwist-constraint bone not found: '%s' or '%s'", bodyAName, bodyBName);
+		return;
+	}
+	if (idxA == idxB)
+		return;
+
+	auto& boneA = bones_[idxA];
+	auto& boneB = bones_[idxB];
+	if (!boneA.rigidBody || !boneB.rigidBody)
+		return;
+	if (boneA.rigidBody->isKinematicObject() && boneB.rigidBody->isKinematicObject())
+		return;
+
+	const char* tmplAttr = elem->Attribute("template");
+	std::string tmplName = tmplAttr ? tmplAttr : "";
+	ConeTwistConstraintTemplate tmpl = coneTwistConstraintTemplates_[tmplName];
+	ParseConeTwistConstraintTemplate(elem, tmpl);
+
+	// Calculate frames
+	btTransform trA = boneA.worldTransform;
+	btTransform trB = boneB.worldTransform;
+	btTransform frameA, frameB;
+	CalcFrame(tmpl.frameType, tmpl.frame, trA, trB, frameA, frameB);
+
+	// Convert bone-local frames to rigid body COM space
+	btTransform ctFrameA = boneA.rigToLocal * frameA;
+	btTransform ctFrameB = boneB.rigToLocal * frameB;
+
+	auto constraint = std::make_unique<btConeTwistConstraint>(
+		*boneA.rigidBody, *boneB.rigidBody, ctFrameA, ctFrameB);
+
+	constraint->setLimit(tmpl.swingSpan1, tmpl.swingSpan2, tmpl.twistSpan,
+						 tmpl.limitSoftness, tmpl.biasFactor, tmpl.relaxationFactor);
+	constraint->setAngularOnly(tmpl.angularOnly);
+
+	constraints_.push_back(std::move(constraint));
+	wxLogMessage("SmpSimulator: ConeTwist '%s' <-> '%s'", bodyAName, bodyBName);
+}
+
+// ---------------------------------------------------------------------------
+// Shape skinning loading
+// ---------------------------------------------------------------------------
+
+bool SmpSimulator::LoadShapeSkinning(NifFile& nif, NiShape* shape,
+									 const std::string& displayName) {
+	if (!shape)
+		return false;
+
+	SkinnedShape ss;
+	ss.displayName = displayName;
+
+	// Get bone list for this shape
+	std::vector<std::string> boneNames;
+	nif.GetShapeBoneList(shape, boneNames);
+	if (boneNames.empty()) {
+		wxLogMessage("SmpSimulator: Shape '%s' has no bones, skipping", displayName);
+		return false;
+	}
+
+	// Get global-to-skin transform
+	MatTransform globalToSkin;
+	nif.GetShapeTransformGlobalToSkin(shape, globalToSkin);
+
+	// Build skinned bone list
+	ss.skinBones.resize(boneNames.size());
+	for (size_t bi = 0; bi < boneNames.size(); bi++) {
+		int boneIdx = FindBoneIdx(boneNames[bi]);
+		if (boneIdx < 0) {
+			boneIdx = GetOrCreateBone(boneNames[bi]);
+		}
+		ss.skinBones[bi].boneIdx = boneIdx;
+
+		// If the bone wasn't in the skeleton NIF (e.g. outfit-specific physics bones like "vv1 1"),
+		// its worldTransform is identity. Try to populate it from the outfit NIF.
+		// This is critical: constraint frames are computed from these world transforms, so starting
+		// at (0,0,0) instead of the bind-pose position causes immediate constraint explosion.
+		BoneInfo& bone = bones_[boneIdx];
+		if (bone.worldTransform == btTransform::getIdentity()) {
+			MatTransform globalXf;
+			if (nif.GetNodeTransformToGlobal(boneNames[bi], globalXf)) {
+				bone.worldTransform = ToBt(globalXf);
+				bone.origWorldTransform = bone.worldTransform;
+			}
+		}
+
+		MatTransform skinToBone;
+		nif.GetShapeTransformSkinToBone(shape, boneNames[bi], skinToBone);
+		ss.skinBones[bi].skinToBone = skinToBone;
+	}
+
+	// Get vertices
+	std::vector<Vector3> verts;
+	nif.GetVertsForShape(shape, verts);
+	if (verts.empty())
+		return false;
+
+	ss.vertices.resize(verts.size());
+	ss.currentVerts.resize(verts.size());
+
+	// Get bone weights for each bone
+	for (size_t bi = 0; bi < boneNames.size(); bi++) {
+		std::unordered_map<uint16_t, float> weights;
+		nif.GetShapeBoneWeights(shape, static_cast<int>(bi), weights);
+
+		for (auto& [vertIdx, weight] : weights) {
+			if (vertIdx >= ss.vertices.size())
+				continue;
+			auto& v = ss.vertices[vertIdx];
+			// Find first empty slot
+			for (int k = 0; k < 4; k++) {
+				if (v.boneIdx[k] < 0 || v.weight[k] <= 0.0f) {
+					v.boneIdx[k] = static_cast<int>(bi);
+					v.weight[k] = weight;
+					break;
+				}
+			}
+		}
+	}
+
+	// Set skin positions: vertex position in skin space
+	// (the raw vertex position from the NIF is in skin space for skinned shapes)
+	for (size_t i = 0; i < verts.size(); i++) {
+		ss.vertices[i].skinPos = verts[i];
+		ss.currentVerts[i] = verts[i]; // initial
+	}
+
+	// Normalise weights (make sure they sum to 1)
+	for (auto& v : ss.vertices) {
+		float total = 0.0f;
+		for (int k = 0; k < 4; k++)
+			total += v.weight[k];
+		if (total > 0.0f) {
+			for (int k = 0; k < 4; k++)
+				v.weight[k] /= total;
+		}
+	}
+
+	skinnedShapes_.push_back(std::move(ss));
+	wxLogMessage("SmpSimulator: Loaded skinning for '%s' (%zu verts, %zu bones)",
+				 displayName, verts.size(), boneNames.size());
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Initialisation
+// ---------------------------------------------------------------------------
+
+bool SmpSimulator::Initialise() {
+	if (initialised_)
+		return true;
+
+	// Create Bullet physics world
+	collisionConfig_ = std::make_unique<btDefaultCollisionConfiguration>();
+	dispatcher_ = std::make_unique<btCollisionDispatcher>(collisionConfig_.get());
+	broadphase_ = std::make_unique<btDbvtBroadphase>();
+	solver_ = std::make_unique<btSequentialImpulseConstraintSolver>();
+	world_ = std::make_unique<btDiscreteDynamicsWorld>(
+		dispatcher_.get(), broadphase_.get(), solver_.get(), collisionConfig_.get());
+
+	// Gravity in Skyrim NIF units.
+	// scaleRealWorld = 0.01425 m/NIF-unit → scaleSkyrim = 1/0.01425 ≈ 70.175 NIF-units/m.
+	// SMP XML values (mass, inertia, stiffness) are all calibrated to Skyrim NIF units,
+	// so gravity must also be in NIF units/s².  This matches hdtSMP64's formula exactly.
+	static constexpr float scaleSkyrim = 1.0f / 0.01425f; // ≈ 70.175
+	world_->setGravity(btVector3(0, 0, -9.8f * scaleSkyrim));
+
+	// Add all rigid bodies to the world
+	for (size_t i = 0; i < bones_.size(); i++) {
+		auto& bone = bones_[i];
+		if (bone.rigidBody) {
+			wxLogMessage("SmpSimulator: Adding rigid body %zu '%s' to world", i, bone.name);
+			world_->addRigidBody(bone.rigidBody.get());
+
+			// Set per-bone gravity factor
+			if (!bone.rigidBody->isStaticOrKinematicObject()) {
+				bone.rigidBody->setGravity(world_->getGravity() * bone.gravityFactor);
+			}
+		}
+	}
+
+	// Add all constraints
+	wxLogMessage("SmpSimulator: Adding %zu constraints to world", constraints_.size());
+	for (size_t ci = 0; ci < constraints_.size(); ci++) {
+		wxLogMessage("SmpSimulator: Adding constraint %zu", ci);
+		world_->addConstraint(constraints_[ci].get(), true);
+	}
+
+	initialised_ = true;
+	wxLogMessage("SmpSimulator: Initialised — %zu bones, %zu constraints, %zu skinned shapes",
+				 bones_.size(), constraints_.size(), skinnedShapes_.size());
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Simulation stepping
+// ---------------------------------------------------------------------------
+
+void SmpSimulator::Step(float dt) {
+	if (!initialised_ || !world_)
+		return;
+
+	wxLogMessage("SmpSimulator::Step(%.4f) start", dt);
+
+	// Update kinematic bone transforms (they stay in rest pose for preview)
+	for (auto& bone : bones_) {
+		if (bone.rigidBody && bone.rigidBody->isKinematicObject()) {
+			btTransform dest = bone.worldTransform * bone.localToRig;
+			bone.rigidBody->getMotionState()->setWorldTransform(dest);
+		}
+	}
+
+	// Step simulation
+	wxLogMessage("SmpSimulator::Step - stepping world");
+	world_->stepSimulation(dt, 4, 1.0f / 60.0f);
+	wxLogMessage("SmpSimulator::Step - world stepped OK");
+
+	// Update bone currentTransform from rigid body
+	for (auto& bone : bones_) {
+		if (bone.rigidBody && !bone.rigidBody->isKinematicObject()) {
+			btTransform rbTrans = bone.rigidBody->getWorldTransform();
+			bone.worldTransform = rbTrans * bone.rigToLocal;
+		}
+	}
+
+	// Skin vertices
+	SkinVertices();
+}
+
+void SmpSimulator::Reset() {
+	for (auto& bone : bones_) {
+		bone.worldTransform = bone.origWorldTransform;
+		if (bone.rigidBody) {
+			btTransform dest = bone.worldTransform * bone.localToRig;
+			bone.rigidBody->setWorldTransform(dest);
+			bone.rigidBody->setInterpolationWorldTransform(dest);
+			bone.rigidBody->setLinearVelocity(btVector3(0, 0, 0));
+			bone.rigidBody->setAngularVelocity(btVector3(0, 0, 0));
+			bone.rigidBody->setInterpolationLinearVelocity(btVector3(0, 0, 0));
+			bone.rigidBody->setInterpolationAngularVelocity(btVector3(0, 0, 0));
+			bone.rigidBody->clearForces();
+		}
+	}
+
+	SkinVertices();
+}
+
+void SmpSimulator::SetGravity(const Vector3& g) {
+	if (world_) {
+		world_->setGravity(ToBt(g));
+		// Update per-bone gravity
+		for (auto& bone : bones_) {
+			if (bone.rigidBody && !bone.rigidBody->isStaticOrKinematicObject()) {
+				bone.rigidBody->setGravity(world_->getGravity() * bone.gravityFactor);
+			}
+		}
+	}
+}
+
+void SmpSimulator::SetWind(const Vector3& wind) {
+	wind_ = ToBt(wind);
+}
+
+// ---------------------------------------------------------------------------
+// Vertex skinning
+// ---------------------------------------------------------------------------
+
+void SmpSimulator::SkinVertices() {
+	for (auto& shape : skinnedShapes_) {
+		// Build fast bone transforms: skinBoneIdx → world * skinToBone^(-1)
+		// For each skinned bone, the transform that maps skin-space vertices
+		// to world space is: boneWorld * boneToSkin_inverse * skin-to-bone^(-1)
+		// Actually: result = Sum_i(weight_i * (boneWorld_i * skinToBone_i) * skinPos)
+		// where skinToBone_i converts from skin space to bone i's local space
+
+		struct BoneSkinTransform {
+			Matrix3 rot;
+			Vector3 trans;
+		};
+		std::vector<BoneSkinTransform> boneTransforms(shape.skinBones.size());
+
+		for (size_t bi = 0; bi < shape.skinBones.size(); bi++) {
+			auto& sb = shape.skinBones[bi];
+			btTransform boneWorld = GetBoneWorldTransform(sb.boneIdx);
+
+			// skinToBone transforms from skin space to bone local space
+			// boneWorldTransform transforms from bone local space to world space
+			// So: worldPos = boneWorld * skinToBone * skinPos (nifly convention)
+			// But we need to work in NIF world space.
+
+			// Compose: boneWorld * skinToBone
+			btTransform skinToBoneBt = ToBt(sb.skinToBone);
+			btTransform combined = boneWorld * skinToBoneBt;
+
+			// Extract rotation and translation
+			const btMatrix3x3& m = combined.getBasis();
+			boneTransforms[bi].rot[0] = Vector3(m[0][0], m[0][1], m[0][2]);
+			boneTransforms[bi].rot[1] = Vector3(m[1][0], m[1][1], m[1][2]);
+			boneTransforms[bi].rot[2] = Vector3(m[2][0], m[2][1], m[2][2]);
+			boneTransforms[bi].trans = ToNif(combined.getOrigin());
+		}
+
+		// Skin each vertex
+		for (size_t vi = 0; vi < shape.vertices.size(); vi++) {
+			auto& v = shape.vertices[vi];
+			Vector3 result(0, 0, 0);
+
+			for (int k = 0; k < 4; k++) {
+				if (v.boneIdx[k] < 0 || v.weight[k] <= 0.0f)
+					continue;
+
+				auto& bt = boneTransforms[v.boneIdx[k]];
+				// Transform = rot * skinPos + trans
+				Vector3 transformed;
+				transformed.x = bt.rot[0].x * v.skinPos.x + bt.rot[0].y * v.skinPos.y + bt.rot[0].z * v.skinPos.z + bt.trans.x;
+				transformed.y = bt.rot[1].x * v.skinPos.x + bt.rot[1].y * v.skinPos.y + bt.rot[1].z * v.skinPos.z + bt.trans.y;
+				transformed.z = bt.rot[2].x * v.skinPos.x + bt.rot[2].y * v.skinPos.y + bt.rot[2].z * v.skinPos.z + bt.trans.z;
+
+				result.x += transformed.x * v.weight[k];
+				result.y += transformed.y * v.weight[k];
+				result.z += transformed.z * v.weight[k];
+			}
+
+			shape.currentVerts[vi] = result;
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Output queries
+// ---------------------------------------------------------------------------
+
+bool SmpSimulator::HasPhysics(const std::string& displayName) const {
+	for (auto& shape : skinnedShapes_)
+		if (shape.displayName == displayName)
+			return true;
+	return false;
+}
+
+const std::vector<Vector3>& SmpSimulator::GetSkinnedVerts(const std::string& displayName) const {
+	for (auto& shape : skinnedShapes_)
+		if (shape.displayName == displayName)
+			return shape.currentVerts;
+	return emptyVerts_;
+}
+
+std::vector<std::string> SmpSimulator::GetPhysicsShapeNames() const {
+	std::vector<std::string> names;
+	names.reserve(skinnedShapes_.size());
+	for (auto& shape : skinnedShapes_)
+		names.push_back(shape.displayName);
+	return names;
+}

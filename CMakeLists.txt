@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 find_package(wxWidgets REQUIRED gl core base net xrc adv qa html propgrid)
 find_package(OpenGL REQUIRED)
 find_package(GLEW REQUIRED)
+find_package(Bullet REQUIRED)
 set(fbxsdk_dir ../fbxsdk)
 find_library(fbxsdk fbxsdk PATHS ${fbxsdk_dir}/lib/release)
 
@@ -95,6 +96,7 @@ set(BSsources
 	src/files/ESPReader.cpp
 	src/components/BuildSelection.cpp
 	src/components/LeveledListData.cpp
+	src/components/SmpSimulator.cpp
 	src/program/BodySlideApp.cpp
 	src/program/NormalsGenDialog.cpp
 	src/program/PreviewWindow.cpp
@@ -114,6 +116,7 @@ target_include_directories(OutfitStudio SYSTEM PRIVATE
 	)
 target_include_directories(BodySlide SYSTEM PRIVATE
 	/usr/include/wine/windows
+	${BULLET_INCLUDE_DIRS}
 	)
 target_include_directories(OutfitStudio PUBLIC
 	lib/gli
@@ -139,5 +142,6 @@ target_link_libraries(BodySlide
 	${wxWidgets_LIBRARIES}
 	${OPENGL_LIBRARIES}
 	${GLEW_LIBRARIES}
+	${BULLET_LIBRARIES}
 	xml2
 	z)

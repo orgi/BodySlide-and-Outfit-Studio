@@ -10,6 +10,7 @@
 #include <regex>
 #include <sstream>
 
+#include <ExtraData.hpp>
 #include <wx/dir.h>
 
 using namespace nifly;
@@ -29,6 +30,7 @@ wxBEGIN_EVENT_TABLE(LeveledListPreviewer, wxFrame)
 	EVT_TEXT_ENTER(LeveledListPreviewer::ID_HeadNPC, LeveledListPreviewer::OnHeadEntered)
 	EVT_COMBOBOX(LeveledListPreviewer::ID_Preset, LeveledListPreviewer::OnPresetChanged)
 	EVT_CHECKBOX(LeveledListPreviewer::ID_HighWeight, LeveledListPreviewer::OnHighWeightChanged)
+	EVT_TIMER(LeveledListPreviewer::ID_SmpTimer, LeveledListPreviewer::OnSmpTimer)
 	EVT_FSWATCHER(wxID_ANY, LeveledListPreviewer::OnFileChanged)
 wxEND_EVENT_TABLE()
 
@@ -38,7 +40,8 @@ wxEND_EVENT_TABLE()
 
 LeveledListPreviewer::LeveledListPreviewer(BodySlideApp* app)
 	: wxFrame(nullptr, wxID_ANY, _("Leveled List Previewer"), wxDefaultPosition, wxDefaultSize)
-	, app(app) {
+	, app(app)
+	, smpTimer_(this, ID_SmpTimer) {
 	SetIcon(wxIcon(wxString::FromUTF8(Config["AppDir"]) + "/res/images/BodySlide.png", wxBITMAP_TYPE_PNG));
 
 	// Menu bar
@@ -104,6 +107,14 @@ LeveledListPreviewer::LeveledListPreviewer(BodySlideApp* app)
 	highWeightCheck->SetToolTip(_("High weight (_1) when checked, low weight (_0) when unchecked"));
 	presetSizer->Add(highWeightCheck, 0, wxALIGN_CENTER_VERTICAL);
 	leftSizer->Add(presetSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
+
+	// SMP physics toggle
+	wxBoxSizer* smpSizer = new wxBoxSizer(wxHORIZONTAL);
+	smpToggle_ = new wxCheckBox(leftPanel, ID_ToggleSmp, _("SMP Physics Preview"));
+	smpToggle_->SetToolTip(_("Enable real-time cloth/hair physics simulation for SMP-enabled outfits"));
+	smpToggle_->Bind(wxEVT_CHECKBOX, &LeveledListPreviewer::OnToggleSmp, this);
+	smpSizer->Add(smpToggle_, 0, wxALIGN_CENTER_VERTICAL);
+	leftSizer->Add(smpSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
 
 	// Outfit list
 	outfitList = new wxListCtrl(leftPanel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT | wxLC_SINGLE_SEL);
@@ -1253,6 +1264,12 @@ void LeveledListPreviewer::OnOutfitSelected(wxListEvent& event) {
 }
 
 void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
+	// Stop any running SMP simulation
+	StopSmpSimulation();
+	smpXmlPaths_.clear();
+	if (smpToggle_)
+		smpToggle_->SetValue(false);
+
 	if (canvas && context)
 		canvas->SetCurrent(*context);
 
@@ -1356,6 +1373,15 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 		}
 
 	nifLoaded:
+		// Extract SMP XML path from NIF extra data
+		{
+			std::string xmlPath = FindSmpXml(nif, piece.nifPath);
+			if (!xmlPath.empty()) {
+				smpXmlPaths_[piecePath] = xmlPath;
+				wxLogMessage("  SMP XML found for '%s': %s", piecePath, xmlPath);
+			}
+		}
+
 		// Add all shapes from NIF.
 		// Prefix each shape name with the piece's FormID to avoid collisions when
 		// multiple pieces share shape names (e.g. both have a "Body" shape).
@@ -1436,6 +1462,9 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 			}
 		}
 	}
+
+	if (smpToggle_)
+		smpToggle_->Enable(!smpXmlPaths_.empty());
 
 	// Apply preset to outfit pieces
 	if (!outfitShapeMorphMap.empty() && !currentPresetName.empty() && currentPresetName != "(none)")
@@ -1961,9 +1990,261 @@ void LeveledListPreviewer::OnClose(wxCloseEvent& WXUNUSED(event)) {
 	if (ret)
 		wxLogWarning("LeveledListPreviewer: failed to save Config.xml (%d).", ret);
 
+	StopSmpSimulation();
+
 	Destroy();
 	if (app)
 		app->LeveledListPreviewerClosed();
+}
+
+// ---------------------------------------------------------------------------
+// SMP Physics Simulation
+// ---------------------------------------------------------------------------
+
+std::string LeveledListPreviewer::FindSkeletonNifPath() {
+	std::string baseGamePath = Config["GameDataPath"];
+	if (!baseGamePath.empty() && baseGamePath.back() != '/' && baseGamePath.back() != '\\')
+		baseGamePath += '/';
+
+	// Try common Skyrim skeleton paths
+	static const char* candidatePaths[] = {
+		"meshes/actors/character/character assets/skeleton_female.nif",
+		"meshes/actors/character/character assets/skeleton.nif",
+		"meshes/actors/character/character assets female/skeleton.nif",
+	};
+
+	for (auto& candidate : candidatePaths) {
+		std::string fullPath = baseGamePath + candidate;
+		if (wxFileName::FileExists(fullPath))
+			return fullPath;
+
+		// Case-insensitive fallback
+		std::string resolved = lldata::LeveledListData::ResolveCaseInsensitive(baseGamePath, candidate);
+		if (!resolved.empty())
+			return resolved;
+	}
+
+	// Also try the bundled skeletons in res/
+	std::string appDir = Config["AppDir"];
+	std::string bundled = appDir + "/res/skeleton_female_sse.nif";
+	if (wxFileName::FileExists(bundled))
+		return bundled;
+
+	return {};
+}
+
+std::string LeveledListPreviewer::FindSmpXml(NifFile& nif, const std::string& nifRelativePath) {
+	std::string baseGamePath = Config["GameDataPath"];
+	if (!baseGamePath.empty() && baseGamePath.back() != '/' && baseGamePath.back() != '\\')
+		baseGamePath += '/';
+
+	// The SMP XML path is stored in the NIF as NiStringExtraData on the
+	// root node with name "HDT Skinned Mesh Physics Object".
+	auto extraDatas = nif.GetChildren<NiStringExtraData>(nullptr, true);
+	for (auto* sed : extraDatas) {
+		if (sed->name.get() == "HDT Skinned Mesh Physics Object") {
+			std::string xmlRelPath = sed->stringData.get();
+			if (xmlRelPath.empty())
+				continue;
+
+			// Normalise backslashes to forward slashes
+			std::replace(xmlRelPath.begin(), xmlRelPath.end(), '\\', '/');
+
+			// The path is relative to the game Data folder
+			std::string fullPath = baseGamePath + xmlRelPath;
+			if (wxFileName::FileExists(fullPath))
+				return fullPath;
+
+			// Try case-insensitive resolve
+			std::string resolved = lldata::LeveledListData::ResolveCaseInsensitive(baseGamePath, xmlRelPath);
+			if (!resolved.empty())
+				return resolved;
+
+			wxLogWarning("SMP XML path from NIF '%s' not found on disk: %s", nifRelativePath, fullPath);
+		}
+	}
+
+	return {};
+}
+
+void LeveledListPreviewer::SetupSmpSimulation() {
+	StopSmpSimulation();
+
+	if (smpXmlPaths_.empty()) {
+		wxLogMessage("SMP: No SMP XML configs found for this outfit");
+		return;
+	}
+
+	// Find skeleton
+	std::string skelPath = FindSkeletonNifPath();
+	if (skelPath.empty()) {
+		wxLogWarning("SMP: Could not find skeleton NIF");
+		return;
+	}
+
+	smpSimulator_ = std::make_unique<SmpSimulator>();
+
+	// Load skeleton
+	if (!smpSimulator_->LoadSkeleton(skelPath)) {
+		wxLogWarning("SMP: Failed to load skeleton from %s", skelPath);
+		smpSimulator_.reset();
+		return;
+	}
+
+	// Pre-load unique NIFs that have SMP configs.
+	// We need bone transforms from outfit NIFs BEFORE parsing XML configs,
+	// because SMP physics bones (e.g. "vv1 1") only exist in outfit NIFs,
+	// not in the skeleton. Without correct transforms, constraint frames
+	// are computed from identity and the cloth chain collapses.
+	std::unordered_map<std::string, std::unique_ptr<NifFile>> loadedNifs;
+	for (auto& [nifPath, xmlPath] : smpXmlPaths_) {
+		if (loadedNifs.count(nifPath))
+			continue;
+
+		auto nif = std::make_unique<NifFile>();
+		std::string resolvedPath = data.ResolveNifPath(nifPath);
+		bool loaded = false;
+		if (!resolvedPath.empty() && nif->Load(resolvedPath) == 0) {
+			loaded = true;
+		}
+		else {
+			for (FSArchiveFile* archive : FSManager::archiveList()) {
+				if (archive && archive->hasFile(nifPath)) {
+					wxMemoryBuffer outData;
+					archive->fileContents(nifPath, outData);
+					if (!outData.IsEmpty()) {
+						std::string content(static_cast<char*>(outData.GetData()), outData.GetDataLen());
+						std::istringstream stream(content, std::istringstream::binary);
+						if (nif->Load(stream) == 0) {
+							loaded = true;
+							break;
+						}
+					}
+				}
+			}
+		}
+		if (loaded)
+			loadedNifs[nifPath] = std::move(nif);
+	}
+
+	// Phase 1: Populate bone world transforms from outfit NIFs
+	for (auto& [nifPath, nif] : loadedNifs)
+		smpSimulator_->PopulateBoneTransforms(*nif);
+
+	// Phase 2: Parse SMP XML configs (bone transforms are now known)
+	for (auto& [nifPath, xmlPath] : smpXmlPaths_) {
+		if (!smpSimulator_->LoadSmpConfig(xmlPath))
+			wxLogWarning("SMP: Failed to load XML config: %s", xmlPath);
+	}
+
+	// Phase 3: Load shape skinning data
+	for (auto& shapeName : outfitShapeNames) {
+		auto srcIt = shapeNifSource.find(shapeName);
+		if (srcIt == shapeNifSource.end())
+			continue;
+
+		auto nifIt = loadedNifs.find(srcIt->second);
+		if (nifIt == loadedNifs.end())
+			continue;
+
+		std::string origShapeName;
+		size_t underscorePos = shapeName.find('_');
+		if (underscorePos != std::string::npos && underscorePos == 8)
+			origShapeName = shapeName.substr(9);
+		else
+			origShapeName = shapeName;
+
+		auto* shape = nifIt->second->FindBlockByName<NiShape>(origShapeName);
+		if (shape)
+			smpSimulator_->LoadShapeSkinning(*nifIt->second, shape, shapeName);
+	}
+
+	// Initialise physics world
+	if (!smpSimulator_->Initialise()) {
+		wxLogWarning("SMP: Failed to initialise physics simulation");
+		smpSimulator_.reset();
+		return;
+	}
+
+	wxLogMessage("SMP: Simulation ready — %zu physics shapes", smpSimulator_->GetPhysicsShapeNames().size());
+}
+
+void LeveledListPreviewer::StopSmpSimulation() {
+	smpRunning_ = false;
+	smpTimer_.Stop();
+	smpSimulator_.reset();
+}
+
+void LeveledListPreviewer::OnToggleSmp(wxCommandEvent& event) {
+	if (event.IsChecked()) {
+		if (!smpSimulator_) {
+			SetupSmpSimulation();
+		}
+		if (smpSimulator_ && !smpSimulator_->GetPhysicsShapeNames().empty()) {
+			smpRunning_ = true;
+			smpTimer_.Start(16); // ~60 FPS
+			SetStatusText(_("SMP Physics simulation active"));
+		}
+		else {
+			smpToggle_->SetValue(false);
+			SetStatusText(_("No SMP physics data found for this outfit"));
+		}
+	}
+	else {
+		smpRunning_ = false;
+		smpTimer_.Stop();
+
+		// Reset meshes to their original positions
+		if (smpSimulator_) {
+			smpSimulator_->Reset();
+			// Update mesh vertices to rest pose
+			if (canvas && context)
+				canvas->SetCurrent(*context);
+
+			for (auto& name : smpSimulator_->GetPhysicsShapeNames()) {
+				auto& verts = smpSimulator_->GetSkinnedVerts(name);
+				Mesh* mesh = gls.GetMesh(name);
+				if (!mesh || verts.empty())
+					continue;
+
+				int count = std::min(static_cast<int>(verts.size()), mesh->nVerts);
+				for (int i = 0; i < count; i++)
+					mesh->verts[i] = Mesh::TransformPosNifToMesh(verts[i]);
+				mesh->QueueUpdate(Mesh::Position);
+				mesh->UpdateBuffers();
+			}
+			gls.RenderOneFrame();
+		}
+		SetStatusText(_("SMP Physics simulation stopped"));
+	}
+}
+
+void LeveledListPreviewer::OnSmpTimer(wxTimerEvent& WXUNUSED(event)) {
+	if (!smpRunning_ || !smpSimulator_)
+		return;
+
+	if (canvas && context)
+		canvas->SetCurrent(*context);
+
+	// Step physics
+	smpSimulator_->Step(1.0f / 60.0f);
+
+	// Update mesh vertices
+	for (auto& name : smpSimulator_->GetPhysicsShapeNames()) {
+		auto& verts = smpSimulator_->GetSkinnedVerts(name);
+		Mesh* mesh = gls.GetMesh(name);
+		if (!mesh || verts.empty())
+			continue;
+
+		int count = std::min(static_cast<int>(verts.size()), mesh->nVerts);
+		for (int i = 0; i < count; i++)
+			mesh->verts[i] = Mesh::TransformPosNifToMesh(verts[i]);
+
+		mesh->QueueUpdate(Mesh::Position);
+		mesh->UpdateBuffers();
+	}
+
+	gls.RenderOneFrame();
 }
 
 // ---------------------------------------------------------------------------
