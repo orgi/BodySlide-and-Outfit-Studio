@@ -47,6 +47,8 @@ class LeveledListPreviewer : public wxFrame {
 	// Mesh list overlay: floating panel over the GL canvas listing loaded shapes
 	wxScrolledWindow* meshOverlayPanel = nullptr;
 	std::unordered_map<std::string, wxCheckBox*> meshCheckboxes; // shapeName → checkbox
+	std::unordered_map<std::string, std::string> shapeNifSource; // shapeName → source NIF path
+	std::set<std::string> expandedNifGroups;					 // NIF paths currently expanded in overlay
 
 	// Body part tracking: shape name → set of NIF partition body part IDs
 	// (e.g. 32=SBP_32_BODY, 33=SBP_33_HANDS, 37=SBP_37_FEET)

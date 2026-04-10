@@ -131,8 +131,7 @@ LeveledListPreviewer::LeveledListPreviewer(BodySlideApp* app)
 	rightPanel->SetSizer(rightSizer);
 
 	// Mesh list overlay — floating panel over the GL canvas, not in sizer
-	meshOverlayPanel = new wxScrolledWindow(rightPanel, wxID_ANY, wxDefaultPosition, wxSize(220, 100),
-		wxVSCROLL | wxBORDER_SIMPLE);
+	meshOverlayPanel = new wxScrolledWindow(rightPanel, wxID_ANY, wxDefaultPosition, wxSize(220, 100), wxVSCROLL | wxBORDER_SIMPLE);
 	meshOverlayPanel->SetScrollRate(0, 8);
 	meshOverlayPanel->Hide();
 
@@ -452,6 +451,7 @@ bool LeveledListPreviewer::LoadNifFromPath(const std::string& relativePath, cons
 		m->CreateBuffers();
 		AddNifShapeTextures(&nif, m->shapeName);
 		bodyShapeNames.push_back(m->shapeName);
+		shapeNifSource[m->shapeName] = relativePath;
 
 		// Extract partition body part IDs from NIF dismember skin
 		auto* shape = nif.FindBlockByName<NiShape>(shapeName);
@@ -508,13 +508,15 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 
 		if (wnamFormId != 0) {
 			auto paths = data.ResolveBodyNifPaths(wnamFormId, useHighWeight);
-			if (!paths.body.empty())  bodyNifs.push_back(paths.body);
-			if (!paths.hands.empty()) bodyNifs.push_back(paths.hands);
-			if (!paths.feet.empty())  bodyNifs.push_back(paths.feet);
+			if (!paths.body.empty())
+				bodyNifs.push_back(paths.body);
+			if (!paths.hands.empty())
+				bodyNifs.push_back(paths.hands);
+			if (!paths.feet.empty())
+				bodyNifs.push_back(paths.feet);
 
 			if (!bodyNifs.empty())
-				wxLogMessage("LeveledListPreviewer: Using NPC '%s' body meshes (WNAM %08X)",
-							 currentHeadEditorId, wnamFormId);
+				wxLogMessage("LeveledListPreviewer: Using NPC '%s' body meshes (WNAM %08X)", currentHeadEditorId, wnamFormId);
 		}
 	}
 
@@ -676,8 +678,10 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 void LeveledListPreviewer::ClearHeadMeshes() {
 	if (canvas && context)
 		canvas->SetCurrent(*context);
-	for (auto& name : headShapeNames)
+	for (auto& name : headShapeNames) {
 		gls.DeleteMesh(name);
+		shapeNifSource.erase(name);
+	}
 	headShapeNames.clear();
 }
 
@@ -721,6 +725,7 @@ void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
 		m->CreateBuffers();
 		AddNifShapeTextures(&nif, shapeName, nullptr, meshName);
 		headShapeNames.push_back(meshName);
+		shapeNifSource[meshName] = relativePath;
 	}
 
 	wxLogMessage("LeveledListPreviewer: Loaded head NIF for NPC '%s' (%s): %zu shapes", npc.editorId, formIdBuf, headShapeNames.size());
@@ -1252,10 +1257,14 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 		canvas->SetCurrent(*context);
 
 	// Selectively clear outfit and body meshes, keeping head meshes
-	for (auto& name : outfitShapeNames)
+	for (auto& name : outfitShapeNames) {
 		gls.DeleteMesh(name);
-	for (auto& name : bodyShapeNames)
+		shapeNifSource.erase(name);
+	}
+	for (auto& name : bodyShapeNames) {
 		gls.DeleteMesh(name);
+		shapeNifSource.erase(name);
+	}
 
 	// Clean up tracking for deleted shapes
 	// Remove non-head entries from untexturedShapes and shapeMaterials
@@ -1395,6 +1404,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 				}
 			}
 			outfitShapeNames.push_back(m->shapeName);
+			shapeNifSource[m->shapeName] = piecePath;
 			++loadedCount;
 
 			// Cache game verts and match to reference NIF for morphing
@@ -1683,11 +1693,8 @@ void LeveledListPreviewer::RepositionMeshOverlay() {
 }
 
 void LeveledListPreviewer::SyncMeshOverlayStates() {
-	for (auto& [name, cb] : meshCheckboxes) {
-		Mesh* m = gls.GetMesh(name);
-		if (m && cb)
-			cb->SetValue(m->bVisible);
-	}
+	// Full rebuild to keep NIF-group checkboxes in sync
+	RefreshMeshOverlay();
 }
 
 void LeveledListPreviewer::RefreshMeshOverlay() {
@@ -1697,33 +1704,64 @@ void LeveledListPreviewer::RefreshMeshOverlay() {
 	meshOverlayPanel->DestroyChildren();
 	meshCheckboxes.clear();
 
+	// --- Build grouped structure: category → NIF path → list of shapes ---
 	struct ShapeEntry {
 		std::string shapeName;
 		std::string displayName;
 		bool visible;
 	};
-	// Build category lists; skip empties
-	std::vector<std::pair<std::string, std::vector<ShapeEntry>>> categories;
-
-	auto buildCategory = [&](const std::string& label, const std::vector<std::string>& names,
-							  std::function<std::string(const std::string&)> displayFn) {
-		std::vector<ShapeEntry> entries;
-		for (auto& n : names) {
-			Mesh* m = gls.GetMesh(n);
-			entries.push_back({n, displayFn(n), m ? m->bVisible : true});
-		}
-		if (!entries.empty())
-			categories.push_back({label, std::move(entries)});
+	struct NifGroup {
+		std::string nifPath;	 // full relative path
+		std::string displayName; // short filename for display
+		std::vector<ShapeEntry> shapes;
+	};
+	struct Category {
+		std::string label;
+		std::vector<NifGroup> groups;
 	};
 
-	buildCategory("Head", headShapeNames, [](const std::string& n) -> std::string {
-		return (n.size() > 6 && n.substr(0, 6) == "_head_") ? n.substr(6) : n;
-	});
-	buildCategory("Body", bodyShapeNames, [](const std::string& n) -> std::string { return n; });
-	buildCategory("Outfit", outfitShapeNames, [](const std::string& n) -> std::string {
-		// Strip "XXXXXXXX_" FormID prefix added during loading
-		return (n.size() > 9 && n[8] == '_') ? n.substr(9) : n;
-	});
+	auto buildCategory = [&](const std::string& label, const std::vector<std::string>& names, std::function<std::string(const std::string&)> displayFn) -> Category {
+		Category cat;
+		cat.label = label;
+
+		// Group shapes by NIF source path, preserving order
+		std::vector<std::string> orderedNifs;
+		std::unordered_map<std::string, std::vector<ShapeEntry>> byNif;
+		for (auto& n : names) {
+			Mesh* m = gls.GetMesh(n);
+			std::string nif = "unknown";
+			auto srcIt = shapeNifSource.find(n);
+			if (srcIt != shapeNifSource.end())
+				nif = srcIt->second;
+			if (byNif.find(nif) == byNif.end())
+				orderedNifs.push_back(nif);
+			byNif[nif].push_back({n, displayFn(n), m ? m->bVisible : true});
+		}
+		for (auto& nifPath : orderedNifs) {
+			NifGroup grp;
+			grp.nifPath = nifPath;
+			// Extract just the filename from the path
+			auto slashPos = nifPath.find_last_of("/\\");
+			grp.displayName = (slashPos != std::string::npos) ? nifPath.substr(slashPos + 1) : nifPath;
+			grp.shapes = std::move(byNif[nifPath]);
+			cat.groups.push_back(std::move(grp));
+		}
+		return cat;
+	};
+
+	std::vector<Category> categories;
+
+	auto headCat = buildCategory("Head", headShapeNames, [](const std::string& n) -> std::string { return (n.size() > 6 && n.substr(0, 6) == "_head_") ? n.substr(6) : n; });
+	if (!headCat.groups.empty())
+		categories.push_back(std::move(headCat));
+
+	auto bodyCat = buildCategory("Body", bodyShapeNames, [](const std::string& n) -> std::string { return n; });
+	if (!bodyCat.groups.empty())
+		categories.push_back(std::move(bodyCat));
+
+	auto outfitCat = buildCategory("Outfit", outfitShapeNames, [](const std::string& n) -> std::string { return (n.size() > 9 && n[8] == '_') ? n.substr(9) : n; });
+	if (!outfitCat.groups.empty())
+		categories.push_back(std::move(outfitCat));
 
 	if (categories.empty()) {
 		meshOverlayPanel->Hide();
@@ -1732,36 +1770,97 @@ void LeveledListPreviewer::RefreshMeshOverlay() {
 
 	wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
 
-	for (auto& [catLabel, entries] : categories) {
-		wxStaticText* header = new wxStaticText(meshOverlayPanel, wxID_ANY, wxString::FromUTF8(catLabel));
+	for (auto& cat : categories) {
+		// Category header (bold)
+		wxStaticText* header = new wxStaticText(meshOverlayPanel, wxID_ANY, wxString::FromUTF8(cat.label));
 		wxFont boldFont = header->GetFont();
 		boldFont.SetWeight(wxFONTWEIGHT_BOLD);
 		header->SetFont(boldFont);
 		sizer->Add(header, 0, wxLEFT | wxTOP, 4);
 
-		for (auto& entry : entries) {
-			wxCheckBox* cb = new wxCheckBox(meshOverlayPanel, wxID_ANY,
-				wxString::FromUTF8(entry.displayName));
-			cb->SetValue(entry.visible);
-			std::string shapeName = entry.shapeName;
-			cb->Bind(wxEVT_CHECKBOX, [this, shapeName](wxCommandEvent& ev) {
-				gls.SetMeshVisibility(shapeName, ev.IsChecked());
+		for (auto& grp : cat.groups) {
+			bool expanded = expandedNifGroups.count(grp.nifPath) > 0;
+
+			// NIF group row: triangle + checkbox
+			wxBoxSizer* grpSizer = new wxBoxSizer(wxHORIZONTAL);
+
+			// Expand/collapse triangle button — only if more than one shape
+			bool canExpand = grp.shapes.size() > 1;
+			if (canExpand) {
+				wxButton* triBtn = new wxButton(meshOverlayPanel,
+												wxID_ANY,
+												expanded ? wxString::FromUTF8("\u25BC") : wxString::FromUTF8("\u25B6"),
+												wxDefaultPosition,
+												wxSize(18, 18),
+												wxBU_EXACTFIT | wxBORDER_NONE);
+				triBtn->SetBackgroundColour(meshOverlayPanel->GetBackgroundColour());
+				std::string nifKey = grp.nifPath;
+				triBtn->Bind(wxEVT_BUTTON, [this, nifKey](wxCommandEvent&) {
+					if (expandedNifGroups.count(nifKey))
+						expandedNifGroups.erase(nifKey);
+					else
+						expandedNifGroups.insert(nifKey);
+					RefreshMeshOverlay();
+				});
+				grpSizer->Add(triBtn, 0, wxALIGN_CENTER_VERTICAL);
+			}
+			else {
+				grpSizer->AddSpacer(18);
+			}
+
+			// NIF-level checkbox toggles all shapes in this group
+			bool allVisible = true;
+			for (auto& e : grp.shapes)
+				if (!e.visible) {
+					allVisible = false;
+					break;
+				}
+
+			wxCheckBox* grpCb = new wxCheckBox(meshOverlayPanel, wxID_ANY, wxString::FromUTF8(grp.displayName));
+			grpCb->SetValue(allVisible);
+			std::vector<std::string> grpShapeNames;
+			for (auto& e : grp.shapes)
+				grpShapeNames.push_back(e.shapeName);
+			grpCb->Bind(wxEVT_CHECKBOX, [this, grpShapeNames](wxCommandEvent& ev) {
+				bool vis = ev.IsChecked();
+				for (auto& sn : grpShapeNames) {
+					gls.SetMeshVisibility(sn, vis);
+					auto cbIt = meshCheckboxes.find(sn);
+					if (cbIt != meshCheckboxes.end() && cbIt->second)
+						cbIt->second->SetValue(vis);
+				}
 				gls.RenderOneFrame();
 			});
-			sizer->Add(cb, 0, wxLEFT | wxBOTTOM, 2);
-			meshCheckboxes[entry.shapeName] = cb;
+			grpSizer->Add(grpCb, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 2);
+			sizer->Add(grpSizer, 0, wxLEFT, 8);
+
+			// Individual shape checkboxes (shown only when expanded)
+			if (expanded) {
+				for (auto& entry : grp.shapes) {
+					wxCheckBox* cb = new wxCheckBox(meshOverlayPanel, wxID_ANY, wxString::FromUTF8(entry.displayName));
+					cb->SetValue(entry.visible);
+					std::string shapeName = entry.shapeName;
+					std::string nifKey = grp.nifPath;
+					cb->Bind(wxEVT_CHECKBOX, [this, shapeName, nifKey](wxCommandEvent& ev) {
+						gls.SetMeshVisibility(shapeName, ev.IsChecked());
+						gls.RenderOneFrame();
+					});
+					sizer->Add(cb, 0, wxLEFT | wxBOTTOM, 28);
+					meshCheckboxes[entry.shapeName] = cb;
+				}
+			}
 		}
 	}
 
 	meshOverlayPanel->SetSizer(sizer);
 	meshOverlayPanel->FitInside();
 
-	// Size: content width + margin, up to half the canvas height
+	// Size: content width + margin, use full canvas height
 	wxSize canvasSize = canvas ? canvas->GetSize() : wxSize(600, 400);
 	wxSize minSz = sizer->GetMinSize();
 	int panelW = std::min(std::max(minSz.GetWidth() + 20, 160), 340);
 	int totalH = minSz.GetHeight() + 12;
-	int panelH = std::min(totalH, canvasSize.GetHeight() / 2);
+	int panelH = std::min(totalH, canvasSize.GetHeight() - 10);
 
 	meshOverlayPanel->SetSize(wxSize(panelW, panelH));
 	RepositionMeshOverlay();
