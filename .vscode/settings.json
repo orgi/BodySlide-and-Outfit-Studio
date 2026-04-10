@@ -1,5 +1,6 @@
 {
     "chat.tools.terminal.autoApprove": {
-        "pkill": true
+        "pkill": true,
+        "./run-bodyslide.sh": true
     }
 }
