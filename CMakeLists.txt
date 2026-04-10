@@ -92,11 +92,14 @@ set(OSsources
 set(BSsources
 	${commonsources}
 	src/files/wxDDSImage.cpp
+	src/files/ESPReader.cpp
+	src/components/BuildSelection.cpp
+	src/components/LeveledListData.cpp
 	src/program/BodySlideApp.cpp
 	src/program/NormalsGenDialog.cpp
 	src/program/PreviewWindow.cpp
+	src/program/LeveledListPreviewer.cpp
 	src/ui/wxNormalsGenDlg.cpp
-	src/components/BuildSelection.cpp
 	)
 
 add_executable(OutfitStudio ${OSsources})
@@ -136,4 +139,5 @@ target_link_libraries(BodySlide
 	${wxWidgets_LIBRARIES}
 	${OPENGL_LIBRARIES}
 	${GLEW_LIBRARIES}
-	xml2)
+	xml2
+	z)

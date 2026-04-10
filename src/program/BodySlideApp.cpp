@@ -82,6 +82,7 @@ wxBEGIN_EVENT_TABLE(BodySlideFrame, wxFrame)
 	EVT_BUTTON(XRCID("btnBuildBatch"), BodySlideFrame::OnBatchBuild)
 	EVT_BUTTON(XRCID("btnBuild"), BodySlideFrame::OnBuildBodies)
 	EVT_BUTTON(XRCID("btnOutfitStudio"), BodySlideFrame::OnOutfitStudio)
+	EVT_BUTTON(XRCID("btnLeveledLists"), BodySlideFrame::OnLeveledLists)
 	EVT_BUTTON(XRCID("btnSettings"), BodySlideFrame::OnSettings)
 	EVT_BUTTON(XRCID("btnAbout"), BodySlideFrame::OnAbout)
 	EVT_BUTTON(XRCID("btnSavePreset"), BodySlideFrame::OnSavePreset)
@@ -4466,6 +4467,19 @@ void BodySlideFrame::OnBatchBuildSelect(wxCommandEvent& event) {
 
 void BodySlideFrame::OnOutfitStudio(wxCommandEvent& WXUNUSED(event)) {
 	app->LaunchOutfitStudio();
+}
+
+void BodySlideFrame::OnLeveledLists(wxCommandEvent& WXUNUSED(event)) {
+	app->ShowLeveledListPreviewer();
+}
+
+void BodySlideApp::ShowLeveledListPreviewer() {
+	if (llPreviewer) {
+		llPreviewer->Raise();
+		return;
+	}
+
+	llPreviewer = new LeveledListPreviewer(this);
 }
 
 void BodySlideFrame::OnChooseTargetGame(wxCommandEvent& event) {

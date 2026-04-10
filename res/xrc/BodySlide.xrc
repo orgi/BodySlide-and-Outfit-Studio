@@ -499,6 +499,16 @@
 									<label>Outfit Studio</label>
 								</object>
 							</object>
+							<object class="sizeritem">
+								<option>0</option>
+								<flag>wxALIGN_CENTER|wxALL</flag>
+								<border>5</border>
+								<object class="wxButton" name="btnLeveledLists">
+									<fg>wxSYS_COLOUR_BTNTEXT</fg>
+									<tooltip>Open the Leveled List Previewer to browse and preview outfit compositions from generated ESP files.</tooltip>
+									<label>Leveled Lists</label>
+								</object>
+							</object>
 						</object>
 					</object>
 				</object>

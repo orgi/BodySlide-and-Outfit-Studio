@@ -27,6 +27,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "../utils/Log.h"
 #include "GroupManager.h"
 #include "PresetSaveDialog.h"
+#include "LeveledListPreviewer.h"
 #include "PreviewWindow.h"
 #include "../ui/wxStateButton.h"
 
@@ -62,6 +63,7 @@ class BodySlideApp : public wxApp {
 	/* UI Managers */
 	BodySlideFrame* sliderView = nullptr;
 	PreviewWindow* preview = nullptr;
+	LeveledListPreviewer* llPreviewer = nullptr;
 
 	/* Command-Line Arguments */
 	std::vector<std::string> cmdGroupBuild;
@@ -193,6 +195,9 @@ public:
 			preview->Close();
 	}
 	void PreviewClosed() { preview = nullptr; }
+
+	void ShowLeveledListPreviewer();
+	void LeveledListPreviewerClosed() { llPreviewer = nullptr; }
 
 	void UpdatePreview();
 	void RebuildPreviewMeshes();
@@ -422,6 +427,7 @@ private:
 	void OnBatchBuildContext(wxMouseEvent& event);
 	void OnBatchBuildSelect(wxCommandEvent& event);
 	void OnOutfitStudio(wxCommandEvent& event);
+	void OnLeveledLists(wxCommandEvent& event);
 	void SettingsFillDataFiles(wxCheckListBox* dataFileList, wxString& dataDir, int targetGame);
 	void OnSettings(wxCommandEvent& event);
 	void OnChooseTargetGame(wxCommandEvent& event);
