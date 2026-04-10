@@ -1719,6 +1719,13 @@ bool LeveledListPreviewer::AddNifShapeTextures(NifFile* fromNif, const std::stri
 
 		mat = MaterialFile(baseGamePath + matFile);
 
+		// Case-insensitive filesystem fallback for Linux
+		if (mat.Failed()) {
+			std::string ciMatPath = lldata::LeveledListData::ResolveCaseInsensitive(baseGamePath, matFile);
+			if (!ciMatPath.empty())
+				mat = MaterialFile(ciMatPath);
+		}
+
 		if (mat.Failed()) {
 			wxMemoryBuffer mdata;
 			for (FSArchiveFile* archive : FSManager::archiveList()) {

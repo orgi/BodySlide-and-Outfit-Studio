@@ -89,6 +89,7 @@ class BodySlideApp : public wxApp {
 	std::map<std::string, std::string> groupAlias;								   // Group name aliases.
 	std::vector<std::string> ungroupedOutfits;									   // Outfits without a group.
 	std::vector<std::string> filteredOutfits;									   // Filtered outfit names.
+	std::vector<std::string> cachedPopulatedOutfits;							   // Last list sent to the outfit wxChoice (for change detection).
 	std::vector<std::string> presetGroups;
 	std::vector<std::string> allGroups;
 	SliderSetGroupCollection gCollection;

@@ -23,9 +23,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <algorithm>
 #include <atomic>
 #include <regex>
-#include <wx/wrapsizer.h>
-#include <wx/treelist.h>
 #include <wx/debugrpt.h>
+#include <wx/treelist.h>
+#include <wx/wrapsizer.h>
 
 #ifdef WIN64
 #include <concurrent_unordered_map.h>
@@ -44,7 +44,8 @@ using namespace nifly;
 ConfigurationManager Config;
 ConfigurationManager BodySlideConfig;
 
-const std::array<wxString, 10> TargetGames = {"Fallout3", "FalloutNewVegas", "Skyrim", "Fallout4", "SkyrimSpecialEdition", "Fallout4VR", "SkyrimVR", "Fallout76", "Oblivion", "Starfield"};
+const std::array<wxString, 10> TargetGames
+	= {"Fallout3", "FalloutNewVegas", "Skyrim", "Fallout4", "SkyrimSpecialEdition", "Fallout4VR", "SkyrimVR", "Fallout76", "Oblivion", "Starfield"};
 const std::array<wxLanguage, 37> SupportedLangs = {wxLANGUAGE_ENGLISH,	  wxLANGUAGE_AFRIKAANS,		   wxLANGUAGE_ARABIC,  wxLANGUAGE_CATALAN,	  wxLANGUAGE_CZECH,
 												   wxLANGUAGE_DANISH,	  wxLANGUAGE_GERMAN,		   wxLANGUAGE_GREEK,   wxLANGUAGE_SPANISH,	  wxLANGUAGE_BASQUE,
 												   wxLANGUAGE_FINNISH,	  wxLANGUAGE_FRENCH,		   wxLANGUAGE_HINDI,   wxLANGUAGE_HUNGARIAN,  wxLANGUAGE_INDONESIAN,
@@ -542,6 +543,7 @@ std::string BodySlideApp::GetProjectPath() const {
 }
 
 void BodySlideApp::RefreshOutfitList() {
+	cachedPopulatedOutfits.clear(); // Invalidate cache — data is being re-read from disk
 	LoadSliderSets();
 	PopulateOutfitList("");
 }
@@ -800,12 +802,14 @@ void BodySlideApp::PopulateOutfitList(const std::string& select) {
 
 	ApplyOutfitFilter();
 
-	// Skip expensive wxChoice update if the filtered list and selection haven't changed
-	if (filteredOutfits == lastDisplayedOutfits && myselect == lastOutfitSelect)
+	// Skip the expensive Clear+Append on the wxChoice widget when the visible
+	// item set has not changed. This is the common case during typing in the
+	// search box — only the selection highlight needs updating.
+	if (filteredOutfits == cachedPopulatedOutfits) {
+		sliderView->SelectOutfit(wxString::FromUTF8(myselect));
 		return;
-
-	lastDisplayedOutfits = filteredOutfits;
-	lastOutfitSelect = myselect;
+	}
+	cachedPopulatedOutfits = filteredOutfits;
 
 	wxArrayString items;
 	items.reserve(filteredOutfits.size());
@@ -1089,13 +1093,13 @@ static std::vector<ContinuousRange> FindContinuousRanges(const std::vector<uint1
 	for (; endIndex < source.size(); ++endIndex) {
 		int value = (int)source[endIndex];
 		if (value != lastValue + 1) {
-			ranges.emplace_back(ContinuousRange{ source[startIndex], endIndex - startIndex });
+			ranges.emplace_back(ContinuousRange{source[startIndex], endIndex - startIndex});
 			startIndex = endIndex;
 		}
 		lastValue = value;
 	}
 
-	ranges.emplace_back(ContinuousRange{ source[startIndex], endIndex - startIndex });
+	ranges.emplace_back(ContinuousRange{source[startIndex], endIndex - startIndex});
 
 	return ranges;
 }
@@ -2070,13 +2074,11 @@ void BodySlideApp::ApplyOutfitFilter() {
 		else {
 			// Case-insensitive substring search using std::string (avoids wxString overhead)
 			std::string searchLower = outfitSrch;
-			std::transform(searchLower.begin(), searchLower.end(), searchLower.begin(),
-				[](unsigned char c) { return std::tolower(c); });
+			std::transform(searchLower.begin(), searchLower.end(), searchLower.begin(), [](unsigned char c) { return std::tolower(c); });
 
 			for (auto& filterEntry : workFilterList) {
 				std::string entryLower = filterEntry;
-				std::transform(entryLower.begin(), entryLower.end(), entryLower.begin(),
-					[](unsigned char c) { return std::tolower(c); });
+				std::transform(entryLower.begin(), entryLower.end(), entryLower.begin(), [](unsigned char c) { return std::tolower(c); });
 
 				if (entryLower.find(searchLower) != std::string::npos)
 					filteredOutfits.push_back(filterEntry);
@@ -2585,7 +2587,7 @@ int BodySlideApp::BuildListBodies(
 
 				treeListCtrl->Expand(rootItem);
 			}
-			
+
 			bool checkBoxReverting = false;
 			auto handler = [&](wxTreeListEvent& e) {
 				if (checkBoxReverting) {
@@ -3298,7 +3300,8 @@ int BodySlideApp::SaveSliderPositions(const std::string& outputFile, const std::
 }
 
 BodySlideFrame::BodySlideFrame(BodySlideApp* a, const wxSize& size)
-	: delayLoad(this, DELAYLOAD_TIMER), outfitFilterTimer(this, OUTFIT_FILTER_TIMER) {
+	: delayLoad(this, DELAYLOAD_TIMER)
+	, outfitFilterTimer(this, OUTFIT_FILTER_TIMER) {
 	app = a;
 
 	wxXmlResource* xrc = wxXmlResource::Get();
@@ -3469,8 +3472,7 @@ void BodySlideFrame::OnEnterClose(wxKeyEvent& event) {
 void BodySlideFrame::OnEnterSliderWindow(wxMouseEvent& event) {
 	if (this->IsActive()) {
 		wxWindow* focused = this->FindFocus();
-		if (focused && !focused->IsKindOf(wxClassInfo::FindClass("wxTextCtrl")) &&
-			!focused->IsKindOf(wxClassInfo::FindClass("wxSearchCtrl"))) {
+		if (focused && !focused->IsKindOf(wxClassInfo::FindClass("wxTextCtrl")) && !focused->IsKindOf(wxClassInfo::FindClass("wxSearchCtrl"))) {
 			wxScrolledWindow* sw = (wxScrolledWindow*)event.GetEventObject();
 			sw->SetFocusIgnoringChildren();
 		}
@@ -4784,7 +4786,13 @@ void BodySlideFrame::OnEditProject(wxCommandEvent& WXUNUSED(event)) {
 
 SliderCategoryUI::SliderCategoryUI() {}
 
-bool SliderCategoryUI::Create(wxScrolledWindow* scrollWindow, wxSizer* sliderLayout, wxSizer* categoryTabSizer, const std::string& name, const std::vector<std::string>& sliders, bool pEnabled, bool pOneSize) {
+bool SliderCategoryUI::Create(wxScrolledWindow* scrollWindow,
+							  wxSizer* sliderLayout,
+							  wxSizer* categoryTabSizer,
+							  const std::string& name,
+							  const std::vector<std::string>& sliders,
+							  bool pEnabled,
+							  bool pOneSize) {
 	categoryName = name;
 	sliderNames = sliders;
 
