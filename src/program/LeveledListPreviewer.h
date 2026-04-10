@@ -14,14 +14,14 @@
 #include "../utils/ConfigurationManager.h"
 
 #include <memory>
-#include <wx/wx.h>
 #include <wx/combobox.h>
 #include <wx/fswatcher.h>
 #include <wx/listctrl.h>
 #include <wx/spinctrl.h>
-#include <wx/srchctrl.h>
 #include <wx/splitter.h>
+#include <wx/srchctrl.h>
 #include <wx/textcompleter.h>
+#include <wx/wx.h>
 
 class BodySlideApp;
 class LLPreviewCanvas;
@@ -46,8 +46,9 @@ class LeveledListPreviewer : public wxFrame {
 	wxSearchCtrl* searchCtrl = nullptr;
 	wxSpinCtrl* levelMinSpin = nullptr;
 	wxSpinCtrl* levelMaxSpin = nullptr;
-	wxTextCtrl* headCtrl = nullptr;     // NPC head selector (with autocomplete)
-	wxComboBox* presetCombo = nullptr;  // BodySlide preset selector
+	wxTextCtrl* headCtrl = nullptr;		   // NPC head selector (with autocomplete)
+	wxComboBox* presetCombo = nullptr;	   // BodySlide preset selector
+	wxCheckBox* highWeightCheck = nullptr; // high (_1) vs low (_0) weight
 	wxListCtrl* outfitList = nullptr;
 
 	// Data
@@ -61,17 +62,42 @@ class LeveledListPreviewer : public wxFrame {
 	std::unordered_map<std::string, size_t> npcByDisplay; // displayName → index in data.GetNPCs()
 	std::string currentHeadEditorId;
 
+	bool useHighWeight = true; // true = _1 (high), false = _0 (low)
+
 	// Body preset morphing
 	struct BodyProject {
-		std::string refNifPath;    // absolute path to reference (unmorphed) NIF
+		std::string refNifPath;	   // slider set reference NIF (same for both weights)
 		std::string sliderSetFile; // .osp file path
-		std::string setName;       // set name within .osp
+		std::string setName;	   // set name within .osp
 	};
 	std::vector<BodyProject> bodyProjects;
-	// Original (pre-morph) verts per body shape, stored when body is loaded
+
+	// Maps game body shape → slider project shape for morphing
+	struct BodyShapeMorphInfo {
+		size_t projectIdx;		  // index into bodyProjects
+		std::string refShapeName; // shape name in the reference NIF / SliderSet
+	};
+	std::unordered_map<std::string, BodyShapeMorphInfo> bodyShapeMorphMap;
+
+	// Game body verts (from built game body NIF) — used to reset to "(none)"
+	std::unordered_map<std::string, std::vector<nifly::Vector3>> bodyGameVerts;
+	// Slider reference verts (from ShapeData reference NIF) — base for morph computation
 	std::unordered_map<std::string, std::vector<nifly::Vector3>> bodyRefVerts;
 	std::unordered_map<std::string, std::vector<nifly::Vector2>> bodyRefUVs;
 	std::string currentPresetName;
+
+	// All slider projects indexed by normalized output NIF path
+	std::unordered_map<std::string, BodyProject> allSliderProjects;
+
+	// Outfit piece preset morphing
+	struct OutfitShapeMorphInfo {
+		std::string sliderSetFile;
+		std::string setName;
+		std::string refShapeName; // shape name in reference NIF / SliderSet
+	};
+	std::unordered_map<std::string, OutfitShapeMorphInfo> outfitShapeMorphMap;	  // displayName → morph info
+	std::unordered_map<std::string, std::vector<nifly::Vector3>> outfitRefVerts;  // displayName → ref verts
+	std::unordered_map<std::string, std::vector<nifly::Vector3>> outfitGameVerts; // displayName → game verts
 
 	wxDECLARE_EVENT_TABLE();
 
@@ -95,6 +121,7 @@ public:
 	// Head NPC and preset events
 	void OnHeadEntered(wxCommandEvent& event);
 	void OnPresetChanged(wxCommandEvent& event);
+	void OnHighWeightChanged(wxCommandEvent& event);
 
 	// GL canvas events
 	void Render() { gls.RenderOneFrame(); }
@@ -104,8 +131,14 @@ public:
 	void MouseWheel(int dW);
 	void TrackMouse(int X, int Y);
 
-	void ToggleTextures() { gls.ToggleTextures(); gls.RenderOneFrame(); }
-	void ToggleWireframe() { gls.ToggleWireframe(); gls.RenderOneFrame(); }
+	void ToggleTextures() {
+		gls.ToggleTextures();
+		gls.RenderOneFrame();
+	}
+	void ToggleWireframe() {
+		gls.ToggleWireframe();
+		gls.RenderOneFrame();
+	}
 	void OnToggleUntextured(wxCommandEvent& event);
 	void OnToggleBody(wxCommandEvent& event);
 
@@ -115,9 +148,7 @@ private:
 	void LoadESPFile(const std::string& filepath);
 	void RefreshOutfitList();
 	void LoadOutfitMeshes(const lldata::OutfitEntry& outfit);
-	bool AddNifShapeTextures(nifly::NifFile* nif, const std::string& shapeName,
-						  const std::vector<lldata::TextureOverride>* overrides = nullptr,
-						  const std::string& meshName = {});
+	bool AddNifShapeTextures(nifly::NifFile* nif, const std::string& shapeName, const std::vector<lldata::TextureOverride>* overrides = nullptr, const std::string& meshName = {});
 	bool LoadNifFromPath(const std::string& relativePath, const std::string& prefix = "");
 	void LoadBodyMeshes();
 	void FindBodySliderProjects();
@@ -125,6 +156,8 @@ private:
 	void ClearHeadMeshes();
 	void LoadPresetList();
 	void ApplyPresetToBody(const std::string& presetName);
+	void ApplyPresetToOutfit(const std::string& presetName);
+	static std::string NormalizeNifOutputPath(const std::string& path);
 
 	enum {
 		ID_LoadESP = wxID_HIGHEST + 500,
@@ -133,6 +166,7 @@ private:
 		ID_ToggleBody,
 		ID_HeadNPC,
 		ID_Preset,
+		ID_HighWeight,
 	};
 };
 

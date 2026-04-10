@@ -28,6 +28,7 @@ wxBEGIN_EVENT_TABLE(LeveledListPreviewer, wxFrame)
 	EVT_MENU(LeveledListPreviewer::ID_ToggleBody, LeveledListPreviewer::OnToggleBody)
 	EVT_TEXT_ENTER(LeveledListPreviewer::ID_HeadNPC, LeveledListPreviewer::OnHeadEntered)
 	EVT_COMBOBOX(LeveledListPreviewer::ID_Preset, LeveledListPreviewer::OnPresetChanged)
+	EVT_CHECKBOX(LeveledListPreviewer::ID_HighWeight, LeveledListPreviewer::OnHighWeightChanged)
 	EVT_FSWATCHER(wxID_ANY, LeveledListPreviewer::OnFileChanged)
 wxEND_EVENT_TABLE()
 
@@ -92,12 +93,16 @@ LeveledListPreviewer::LeveledListPreviewer(BodySlideApp* app)
 	headSizer->Add(headCtrl, 1);
 	leftSizer->Add(headSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
 
-	// Preset selector
+	// Preset selector + high/low weight checkbox
 	wxBoxSizer* presetSizer = new wxBoxSizer(wxHORIZONTAL);
 	presetSizer->Add(new wxStaticText(leftPanel, wxID_ANY, _("Preset:")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
 	presetCombo = new wxComboBox(leftPanel, ID_Preset, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxArrayString{}, wxCB_READONLY | wxCB_DROPDOWN);
 	presetCombo->SetToolTip(_("Choose a BodySlide preset to morph the preview body"));
-	presetSizer->Add(presetCombo, 1);
+	presetSizer->Add(presetCombo, 1, wxRIGHT, 5);
+	highWeightCheck = new wxCheckBox(leftPanel, ID_HighWeight, _("Hi"));
+	highWeightCheck->SetValue(true);
+	highWeightCheck->SetToolTip(_("High weight (_1) when checked, low weight (_0) when unchecked"));
+	presetSizer->Add(highWeightCheck, 0, wxALIGN_CENTER_VERTICAL);
 	leftSizer->Add(presetSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
 
 	// Outfit list
@@ -106,8 +111,8 @@ LeveledListPreviewer::LeveledListPreviewer(BodySlideApp* app)
 		int w0 = Config.GetIntValue("LLPreviewer/ColW0");
 		int w1 = Config.GetIntValue("LLPreviewer/ColW1");
 		int w2 = Config.GetIntValue("LLPreviewer/ColW2");
-		outfitList->AppendColumn(_("Name"),   wxLIST_FORMAT_LEFT,  w0 > 0 ? w0 : 200);
-		outfitList->AppendColumn(_("Level"),  wxLIST_FORMAT_RIGHT, w1 > 0 ? w1 : 50);
+		outfitList->AppendColumn(_("Name"), wxLIST_FORMAT_LEFT, w0 > 0 ? w0 : 200);
+		outfitList->AppendColumn(_("Level"), wxLIST_FORMAT_RIGHT, w1 > 0 ? w1 : 50);
 		outfitList->AppendColumn(_("Pieces"), wxLIST_FORMAT_RIGHT, w2 > 0 ? w2 : 50);
 	}
 	outfitList->Bind(wxEVT_LIST_ITEM_SELECTED, &LeveledListPreviewer::OnOutfitSelected, this);
@@ -155,21 +160,21 @@ LeveledListPreviewer::LeveledListPreviewer(BodySlideApp* app)
 		splitter->SetSashPosition(sash > 0 ? sash : 320);
 	}
 
-	// Restore persisted head / preset / outfit selections
+	// Restore persisted head / preset / weight / outfit selections
 	currentHeadEditorId = Config["LLPreviewer/HeadEditorId"];
-	currentPresetName   = Config["LLPreviewer/PresetName"];
+	currentPresetName = Config["LLPreviewer/PresetName"];
+	useHighWeight = (Config["LLPreviewer/HighWeight"] != "false");
 	if (headCtrl && !currentHeadEditorId.empty())
 		headCtrl->SetValue(wxString::FromUTF8(currentHeadEditorId));
+	if (highWeightCheck)
+		highWeightCheck->SetValue(useHighWeight);
 
 	Show();
 
 	// Offer to reload last ESP after window is shown
 	if (!lastFile.empty() && wxFileName::FileExists(lastFile)) {
 		CallAfter([this, lastFile]() {
-			if (wxMessageBox(
-					wxString::Format(_("Reload last ESP?\n%s"), lastFile),
-					_("Leveled List Previewer"),
-					wxYES_NO | wxICON_QUESTION, this) == wxYES) {
+			if (wxMessageBox(wxString::Format(_("Reload last ESP?\n%s"), lastFile), _("Leveled List Previewer"), wxYES_NO | wxICON_QUESTION, this) == wxYES) {
 				LoadESPFile(lastFile);
 			}
 		});
@@ -210,7 +215,11 @@ void LeveledListPreviewer::OnShown() {
 	int d2y = Config.GetIntValue("Lights/Directional2.y");
 	int d2z = Config.GetIntValue("Lights/Directional2.z");
 
-	gls.UpdateLights(ambient, frontal, d0, d1, d2,
+	gls.UpdateLights(ambient,
+					 frontal,
+					 d0,
+					 d1,
+					 d2,
 					 Vector3(d0x / 100.0f, d0y / 100.0f, d0z / 100.0f),
 					 Vector3(d1x / 100.0f, d1y / 100.0f, d1z / 100.0f),
 					 Vector3(d2x / 100.0f, d2y / 100.0f, d2z / 100.0f));
@@ -230,9 +239,7 @@ void LeveledListPreviewer::OnShown() {
 // ---------------------------------------------------------------------------
 
 void LeveledListPreviewer::OnLoadESP(wxCommandEvent& WXUNUSED(event)) {
-	wxFileDialog dlg(this, _("Open ESP/ESM File"), lastESPDirectory, "",
-					 "Elder Scrolls Plugin (*.esp;*.esm;*.esl)|*.esp;*.esm;*.esl",
-					 wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+	wxFileDialog dlg(this, _("Open ESP/ESM File"), lastESPDirectory, "", "Elder Scrolls Plugin (*.esp;*.esm;*.esl)|*.esp;*.esm;*.esl", wxFD_OPEN | wxFD_FILE_MUST_EXIST);
 
 	if (dlg.ShowModal() != wxID_OK)
 		return;
@@ -261,8 +268,7 @@ void LeveledListPreviewer::LoadESPFile(const std::string& filepath) {
 	wxFileName espFileName = wxFileName::FileName(wxString::FromUTF8(filepath));
 	fsWatcher = std::make_unique<wxFileSystemWatcher>();
 	fsWatcher->SetOwner(this);
-	fsWatcher->Add(wxFileName::DirName(espFileName.GetPath()),
-				   wxFSW_EVENT_MODIFY | wxFSW_EVENT_CREATE | wxFSW_EVENT_RENAME);
+	fsWatcher->Add(wxFileName::DirName(espFileName.GetPath()), wxFSW_EVENT_MODIFY | wxFSW_EVENT_CREATE | wxFSW_EVENT_RENAME);
 
 	// Persist for next session
 	Config.SetValue("LLPreviewer/LastESPFile", filepath);
@@ -288,8 +294,7 @@ void LeveledListPreviewer::LoadESPFile(const std::string& filepath) {
 
 	LoadPresetList();
 
-	SetStatusText(wxString::Format(_("Loaded %s — %s"),
-									data.GetFilename(), data.GetLoadInfo()));
+	SetStatusText(wxString::Format(_("Loaded %s — %s"), data.GetFilename(), data.GetLoadInfo()));
 	RefreshOutfitList();
 
 	// Re-select the last outfit if one was persisted
@@ -444,63 +449,98 @@ bool LeveledListPreviewer::LoadNifFromPath(const std::string& relativePath, cons
 void LeveledListPreviewer::LoadBodyMeshes() {
 	bodyRefVerts.clear();
 	bodyRefUVs.clear();
+	bodyGameVerts.clear();
+	bodyShapeMorphMap.clear();
 
-	// Find BodySlide projects that output to the standard body NIF paths.
+	// Always load body from game data — correct textures and consistent with outfits.
+	const std::string suffix = useHighWeight ? "_1.nif" : "_0.nif";
+	std::vector<std::string> bodyParts = {
+		"meshes/actors/character/character assets/femalebody" + suffix,
+		"meshes/actors/character/character assets/femalehands" + suffix,
+		"meshes/actors/character/character assets/femalefeet" + suffix,
+	};
+	for (auto& part : bodyParts) {
+		if (!LoadNifFromPath(part))
+			wxLogMessage("LeveledListPreviewer: Body part not found: %s", part);
+	}
+
+	if (bodyShapeNames.empty())
+		return;
+
+	// Cache game body verts for reset to "(none)".
+	for (auto& name : bodyShapeNames) {
+		Mesh* m = gls.GetMesh(name);
+		if (!m || m->nVerts <= 0)
+			continue;
+		std::vector<Vector3> verts(m->nVerts);
+		for (int i = 0; i < m->nVerts; i++)
+			verts[i] = Mesh::TransformPosMeshToNif(m->verts[i]);
+		bodyGameVerts[name] = std::move(verts);
+	}
+
+	// Find BodySlide slider projects for preset morphing.
 	FindBodySliderProjects();
 
 	if (!bodyProjects.empty()) {
-		// Load body from BodySlide reference NIFs so preset morphs can be applied
-		// correctly — the morph diffs are relative to these files.
-		for (auto& proj : bodyProjects) {
+		// Build map of game body shapes: name → vertex count
+		std::unordered_map<std::string, int> gameShapeVertCounts;
+		for (auto& name : bodyShapeNames) {
+			Mesh* m = gls.GetMesh(name);
+			if (m)
+				gameShapeVertCounts[name] = m->nVerts;
+		}
+
+		// For each project, load reference NIF (not into GL) and match shapes
+		// to game body shapes for morphing.
+		for (size_t pi = 0; pi < bodyProjects.size(); ++pi) {
+			auto& proj = bodyProjects[pi];
 			NifFile refNif;
 			if (refNif.Load(proj.refNifPath) != 0) {
 				wxLogMessage("LeveledListPreviewer: Body ref NIF not found: %s", proj.refNifPath);
 				continue;
 			}
 
-			for (auto& shapeName : refNif.GetShapeNames()) {
-				Mesh* m = gls.AddMeshFromNif(&refNif, shapeName, nullptr, false);
-				if (!m) continue;
+			for (auto& refShapeName : refNif.GetShapeNames()) {
+				auto* shape = refNif.FindBlockByName<NiShape>(refShapeName);
+				if (!shape)
+					continue;
 
-				const std::vector<Color4>* vcolors = refNif.GetColorsForShape(shapeName);
-				if (vcolors) {
-					for (size_t v = 0; v < vcolors->size(); v++) {
-						m->vcolors[v].x = vcolors->at(v).r;
-						m->vcolors[v].y = vcolors->at(v).g;
-						m->vcolors[v].z = vcolors->at(v).b;
-						m->valpha[v]    = vcolors->at(v).a;
+				std::vector<Vector3> refVerts;
+				refNif.GetVertsForShape(shape, refVerts);
+				if (refVerts.empty())
+					continue;
+
+				// Match to a game body shape: try exact name first, then vertex count.
+				std::string matchedGameShape;
+				auto gcIt = gameShapeVertCounts.find(refShapeName);
+				if (gcIt != gameShapeVertCounts.end() && static_cast<size_t>(gcIt->second) == refVerts.size() && bodyRefVerts.find(refShapeName) == bodyRefVerts.end()) {
+					matchedGameShape = refShapeName;
+				}
+				if (matchedGameShape.empty()) {
+					for (auto& [gname, gcount] : gameShapeVertCounts) {
+						if (static_cast<size_t>(gcount) == refVerts.size() && bodyRefVerts.find(gname) == bodyRefVerts.end()) {
+							matchedGameShape = gname;
+							break;
+						}
 					}
 				}
-				m->CreateBuffers();
-				AddNifShapeTextures(&refNif, shapeName);
-				bodyShapeNames.push_back(m->shapeName);
 
-				// Cache reference verts in NIF space — gls.Update expects this.
-				auto* shape = refNif.FindBlockByName<NiShape>(shapeName);
-				if (shape) {
-					std::vector<Vector3> verts;
-					refNif.GetVertsForShape(shape, verts);
-					bodyRefVerts[shapeName] = std::move(verts);
+				if (!matchedGameShape.empty()) {
+					bodyRefVerts[matchedGameShape] = std::move(refVerts);
 
 					std::vector<Vector2> uvs;
 					refNif.GetUvsForShape(shape, uvs);
 					if (!uvs.empty())
-						bodyRefUVs[shapeName] = std::move(uvs);
+						bodyRefUVs[matchedGameShape] = std::move(uvs);
+
+					bodyShapeMorphMap[matchedGameShape] = {pi, refShapeName};
+					wxLogMessage("LeveledListPreviewer: Matched body shape '%s' -> ref '%s' (project '%s', %zu verts)",
+								 matchedGameShape,
+								 refShapeName,
+								 proj.setName,
+								 bodyRefVerts[matchedGameShape].size());
 				}
 			}
-		}
-	}
-
-	if (bodyShapeNames.empty()) {
-		// No slider projects found — fall back to plain game NIFs (no morphing)
-		static const std::vector<std::string> bodyParts = {
-			"meshes/actors/character/character assets/femalebody_1.nif",
-			"meshes/actors/character/character assets/femalehands_1.nif",
-			"meshes/actors/character/character assets/femalefeet_1.nif",
-		};
-		for (auto& part : bodyParts) {
-			if (!LoadNifFromPath(part))
-				wxLogMessage("LeveledListPreviewer: Body part not found: %s", part);
 		}
 	}
 
@@ -527,8 +567,7 @@ void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
 	// FaceGen NIF path: meshes/actors/character/FaceGenData/FaceGeom/{plugin}/{formid:08X}.nif
 	char formIdBuf[16];
 	std::snprintf(formIdBuf, sizeof(formIdBuf), "%08X", npc.formId);
-	std::string relativePath = "meshes/actors/character/FaceGenData/FaceGeom/"
-							   + npc.plugin + "/" + formIdBuf + ".nif";
+	std::string relativePath = "meshes/actors/character/FaceGenData/FaceGeom/" + npc.plugin + "/" + formIdBuf + ".nif";
 
 	std::string resolvedPath = data.ResolveNifPath(relativePath);
 	if (resolvedPath.empty()) {
@@ -555,7 +594,7 @@ void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
 				m->vcolors[v].x = vcolors->at(v).r;
 				m->vcolors[v].y = vcolors->at(v).g;
 				m->vcolors[v].z = vcolors->at(v).b;
-				m->valpha[v]    = vcolors->at(v).a;
+				m->valpha[v] = vcolors->at(v).a;
 			}
 		}
 
@@ -564,13 +603,13 @@ void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
 		headShapeNames.push_back(meshName);
 	}
 
-	wxLogMessage("LeveledListPreviewer: Loaded head NIF for NPC '%s' (%s): %zu shapes",
-				 npc.editorId, formIdBuf, headShapeNames.size());
+	wxLogMessage("LeveledListPreviewer: Loaded head NIF for NPC '%s' (%s): %zu shapes", npc.editorId, formIdBuf, headShapeNames.size());
 	gls.RenderOneFrame();
 }
 
 void LeveledListPreviewer::OnHeadEntered(wxCommandEvent& WXUNUSED(event)) {
-	if (!headCtrl) return;
+	if (!headCtrl)
+		return;
 
 	std::string text = headCtrl->GetValue().ToStdString();
 	if (text.empty()) {
@@ -608,10 +647,12 @@ void LeveledListPreviewer::OnHeadEntered(wxCommandEvent& WXUNUSED(event)) {
 // ---------------------------------------------------------------------------
 
 void LeveledListPreviewer::LoadPresetList() {
-	if (!presetCombo) return;
+	if (!presetCombo)
+		return;
 
 	std::string projectPath = Config["ProjectPath"];
-	if (projectPath.empty()) projectPath = Config["AppDir"];
+	if (projectPath.empty())
+		projectPath = Config["AppDir"];
 	std::string presetsDir = projectPath + "/SliderPresets";
 
 	PresetCollection presets;
@@ -642,16 +683,16 @@ void LeveledListPreviewer::LoadPresetList() {
 
 void LeveledListPreviewer::FindBodySliderProjects() {
 	bodyProjects.clear();
+	allSliderProjects.clear();
 
 	std::string projectPath = Config["ProjectPath"];
-	if (projectPath.empty()) projectPath = Config["AppDir"];
+	if (projectPath.empty())
+		projectPath = Config["AppDir"];
 	std::string sliderSetsDir = projectPath + "/SliderSets";
 
-	// Body output NIF filenames (lower-case) to search for.
+	// Body output filenames (lower-case, without _0/_1.nif suffix) to search for.
 	// Use a set to track which output files are already claimed (first match wins).
-	static const std::set<std::string> bodyOutputFiles = {
-		"femalebody_1.nif", "femalehands_1.nif", "femalefeet_1.nif"
-	};
+	static const std::set<std::string> bodyOutputFiles = {"femalebody", "femalehands", "femalefeet"};
 	std::set<std::string> claimed;
 
 	wxArrayString ospFiles;
@@ -660,7 +701,8 @@ void LeveledListPreviewer::FindBodySliderProjects() {
 
 	for (auto& ospPath : ospFiles) {
 		SliderSetFile ssf(ospPath.ToStdString());
-		if (ssf.fail()) continue;
+		if (ssf.fail())
+			continue;
 
 		std::vector<std::string> setNames;
 		ssf.GetSetNames(setNames);
@@ -668,67 +710,98 @@ void LeveledListPreviewer::FindBodySliderProjects() {
 		for (auto& setName : setNames) {
 			std::string outFilePath;
 			ssf.GetSetOutputFilePath(setName, outFilePath);
-			if (outFilePath.empty()) continue;
+			if (outFilePath.empty())
+				continue;
 
-			// Extract just the filename, compare case-insensitively
+			// Normalize the full output path for the allSliderProjects map
+			std::string normalizedOut = NormalizeNifOutputPath(outFilePath);
+
+			// Extract just the filename for body detection
 			auto pos = outFilePath.find_last_of("/\\");
 			std::string outFile = (pos != std::string::npos) ? outFilePath.substr(pos + 1) : outFilePath;
 			std::transform(outFile.begin(), outFile.end(), outFile.begin(), ::tolower);
 
-			if (!bodyOutputFiles.count(outFile)) continue;
-			if (claimed.count(outFile)) continue; // first match wins
-
+			// Try to get reference NIF path for this set
 			SliderSet ss;
-			if (ssf.GetSet(setName, ss)) continue;
+			if (ssf.GetSet(setName, ss))
+				continue;
 			ss.SetBaseDataPath(projectPath + "/ShapeData");
 			std::string refNifPath = ss.GetInputFileName();
 
-			if (!wxFileName::FileExists(wxString::FromUTF8(refNifPath))) continue;
+			if (!wxFileName::FileExists(wxString::FromUTF8(refNifPath)))
+				continue;
 
 			BodyProject proj;
-			proj.refNifPath    = refNifPath;
+			proj.refNifPath = refNifPath;
 			proj.sliderSetFile = ospPath.ToStdString();
-			proj.setName       = setName;
-			bodyProjects.push_back(std::move(proj));
-			claimed.insert(outFile);
+			proj.setName = setName;
 
-			wxLogMessage("LeveledListPreviewer: Body project '%s' → %s (ref: %s)",
-						 setName, outFile, refNifPath);
+			// Store in the global slider project map (first match per output wins)
+			if (allSliderProjects.find(normalizedOut) == allSliderProjects.end())
+				allSliderProjects[normalizedOut] = proj;
+
+			// Check if this is a body project
+			if (bodyOutputFiles.count(outFile) && !claimed.count(outFile)) {
+				bodyProjects.push_back(proj);
+				claimed.insert(outFile);
+				wxLogMessage("LeveledListPreviewer: Body project '%s' → %s (ref: %s)", setName, outFile, refNifPath);
+			}
 		}
 	}
 
-	wxLogMessage("LeveledListPreviewer: Found %zu body slider project(s)", bodyProjects.size());
+	wxLogMessage("LeveledListPreviewer: Found %zu body slider project(s), %zu total slider projects", bodyProjects.size(), allSliderProjects.size());
 }
 
 void LeveledListPreviewer::ApplyPresetToBody(const std::string& presetName) {
-	if (bodyRefVerts.empty()) return;
+	if (bodyRefVerts.empty() && bodyGameVerts.empty()) {
+		wxLogMessage("ApplyPresetToBody: no body verts cached");
+		return;
+	}
 
 	if (canvas && context)
 		canvas->SetCurrent(*context);
 
-	// "(none)" or empty → reset to reference shape (zero preset)
+	// "(none)" or empty → reset to the game body shape (as-built)
 	if (presetName.empty() || presetName == "(none)") {
-		// bodyRefVerts are in NIF space — gls.Update applies TransformPosNifToMesh
-		for (auto& kv : bodyRefVerts) {
-			auto uvIt = bodyRefUVs.find(kv.first);
-			gls.Update(kv.first, &kv.second,
-					   uvIt != bodyRefUVs.end() ? &uvIt->second : nullptr);
+		for (auto& [shapeName, verts] : bodyGameVerts) {
+			gls.Update(shapeName, &verts, nullptr);
 		}
 		gls.RenderOneFrame();
 		return;
 	}
 
-	if (bodyProjects.empty()) return;
+	if (bodyProjects.empty() || bodyShapeMorphMap.empty()) {
+		wxLogMessage("ApplyPresetToBody: no bodyProjects or morph map");
+		return;
+	}
+
+	wxLogMessage("ApplyPresetToBody: preset='%s', projects=%zu, morphMap=%zu", presetName, bodyProjects.size(), bodyShapeMorphMap.size());
 
 	std::string projectPath = Config["ProjectPath"];
-	if (projectPath.empty()) projectPath = Config["AppDir"];
+	if (projectPath.empty())
+		projectPath = Config["AppDir"];
 
-	for (auto& proj : bodyProjects) {
+	// Group game shapes by project index so we load each SliderSet only once.
+	std::unordered_map<size_t, std::vector<std::string>> shapesByProject;
+	for (auto& [gameShape, morphInfo] : bodyShapeMorphMap) {
+		shapesByProject[morphInfo.projectIdx].push_back(gameShape);
+	}
+
+	for (auto& [projIdx, gameShapes] : shapesByProject) {
+		auto& proj = bodyProjects[projIdx];
+		wxLogMessage("  project: set='%s' file='%s'", proj.setName, proj.sliderSetFile);
+
 		SliderSetFile ssf(proj.sliderSetFile);
-		if (ssf.fail()) continue;
+		if (ssf.fail()) {
+			wxLogWarning("  SliderSetFile failed");
+			continue;
+		}
 
 		SliderSet ss;
-		if (ssf.GetSet(proj.setName, ss)) continue;
+		if (ssf.GetSet(proj.setName, ss)) {
+			wxLogWarning("  GetSet failed");
+			continue;
+		}
 		ss.SetBaseDataPath(projectPath + "/ShapeData");
 
 		DiffDataSets diffData;
@@ -741,43 +814,224 @@ void LeveledListPreviewer::ApplyPresetToBody(const std::string& presetName) {
 		sliderMgr.LoadPresets(projectPath + "/SliderPresets", proj.setName, noGroups, true);
 		sliderMgr.InitializeSliders(presetName);
 
-		for (auto it = ss.ShapesBegin(); it != ss.ShapesEnd(); ++it) {
-			const std::string& shapeName   = it->first;
-			const std::string& targetShape = it->second.targetShape;
+		// Pick high or low weight slider set
+		auto& sliderSet = useHighWeight ? sliderMgr.slidersBig : sliderMgr.slidersSmall;
 
-			// Start from cached NIF-space reference verts (same file the diffs were built from)
-			auto refIt = bodyRefVerts.find(shapeName);
-			if (refIt == bodyRefVerts.end()) continue;
-			if (!gls.GetMesh(shapeName)) continue;
+		int nonZero = 0;
+		for (auto& sl : sliderSet)
+			if (!sl.zap && sl.value != 0.0f)
+				++nonZero;
+		wxLogMessage("  non-zero sliders (%s): %d", useHighWeight ? "hi" : "lo", nonZero);
 
-			std::vector<Vector3> verts = refIt->second; // copy — will be modified
+		for (auto& gameShape : gameShapes) {
+			auto& morphInfo = bodyShapeMorphMap[gameShape];
+			const std::string& refShapeName = morphInfo.refShapeName;
 
-			// Apply all big-weight slider diffs (diffs are also in NIF space)
-			for (auto& slider : sliderMgr.slidersBig) {
-				if (slider.zap) continue;
-				float val = slider.invert ? 1.0f - slider.value : slider.value;
-				for (auto& ds : slider.linkedDataSets)
-					diffData.ApplyDiff(ds, targetShape, val, &verts);
+			// Find the target shape name used by the diff data
+			std::string targetShape = refShapeName; // fallback
+			for (auto it = ss.ShapesBegin(); it != ss.ShapesEnd(); ++it) {
+				if (it->first == refShapeName) {
+					targetShape = it->second.targetShape;
+					break;
+				}
 			}
 
-			auto uvIt = bodyRefUVs.find(shapeName);
-			gls.Update(shapeName, &verts,
-					   uvIt != bodyRefUVs.end() ? &uvIt->second : nullptr);
+			auto refIt = bodyRefVerts.find(gameShape);
+			if (refIt == bodyRefVerts.end())
+				continue;
+			if (!gls.GetMesh(gameShape))
+				continue;
+
+			std::vector<Vector3> verts = refIt->second;
+
+			int applied = 0;
+			for (auto& slider : sliderSet) {
+				if (slider.zap)
+					continue;
+				float val = slider.invert ? 1.0f - slider.value : slider.value;
+				if (val == 0.0f)
+					continue;
+				for (auto& ds : slider.linkedDataSets)
+					if (diffData.ApplyDiff(ds, targetShape, val, &verts))
+						++applied;
+			}
+			wxLogMessage("  shape '%s' (ref '%s' target '%s'): %d diffs", gameShape, refShapeName, targetShape, applied);
+
+			gls.Update(gameShape, &verts, nullptr);
 		}
 	}
 
 	gls.RenderOneFrame();
+	wxLog::FlushActive();
+}
+
+void LeveledListPreviewer::ApplyPresetToOutfit(const std::string& presetName) {
+	if (outfitShapeMorphMap.empty())
+		return;
+
+	if (canvas && context)
+		canvas->SetCurrent(*context);
+
+	// "(none)" or empty → reset to game verts
+	if (presetName.empty() || presetName == "(none)") {
+		for (auto& [shapeName, verts] : outfitGameVerts)
+			gls.Update(shapeName, &verts, nullptr);
+		gls.RenderOneFrame();
+		return;
+	}
+
+	wxLogMessage("ApplyPresetToOutfit: preset='%s', morphMap=%zu", presetName, outfitShapeMorphMap.size());
+
+	std::string projectPath = Config["ProjectPath"];
+	if (projectPath.empty())
+		projectPath = Config["AppDir"];
+
+	// Group shapes by (sliderSetFile, setName) so we load each SliderSet only once.
+	struct ProjectKey {
+		std::string sliderSetFile;
+		std::string setName;
+		bool operator==(const ProjectKey& o) const { return sliderSetFile == o.sliderSetFile && setName == o.setName; }
+	};
+	struct ProjectKeyHash {
+		size_t operator()(const ProjectKey& k) const { return std::hash<std::string>()(k.sliderSetFile) ^ (std::hash<std::string>()(k.setName) << 1); }
+	};
+	std::unordered_map<ProjectKey, std::vector<std::string>, ProjectKeyHash> shapesByProject;
+	for (auto& [shapeName, morphInfo] : outfitShapeMorphMap) {
+		ProjectKey key{morphInfo.sliderSetFile, morphInfo.setName};
+		shapesByProject[key].push_back(shapeName);
+	}
+
+	for (auto& [projKey, shapes] : shapesByProject) {
+		SliderSetFile ssf(projKey.sliderSetFile);
+		if (ssf.fail()) {
+			wxLogWarning("  Outfit SSF failed: %s", projKey.sliderSetFile);
+			continue;
+		}
+
+		SliderSet ss;
+		if (ssf.GetSet(projKey.setName, ss)) {
+			wxLogWarning("  Outfit GetSet failed: %s", projKey.setName);
+			continue;
+		}
+		ss.SetBaseDataPath(projectPath + "/ShapeData");
+
+		DiffDataSets diffData;
+		ss.LoadSetDiffData(diffData);
+
+		SliderManager sliderMgr;
+		sliderMgr.AddSlidersInSet(ss);
+
+		std::vector<std::string> noGroups;
+		sliderMgr.LoadPresets(projectPath + "/SliderPresets", projKey.setName, noGroups, true);
+		sliderMgr.InitializeSliders(presetName);
+
+		auto& sliderSet = useHighWeight ? sliderMgr.slidersBig : sliderMgr.slidersSmall;
+
+		for (auto& shapeName : shapes) {
+			auto& morphInfo = outfitShapeMorphMap[shapeName];
+			const std::string& refShapeName = morphInfo.refShapeName;
+
+			std::string targetShape = refShapeName;
+			for (auto it = ss.ShapesBegin(); it != ss.ShapesEnd(); ++it) {
+				if (it->first == refShapeName) {
+					targetShape = it->second.targetShape;
+					break;
+				}
+			}
+
+			auto refIt = outfitRefVerts.find(shapeName);
+			if (refIt == outfitRefVerts.end())
+				continue;
+			if (!gls.GetMesh(shapeName))
+				continue;
+
+			std::vector<Vector3> verts = refIt->second;
+
+			int applied = 0;
+			for (auto& slider : sliderSet) {
+				if (slider.zap)
+					continue;
+				float val = slider.invert ? 1.0f - slider.value : slider.value;
+				if (val == 0.0f)
+					continue;
+				for (auto& ds : slider.linkedDataSets)
+					if (diffData.ApplyDiff(ds, targetShape, val, &verts))
+						++applied;
+			}
+			wxLogMessage("  Outfit shape '%s' (ref '%s' target '%s'): %d diffs", shapeName, refShapeName, targetShape, applied);
+
+			gls.Update(shapeName, &verts, nullptr);
+		}
+	}
+
+	gls.RenderOneFrame();
+	wxLog::FlushActive();
 }
 
 void LeveledListPreviewer::OnPresetChanged(wxCommandEvent& WXUNUSED(event)) {
-	if (!presetCombo) return;
+	if (!presetCombo)
+		return;
 	currentPresetName = presetCombo->GetValue().ToStdString();
 	ApplyPresetToBody(currentPresetName);
+	ApplyPresetToOutfit(currentPresetName);
+}
+
+void LeveledListPreviewer::OnHighWeightChanged(wxCommandEvent& event) {
+	useHighWeight = event.IsChecked();
+
+	if (!showBody)
+		return;
+
+	if (canvas && context)
+		canvas->SetCurrent(*context);
+
+	// Remove old body meshes from GL
+	for (auto& name : bodyShapeNames)
+		gls.DeleteMesh(name);
+	bodyShapeNames.clear();
+	bodyRefVerts.clear();
+	bodyRefUVs.clear();
+	bodyGameVerts.clear();
+	bodyShapeMorphMap.clear();
+
+	// Reload body at new weight (handles both slider-project and fallback paths)
+	LoadBodyMeshes();
+
+	// Re-apply preset to outfit at new weight
+	if (!currentPresetName.empty() && currentPresetName != "(none)")
+		ApplyPresetToOutfit(currentPresetName);
+
+	gls.RenderOneFrame();
 }
 
 // ---------------------------------------------------------------------------
 // Outfit selection → 3D preview
 // ---------------------------------------------------------------------------
+
+std::string LeveledListPreviewer::NormalizeNifOutputPath(const std::string& path) {
+	std::string result = path;
+	// Normalize separators
+	std::replace(result.begin(), result.end(), '\\', '/');
+	// Remove _0.nif or _1.nif suffix
+	if (result.size() > 6) {
+		std::string ending = result.substr(result.size() - 6);
+		std::transform(ending.begin(), ending.end(), ending.begin(), ::tolower);
+		if (ending == "_0.nif" || ending == "_1.nif") {
+			result = result.substr(0, result.size() - 6);
+			std::transform(result.begin(), result.end(), result.begin(), ::tolower);
+			return result;
+		}
+	}
+	// Also handle plain .nif
+	if (result.size() > 4) {
+		std::string ending = result.substr(result.size() - 4);
+		std::transform(ending.begin(), ending.end(), ending.begin(), ::tolower);
+		if (ending == ".nif")
+			result = result.substr(0, result.size() - 4);
+	}
+	std::transform(result.begin(), result.end(), result.begin(), ::tolower);
+	return result;
+}
 
 void LeveledListPreviewer::OnOutfitSelected(wxListEvent& event) {
 	long sel = event.GetIndex();
@@ -797,6 +1051,9 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	untexturedShapes.clear();
 	bodyShapeNames.clear();
 	headShapeNames.clear();
+	outfitShapeMorphMap.clear();
+	outfitRefVerts.clear();
+	outfitGameVerts.clear();
 
 	// Load body base layer first (body, hands, feet)
 	if (showBody)
@@ -858,6 +1115,17 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 		char piecePrefixBuf[16];
 		std::snprintf(piecePrefixBuf, sizeof(piecePrefixBuf), "%08X_", piece.formId);
 		std::string piecePrefix = piecePrefixBuf;
+
+		// Check if this piece has a matching slider project for morphing
+		std::string normalizedPiecePath = NormalizeNifOutputPath(piece.nifPath);
+		auto projIt = allSliderProjects.find(normalizedPiecePath);
+		NifFile refNif;
+		bool hasSliderProject = false;
+		if (projIt != allSliderProjects.end()) {
+			if (refNif.Load(projIt->second.refNifPath) == 0)
+				hasSliderProject = true;
+		}
+
 		for (auto& shapeName : nif.GetShapeNames()) {
 			Mesh* m = gls.AddMeshFromNif(&nif, shapeName, nullptr, false);
 			if (!m)
@@ -878,8 +1146,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 			}
 
 			m->CreateBuffers();
-			const std::vector<lldata::TextureOverride>* overrides =
-				piece.textureOverrides.empty() ? nullptr : &piece.textureOverrides;
+			const std::vector<lldata::TextureOverride>* overrides = piece.textureOverrides.empty() ? nullptr : &piece.textureOverrides;
 			// Pass original shapeName for texture override matching (overrides use NIF shape names)
 			bool hasTexture = AddNifShapeTextures(&nif, shapeName, overrides, m->shapeName);
 			if (!hasTexture) {
@@ -890,8 +1157,40 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 				}
 			}
 			++loadedCount;
+
+			// Cache game verts and match to reference NIF for morphing
+			if (hasSliderProject && m->nVerts > 0) {
+				// Cache game verts for reset
+				std::vector<Vector3> gameVerts(m->nVerts);
+				for (int i = 0; i < m->nVerts; i++)
+					gameVerts[i] = Mesh::TransformPosMeshToNif(m->verts[i]);
+				outfitGameVerts[m->shapeName] = std::move(gameVerts);
+
+				// Find matching reference shape by vertex count
+				for (auto& refShapeName : refNif.GetShapeNames()) {
+					auto* refShape = refNif.FindBlockByName<NiShape>(refShapeName);
+					if (!refShape)
+						continue;
+					std::vector<Vector3> refVerts;
+					refNif.GetVertsForShape(refShape, refVerts);
+					if (static_cast<int>(refVerts.size()) == m->nVerts) {
+						outfitRefVerts[m->shapeName] = std::move(refVerts);
+						OutfitShapeMorphInfo info;
+						info.sliderSetFile = projIt->second.sliderSetFile;
+						info.setName = projIt->second.setName;
+						info.refShapeName = refShapeName;
+						outfitShapeMorphMap[m->shapeName] = std::move(info);
+						wxLogMessage("  Outfit morph: '%s' matched ref '%s' (%d verts, project '%s')", m->shapeName, refShapeName, m->nVerts, projIt->second.setName);
+						break;
+					}
+				}
+			}
 		}
 	}
+
+	// Apply preset to outfit pieces
+	if (!outfitShapeMorphMap.empty() && !currentPresetName.empty() && currentPresetName != "(none)")
+		ApplyPresetToOutfit(currentPresetName);
 
 	// Reload head mesh for the currently selected NPC
 	if (!currentHeadEditorId.empty()) {
@@ -906,17 +1205,14 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 
 	gls.RenderOneFrame();
 	wxLog::FlushActive();
-	SetStatusText(wxString::Format(_("Outfit: %s — %d meshes loaded"),
-									outfit.name, loadedCount));
+	SetStatusText(wxString::Format(_("Outfit: %s — %d meshes loaded"), outfit.name, loadedCount));
 }
 
 // ---------------------------------------------------------------------------
 // Texture loading (same pattern as PreviewWindow)
 // ---------------------------------------------------------------------------
 
-bool LeveledListPreviewer::AddNifShapeTextures(NifFile* fromNif, const std::string& shapeName,
-												const std::vector<lldata::TextureOverride>* overrides,
-												const std::string& meshName) {
+bool LeveledListPreviewer::AddNifShapeTextures(NifFile* fromNif, const std::string& shapeName, const std::vector<lldata::TextureOverride>* overrides, const std::string& meshName) {
 	bool hasMat = false;
 	std::string matFile;
 
@@ -1000,9 +1296,8 @@ bool LeveledListPreviewer::AddNifShapeTextures(NifFile* fromNif, const std::stri
 	if (overrides) {
 		for (auto& ovr : *overrides) {
 			// Case-insensitive shape name comparison
-			if (ovr.shapeName.size() == shapeName.size() &&
-				std::equal(ovr.shapeName.begin(), ovr.shapeName.end(), shapeName.begin(),
-						   [](char a, char b) { return std::tolower(a) == std::tolower(b); })) {
+			if (ovr.shapeName.size() == shapeName.size()
+				&& std::equal(ovr.shapeName.begin(), ovr.shapeName.end(), shapeName.begin(), [](char a, char b) { return std::tolower(a) == std::tolower(b); })) {
 				for (int i = 0; i < 8; i++) {
 					if (!ovr.textures[i].empty())
 						texFiles[i] = ovr.textures[i];
@@ -1065,9 +1360,7 @@ bool LeveledListPreviewer::AddNifShapeTextures(NifFile* fromNif, const std::stri
 	}
 
 	if (!texFiles[0].empty())
-		wxLogMessage("  tex[0] for '%s': %s (exists=%d)",
-					 wxString(shapeName), wxString(texFiles[0]),
-					 wxFileName::FileExists(texFiles[0]) ? 1 : 0);
+		wxLogMessage("  tex[0] for '%s': %s (exists=%d)", wxString(shapeName), wxString(texFiles[0]), wxFileName::FileExists(texFiles[0]) ? 1 : 0);
 
 	const std::string& lookupName = meshName.empty() ? shapeName : meshName;
 	Mesh* m = gls.GetMesh(lookupName);
@@ -1090,10 +1383,7 @@ bool LeveledListPreviewer::AddNifShapeTextures(NifFile* fromNif, const std::stri
 		wxLogWarning("  AddMaterial returned null for '%s'", wxString(shapeName));
 	}
 
-	wxLogMessage("  result for '%s': hasDiffuse=%d glMat=%s visible=%d",
-				 wxString(shapeName), hasDiffuse ? 1 : 0,
-				 glMat ? "ok" : "NULL",
-				 m->bVisible ? 1 : 0);
+	wxLogMessage("  result for '%s': hasDiffuse=%d glMat=%s visible=%d", wxString(shapeName), hasDiffuse ? 1 : 0, glMat ? "ok" : "NULL", m->bVisible ? 1 : 0);
 
 	return hasDiffuse;
 }
@@ -1157,7 +1447,7 @@ void LeveledListPreviewer::OnClose(wxCloseEvent& WXUNUSED(event)) {
 	Config.SetBoolValue("LLPreviewer/Maximized", maximized);
 	if (!maximized) {
 		wxPoint pos = GetPosition();
-		wxSize  sz  = GetSize();
+		wxSize sz = GetSize();
 		Config.SetValue("LLPreviewer/WindowX", pos.x);
 		Config.SetValue("LLPreviewer/WindowY", pos.y);
 		Config.SetValue("LLPreviewer/WindowW", sz.x);
@@ -1176,9 +1466,10 @@ void LeveledListPreviewer::OnClose(wxCloseEvent& WXUNUSED(event)) {
 			Config.SetValue("LLPreviewer/LastOutfit", outfitList->GetItemText(sel).ToStdString());
 	}
 
-	// Persist head NPC and preset
+	// Persist head NPC, preset, and weight
 	Config.SetValue("LLPreviewer/HeadEditorId", currentHeadEditorId);
-	Config.SetValue("LLPreviewer/PresetName",   currentPresetName);
+	Config.SetValue("LLPreviewer/PresetName", currentPresetName);
+	Config.SetBoolValue("LLPreviewer/HighWeight", useHighWeight);
 
 	int ret = Config.SaveConfig(Config["AppDir"] + "/Config.xml");
 	if (ret)
@@ -1219,9 +1510,7 @@ void LLPreviewCanvas::OnKeyUp(wxKeyEvent& event) {
 		case 'W': previewer->ToggleWireframe(); break;
 		case 'U':
 		case 'B': {
-			int menuId = (event.GetKeyCode() == 'U')
-				? LeveledListPreviewer::ID_ToggleUntextured
-				: LeveledListPreviewer::ID_ToggleBody;
+			int menuId = (event.GetKeyCode() == 'U') ? LeveledListPreviewer::ID_ToggleUntextured : LeveledListPreviewer::ID_ToggleBody;
 			wxMenuBar* mb = previewer->GetMenuBar();
 			if (mb) {
 				bool newState = !mb->IsChecked(menuId);
