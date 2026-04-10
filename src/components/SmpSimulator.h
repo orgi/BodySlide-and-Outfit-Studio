@@ -58,6 +58,7 @@ public:
 	bool HasPhysics(const std::string& displayName) const;
 	const std::vector<nifly::Vector3>& GetSkinnedVerts(const std::string& displayName) const;
 	std::vector<std::string> GetPhysicsShapeNames() const;
+	void UpdateSkinPositions(const std::string& displayName, const std::vector<nifly::Vector3>& verts);
 
 private:
 	// -- Frame type enum (matches hdtSMP64) -----------------------------------

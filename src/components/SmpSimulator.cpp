@@ -220,11 +220,40 @@ void SmpSimulator::PopulateBoneTransforms(NifFile& nif) {
 				bone.origWorldTransform = bone.worldTransform;
 				populated++;
 			}
+			else {
+				wxLogWarning("SmpSimulator: Failed GetNodeTransformToGlobal for '%s'", nodeName);
+			}
 		}
 	}
 
 	if (populated > 0)
-		wxLogMessage("SmpSimulator: Populated %d bone transforms from outfit NIF", populated);
+		wxLogMessage("SmpSimulator: Populated %d bone transforms from outfit NIF (node hierarchy)", populated);
+
+	// Fallback: populate bone transforms from skin data (skinToBone inverse).
+	// Some NIFs may not have all physics bones as NiNode blocks in the scene
+	// graph, but they ARE referenced in the skin data of shapes they influence.
+	int skinFallback = 0;
+	for (auto* shape : nif.GetShapes()) {
+		if (!shape)
+			continue;
+		std::vector<std::string> boneNames;
+		nif.GetShapeBoneList(shape, boneNames);
+		for (size_t bi = 0; bi < boneNames.size(); bi++) {
+			int idx = GetOrCreateBone(boneNames[bi]);
+			auto& bone = bones_[idx];
+			if (bone.worldTransform.getOrigin().isZero() && bone.worldTransform.getBasis() == btMatrix3x3::getIdentity()) {
+				MatTransform skinToBone;
+				if (nif.GetShapeTransformSkinToBone(shape, boneNames[bi], skinToBone)) {
+					MatTransform boneToGlobal = skinToBone.InverseTransform();
+					bone.worldTransform = ToBt(boneToGlobal);
+					bone.origWorldTransform = bone.worldTransform;
+					skinFallback++;
+				}
+			}
+		}
+	}
+	if (skinFallback > 0)
+		wxLogMessage("SmpSimulator: Populated %d bone transforms from skin data (fallback)", skinFallback);
 }
 
 // ---------------------------------------------------------------------------
@@ -284,6 +313,15 @@ bool SmpSimulator::LoadSmpConfig(const std::string& xmlPath) {
 }
 
 bool SmpSimulator::ParseXml(const std::string& xmlPath) {
+	// Clear per-XML template state (matches hdtSMP64: each XML creates a new
+	// SkyrimSystemCreator with fresh defaults). Without this, bone-default mass
+	// from one XML leaks into the next, making anchor bones dynamic.
+	boneTemplates_.clear();
+	genericConstraintTemplates_.clear();
+	stiffSpringConstraintTemplates_.clear();
+	coneTwistConstraintTemplates_.clear();
+	namedShapes_.clear();
+
 	XMLDocument doc;
 	if (doc.LoadFile(xmlPath.c_str()) != XML_SUCCESS) {
 		wxLogError("SmpSimulator: Failed to parse XML: %s — %s", xmlPath, doc.ErrorStr());
@@ -634,7 +672,8 @@ void SmpSimulator::ParseBone(XMLElement* elem) {
 	bi.rigidBody->setInterpolationAngularVelocity(btVector3(0, 0, 0));
 	bi.rigidBody->updateInertiaTensor();
 
-	wxLogMessage("SmpSimulator: Bone '%s' mass=%.3f kinematic=%d", boneName, tmpl.mass, tmpl.mass <= 0.0f ? 1 : 0);
+	auto& o = bi.worldTransform.getOrigin();
+	wxLogMessage("SmpSimulator: Bone '%s' mass=%.3f kinematic=%d pos=(%.1f, %.1f, %.1f)", boneName, tmpl.mass, tmpl.mass <= 0.0f ? 1 : 0, o.x(), o.y(), o.z());
 }
 
 // ---------------------------------------------------------------------------
@@ -1226,7 +1265,16 @@ bool SmpSimulator::Initialise() {
 		world_->addConstraint(c.get(), true);
 
 	initialised_ = true;
-	wxLogMessage("SmpSimulator: Initialised — %zu bones, %zu constraints, %zu skinned shapes", bones_.size(), constraints_.size(), skinnedShapes_.size());
+	int kinCount = 0, dynCount = 0;
+	for (auto& b : bones_) {
+		if (b.rigidBody) {
+			if (b.rigidBody->isKinematicObject())
+				kinCount++;
+			else
+				dynCount++;
+		}
+	}
+	wxLogMessage("SmpSimulator: Initialised — %d kinematic, %d dynamic bodies, %zu constraints, %zu skinned shapes", kinCount, dynCount, constraints_.size(), skinnedShapes_.size());
 	return true;
 }
 
@@ -1252,11 +1300,12 @@ void SmpSimulator::Step(float dt) {
 	// Step simulation (single step at dt, matching hdtSMP64 variable time step)
 	world_->stepSimulation(dt, 1, dt);
 
-	// Update bone worldTransform from rigid body (matches hdtSMP64 writeTransform)
+	// Update bone worldTransform from rigid body (matches hdtSMP64 writeTransform:
+	// m_currentTransform = m_rigToLocal * m_rig.getInterpolationWorldTransform())
 	for (auto& bone : bones_) {
 		if (bone.rigidBody && !bone.rigidBody->isKinematicObject()) {
 			btTransform rbTrans = bone.rigidBody->getWorldTransform();
-			bone.worldTransform = rbTrans * bone.rigToLocal;
+			bone.worldTransform = bone.rigToLocal * rbTrans;
 		}
 	}
 
@@ -1362,4 +1411,17 @@ std::vector<std::string> SmpSimulator::GetPhysicsShapeNames() const {
 	for (auto& shape : skinnedShapes_)
 		names.push_back(shape.displayName);
 	return names;
+}
+
+void SmpSimulator::UpdateSkinPositions(const std::string& displayName, const std::vector<Vector3>& verts) {
+	for (auto& shape : skinnedShapes_) {
+		if (shape.displayName != displayName)
+			continue;
+		size_t count = std::min(verts.size(), shape.vertices.size());
+		for (size_t i = 0; i < count; i++) {
+			shape.vertices[i].skinPos = verts[i];
+			shape.currentVerts[i] = verts[i];
+		}
+		break;
+	}
 }

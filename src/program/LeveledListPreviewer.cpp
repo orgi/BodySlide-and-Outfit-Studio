@@ -9,6 +9,7 @@
 #include <cctype>
 #include <regex>
 #include <sstream>
+#include <unordered_set>
 
 #include <ExtraData.hpp>
 #include <wx/dir.h>
@@ -1174,6 +1175,19 @@ void LeveledListPreviewer::OnPresetChanged(wxCommandEvent& WXUNUSED(event)) {
 	currentPresetName = presetCombo->GetValue().ToStdString();
 	ApplyPresetToBody(currentPresetName);
 	ApplyPresetToOutfit(currentPresetName);
+
+	// If SMP is running, feed the newly morphed mesh vertices back to the simulator
+	if (smpSimulator_) {
+		for (auto& name : smpSimulator_->GetPhysicsShapeNames()) {
+			Mesh* mesh = gls.GetMesh(name);
+			if (!mesh || mesh->nVerts <= 0)
+				continue;
+			std::vector<Vector3> nifVerts(mesh->nVerts);
+			for (int i = 0; i < mesh->nVerts; i++)
+				nifVerts[i] = Mesh::TransformPosMeshToNif(mesh->verts[i]);
+			smpSimulator_->UpdateSkinPositions(name, nifVerts);
+		}
+	}
 }
 
 void LeveledListPreviewer::OnHighWeightChanged(wxCommandEvent& event) {
@@ -1193,6 +1207,18 @@ void LeveledListPreviewer::OnHighWeightChanged(wxCommandEvent& event) {
 	if (presetActive && !bodyShapeMorphMap.empty()) {
 		ApplyPresetToBody(currentPresetName);
 		ApplyPresetToOutfit(currentPresetName);
+		// If SMP is running, sync morphed verts
+		if (smpSimulator_) {
+			for (auto& name : smpSimulator_->GetPhysicsShapeNames()) {
+				Mesh* mesh = gls.GetMesh(name);
+				if (!mesh || mesh->nVerts <= 0)
+					continue;
+				std::vector<Vector3> nifVerts(mesh->nVerts);
+				for (int i = 0; i < mesh->nVerts; i++)
+					nifVerts[i] = Mesh::TransformPosMeshToNif(mesh->verts[i]);
+				smpSimulator_->UpdateSkinPositions(name, nifVerts);
+			}
+		}
 		// Mesh set unchanged — just sync checkbox states
 		SyncMeshOverlayStates();
 		gls.RenderOneFrame();
@@ -1463,12 +1489,37 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 		}
 	}
 
-	if (smpToggle_)
+	if (smpToggle_) {
 		smpToggle_->Enable(!smpXmlPaths_.empty());
+
+		// Restore sticky SMP toggle: auto-start if previously enabled
+		if (!smpXmlPaths_.empty() && Config["SmpEnabled"] == "true") {
+			smpToggle_->SetValue(true);
+			wxCommandEvent smpEvt(wxEVT_CHECKBOX);
+			smpEvt.SetInt(1);
+			OnToggleSmp(smpEvt);
+		}
+	}
 
 	// Apply preset to outfit pieces
 	if (!outfitShapeMorphMap.empty() && !currentPresetName.empty() && currentPresetName != "(none)")
 		ApplyPresetToOutfit(currentPresetName);
+
+	// If SMP is running, sync the morphed mesh vertices to the simulator.
+	// SMP auto-restore above captured unmorphed verts; now that the preset has
+	// been applied we need to update skin positions so SkinVertices preserves
+	// the preset shape.
+	if (smpSimulator_) {
+		for (auto& name : smpSimulator_->GetPhysicsShapeNames()) {
+			Mesh* mesh = gls.GetMesh(name);
+			if (!mesh || mesh->nVerts <= 0)
+				continue;
+			std::vector<Vector3> nifVerts(mesh->nVerts);
+			for (int i = 0; i < mesh->nVerts; i++)
+				nifVerts[i] = Mesh::TransformPosMeshToNif(mesh->verts[i]);
+			smpSimulator_->UpdateSkinPositions(name, nifVerts);
+		}
+	}
 
 	// Auto-hide base body parts whose partition IDs are covered by outfit
 	// pieces.  Skyrim replaces the base body with the outfit's own body
@@ -2097,6 +2148,7 @@ void LeveledListPreviewer::SetupSmpSimulation() {
 	// not in the skeleton. Without correct transforms, constraint frames
 	// are computed from identity and the cloth chain collapses.
 	std::unordered_map<std::string, std::unique_ptr<NifFile>> loadedNifs;
+
 	for (auto& [nifPath, xmlPath] : smpXmlPaths_) {
 		if (loadedNifs.count(nifPath))
 			continue;
@@ -2125,6 +2177,8 @@ void LeveledListPreviewer::SetupSmpSimulation() {
 		}
 		if (loaded)
 			loadedNifs[nifPath] = std::move(nif);
+		else
+			wxLogWarning("SMP: Failed to load NIF: '%s'", nifPath);
 	}
 
 	// Phase 1: Populate bone world transforms from outfit NIFs
@@ -2132,7 +2186,12 @@ void LeveledListPreviewer::SetupSmpSimulation() {
 		smpSimulator_->PopulateBoneTransforms(*nif);
 
 	// Phase 2: Parse SMP XML configs (bone transforms are now known)
+	// Track already-parsed XMLs to avoid duplicate loading when multiple
+	// armor pieces reference the same XML (would create duplicate constraints).
+	std::unordered_set<std::string> parsedXmls;
 	for (auto& [nifPath, xmlPath] : smpXmlPaths_) {
+		if (!parsedXmls.insert(xmlPath).second)
+			continue;
 		if (!smpSimulator_->LoadSmpConfig(xmlPath))
 			wxLogWarning("SMP: Failed to load XML config: %s", xmlPath);
 	}
@@ -2167,6 +2226,18 @@ void LeveledListPreviewer::SetupSmpSimulation() {
 	}
 
 	wxLogMessage("SMP: Simulation ready — %zu physics shapes", smpSimulator_->GetPhysicsShapeNames().size());
+
+	// Feed currently displayed (morphed) mesh vertices into SMP skin data
+	// so that preset morphs are preserved when the simulation runs.
+	for (auto& name : smpSimulator_->GetPhysicsShapeNames()) {
+		Mesh* mesh = gls.GetMesh(name);
+		if (!mesh || mesh->nVerts <= 0)
+			continue;
+		std::vector<Vector3> nifVerts(mesh->nVerts);
+		for (int i = 0; i < mesh->nVerts; i++)
+			nifVerts[i] = Mesh::TransformPosMeshToNif(mesh->verts[i]);
+		smpSimulator_->UpdateSkinPositions(name, nifVerts);
+	}
 }
 
 void LeveledListPreviewer::StopSmpSimulation() {
@@ -2176,6 +2247,8 @@ void LeveledListPreviewer::StopSmpSimulation() {
 }
 
 void LeveledListPreviewer::OnToggleSmp(wxCommandEvent& event) {
+	Config.SetValue("SmpEnabled", event.IsChecked() ? "true" : "false");
+
 	if (event.IsChecked()) {
 		if (!smpSimulator_) {
 			SetupSmpSimulation();
