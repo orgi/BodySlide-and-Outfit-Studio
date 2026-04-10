@@ -442,42 +442,69 @@ bool LeveledListPreviewer::LoadNifFromPath(const std::string& relativePath, cons
 }
 
 void LeveledListPreviewer::LoadBodyMeshes() {
-	// Standard Skyrim female body part paths (will be overridden by CBBE/etc if installed)
-	static const std::vector<std::string> bodyParts = {
-		"meshes/actors/character/character assets/femalebody_1.nif",
-		"meshes/actors/character/character assets/femalehands_1.nif",
-		"meshes/actors/character/character assets/femalefeet_1.nif",
-	};
-
-	for (auto& part : bodyParts) {
-		if (!LoadNifFromPath(part, "_body_")) {
-			wxLogMessage("LeveledListPreviewer: Body part not found: %s", part);
-		}
-	}
-
-	// Cache original (pre-morph) vertices so preset changes can start from a clean state
 	bodyRefVerts.clear();
 	bodyRefUVs.clear();
-	for (auto& shapeName : bodyShapeNames) {
-		Mesh* m = gls.GetMesh(shapeName);
-		if (!m) continue;
-		std::vector<nifly::Vector3> verts(m->nVerts);
-		for (int i = 0; i < m->nVerts; ++i)
-			verts[i] = m->TransformPosMeshToModel(m->verts[i]);
-		bodyRefVerts[shapeName] = std::move(verts);
-		// UVs: grab from the mesh's uv array (one Vector2 per vertex)
-		if (m->texcoord) {
-			std::vector<nifly::Vector2> uvs(m->nVerts);
-			for (int i = 0; i < m->nVerts; ++i)
-				uvs[i] = m->texcoord[i];
-			bodyRefUVs[shapeName] = std::move(uvs);
+
+	// Find BodySlide projects that output to the standard body NIF paths.
+	FindBodySliderProjects();
+
+	if (!bodyProjects.empty()) {
+		// Load body from BodySlide reference NIFs so preset morphs can be applied
+		// correctly — the morph diffs are relative to these files.
+		for (auto& proj : bodyProjects) {
+			NifFile refNif;
+			if (refNif.Load(proj.refNifPath) != 0) {
+				wxLogMessage("LeveledListPreviewer: Body ref NIF not found: %s", proj.refNifPath);
+				continue;
+			}
+
+			for (auto& shapeName : refNif.GetShapeNames()) {
+				Mesh* m = gls.AddMeshFromNif(&refNif, shapeName, nullptr, false);
+				if (!m) continue;
+
+				const std::vector<Color4>* vcolors = refNif.GetColorsForShape(shapeName);
+				if (vcolors) {
+					for (size_t v = 0; v < vcolors->size(); v++) {
+						m->vcolors[v].x = vcolors->at(v).r;
+						m->vcolors[v].y = vcolors->at(v).g;
+						m->vcolors[v].z = vcolors->at(v).b;
+						m->valpha[v]    = vcolors->at(v).a;
+					}
+				}
+				m->CreateBuffers();
+				AddNifShapeTextures(&refNif, shapeName);
+				bodyShapeNames.push_back(m->shapeName);
+
+				// Cache reference verts in NIF space — gls.Update expects this.
+				auto* shape = refNif.FindBlockByName<NiShape>(shapeName);
+				if (shape) {
+					std::vector<Vector3> verts;
+					refNif.GetVertsForShape(shape, verts);
+					bodyRefVerts[shapeName] = std::move(verts);
+
+					std::vector<Vector2> uvs;
+					refNif.GetUvsForShape(shape, uvs);
+					if (!uvs.empty())
+						bodyRefUVs[shapeName] = std::move(uvs);
+				}
+			}
 		}
 	}
 
-	// Find body slider projects once per body load
-	FindBodySliderProjects();
+	if (bodyShapeNames.empty()) {
+		// No slider projects found — fall back to plain game NIFs (no morphing)
+		static const std::vector<std::string> bodyParts = {
+			"meshes/actors/character/character assets/femalebody_1.nif",
+			"meshes/actors/character/character assets/femalehands_1.nif",
+			"meshes/actors/character/character assets/femalefeet_1.nif",
+		};
+		for (auto& part : bodyParts) {
+			if (!LoadNifFromPath(part))
+				wxLogMessage("LeveledListPreviewer: Body part not found: %s", part);
+		}
+	}
 
-	// Re-apply current preset if one was chosen
+	// Apply current preset if one was chosen
 	if (!currentPresetName.empty() && currentPresetName != "(none)")
 		ApplyPresetToBody(currentPresetName);
 }
@@ -620,10 +647,12 @@ void LeveledListPreviewer::FindBodySliderProjects() {
 	if (projectPath.empty()) projectPath = Config["AppDir"];
 	std::string sliderSetsDir = projectPath + "/SliderSets";
 
-	// Body output NIF filenames (lower-case) to search for
+	// Body output NIF filenames (lower-case) to search for.
+	// Use a set to track which output files are already claimed (first match wins).
 	static const std::set<std::string> bodyOutputFiles = {
 		"femalebody_1.nif", "femalehands_1.nif", "femalefeet_1.nif"
 	};
+	std::set<std::string> claimed;
 
 	wxArrayString ospFiles;
 	wxDir::GetAllFiles(wxString::FromUTF8(sliderSetsDir), &ospFiles, "*.osp", wxDIR_FILES);
@@ -641,28 +670,30 @@ void LeveledListPreviewer::FindBodySliderProjects() {
 			ssf.GetSetOutputFilePath(setName, outFilePath);
 			if (outFilePath.empty()) continue;
 
-			// Extract just the filename and compare case-insensitively
+			// Extract just the filename, compare case-insensitively
 			auto pos = outFilePath.find_last_of("/\\");
 			std::string outFile = (pos != std::string::npos) ? outFilePath.substr(pos + 1) : outFilePath;
 			std::transform(outFile.begin(), outFile.end(), outFile.begin(), ::tolower);
 
-			if (bodyOutputFiles.count(outFile)) {
-				// Get the reference NIF path
-				SliderSet ss;
-				if (ssf.GetSet(setName, ss)) continue;
-				ss.SetBaseDataPath(projectPath + "/ShapeData");
-				std::string refNifPath = ss.GetInputFileName();
+			if (!bodyOutputFiles.count(outFile)) continue;
+			if (claimed.count(outFile)) continue; // first match wins
 
-				if (!wxFileName::FileExists(wxString::FromUTF8(refNifPath))) continue;
+			SliderSet ss;
+			if (ssf.GetSet(setName, ss)) continue;
+			ss.SetBaseDataPath(projectPath + "/ShapeData");
+			std::string refNifPath = ss.GetInputFileName();
 
-				BodyProject proj;
-				proj.refNifPath    = refNifPath;
-				proj.sliderSetFile = ospPath.ToStdString();
-				proj.setName       = setName;
-				bodyProjects.push_back(std::move(proj));
+			if (!wxFileName::FileExists(wxString::FromUTF8(refNifPath))) continue;
 
-				wxLogMessage("LeveledListPreviewer: Body project '%s' → %s", setName, outFile);
-			}
+			BodyProject proj;
+			proj.refNifPath    = refNifPath;
+			proj.sliderSetFile = ospPath.ToStdString();
+			proj.setName       = setName;
+			bodyProjects.push_back(std::move(proj));
+			claimed.insert(outFile);
+
+			wxLogMessage("LeveledListPreviewer: Body project '%s' → %s (ref: %s)",
+						 setName, outFile, refNifPath);
 		}
 	}
 
@@ -670,21 +701,24 @@ void LeveledListPreviewer::FindBodySliderProjects() {
 }
 
 void LeveledListPreviewer::ApplyPresetToBody(const std::string& presetName) {
-	if (bodyProjects.empty() || presetName.empty() || presetName == "(none)") {
-		// Reset to stored reference verts if we have them
-		if (!bodyRefVerts.empty()) {
-			if (canvas && context)
-				canvas->SetCurrent(*context);
-			for (auto& kv : bodyRefVerts)
-				gls.Update(kv.first, &kv.second,
-						   bodyRefUVs.count(kv.first) ? &bodyRefUVs[kv.first] : nullptr);
-			gls.RenderOneFrame();
-		}
-		return;
-	}
+	if (bodyRefVerts.empty()) return;
 
 	if (canvas && context)
 		canvas->SetCurrent(*context);
+
+	// "(none)" or empty → reset to reference shape (zero preset)
+	if (presetName.empty() || presetName == "(none)") {
+		// bodyRefVerts are in NIF space — gls.Update applies TransformPosNifToMesh
+		for (auto& kv : bodyRefVerts) {
+			auto uvIt = bodyRefUVs.find(kv.first);
+			gls.Update(kv.first, &kv.second,
+					   uvIt != bodyRefUVs.end() ? &uvIt->second : nullptr);
+		}
+		gls.RenderOneFrame();
+		return;
+	}
+
+	if (bodyProjects.empty()) return;
 
 	std::string projectPath = Config["ProjectPath"];
 	if (projectPath.empty()) projectPath = Config["AppDir"];
@@ -707,26 +741,18 @@ void LeveledListPreviewer::ApplyPresetToBody(const std::string& presetName) {
 		sliderMgr.LoadPresets(projectPath + "/SliderPresets", proj.setName, noGroups, true);
 		sliderMgr.InitializeSliders(presetName);
 
-		NifFile refNif;
-		if (refNif.Load(proj.refNifPath) != 0) continue;
-
 		for (auto it = ss.ShapesBegin(); it != ss.ShapesEnd(); ++it) {
 			const std::string& shapeName   = it->first;
 			const std::string& targetShape = it->second.targetShape;
 
-			// Body shapes in GLSurface are stored under original NIF shape names
+			// Start from cached NIF-space reference verts (same file the diffs were built from)
+			auto refIt = bodyRefVerts.find(shapeName);
+			if (refIt == bodyRefVerts.end()) continue;
 			if (!gls.GetMesh(shapeName)) continue;
 
-			auto* shape = refNif.FindBlockByName<NiShape>(shapeName);
-			if (!shape) continue;
+			std::vector<Vector3> verts = refIt->second; // copy — will be modified
 
-			std::vector<Vector3> verts;
-			if (!refNif.GetVertsForShape(shape, verts)) continue;
-
-			std::vector<Vector2> uvs;
-			refNif.GetUvsForShape(shape, uvs);
-
-			// Apply all big-weight slider diffs
+			// Apply all big-weight slider diffs (diffs are also in NIF space)
 			for (auto& slider : sliderMgr.slidersBig) {
 				if (slider.zap) continue;
 				float val = slider.invert ? 1.0f - slider.value : slider.value;
@@ -734,7 +760,9 @@ void LeveledListPreviewer::ApplyPresetToBody(const std::string& presetName) {
 					diffData.ApplyDiff(ds, targetShape, val, &verts);
 			}
 
-			gls.Update(shapeName, &verts, uvs.empty() ? nullptr : &uvs);
+			auto uvIt = bodyRefUVs.find(shapeName);
+			gls.Update(shapeName, &verts,
+					   uvIt != bodyRefUVs.end() ? &uvIt->second : nullptr);
 		}
 	}
 
