@@ -1459,31 +1459,33 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 			shapeNifSource[m->shapeName] = piecePath;
 			++loadedCount;
 
-			// Cache game verts and match to reference NIF for morphing
+			// Cache game verts and match to reference NIF for morphing.
+			// Match by exact shape name only — vertex count matching is unreliable
+			// because different shapes (e.g. mirrored MainL/MainR) can share the same count.
 			if (hasSliderProject && m->nVerts > 0) {
-				// Cache game verts for reset
-				std::vector<Vector3> gameVerts(m->nVerts);
-				for (int i = 0; i < m->nVerts; i++)
-					gameVerts[i] = Mesh::TransformPosMeshToNif(m->verts[i]);
-				outfitGameVerts[m->shapeName] = std::move(gameVerts);
-
-				// Find matching reference shape by vertex count
 				for (auto& refShapeName : refNif.GetShapeNames()) {
+					if (refShapeName != shapeName)
+						continue;
 					auto* refShape = refNif.FindBlockByName<NiShape>(refShapeName);
 					if (!refShape)
 						continue;
 					std::vector<Vector3> refVerts;
 					refNif.GetVertsForShape(refShape, refVerts);
-					if (static_cast<int>(refVerts.size()) == m->nVerts) {
-						outfitRefVerts[m->shapeName] = std::move(refVerts);
-						OutfitShapeMorphInfo info;
-						info.sliderSetFile = projIt->second.sliderSetFile;
-						info.setName = projIt->second.setName;
-						info.refShapeName = refShapeName;
-						outfitShapeMorphMap[m->shapeName] = std::move(info);
-						wxLogMessage("  Outfit morph: '%s' matched ref '%s' (%d verts, project '%s')", m->shapeName, refShapeName, m->nVerts, projIt->second.setName);
-						break;
-					}
+					if (static_cast<int>(refVerts.size()) != m->nVerts)
+						continue;
+
+					std::vector<Vector3> gameVerts(m->nVerts);
+					for (int i = 0; i < m->nVerts; i++)
+						gameVerts[i] = Mesh::TransformPosMeshToNif(m->verts[i]);
+					outfitGameVerts[m->shapeName] = std::move(gameVerts);
+					outfitRefVerts[m->shapeName] = std::move(refVerts);
+					OutfitShapeMorphInfo info;
+					info.sliderSetFile = projIt->second.sliderSetFile;
+					info.setName = projIt->second.setName;
+					info.refShapeName = refShapeName;
+					outfitShapeMorphMap[m->shapeName] = std::move(info);
+					wxLogMessage("  Outfit morph: '%s' matched ref '%s' (%d verts, project '%s')", m->shapeName, refShapeName, m->nVerts, projIt->second.setName);
+					break;
 				}
 			}
 		}
