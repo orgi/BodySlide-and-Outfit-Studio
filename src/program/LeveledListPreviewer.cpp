@@ -2103,6 +2103,19 @@ std::string LeveledListPreviewer::FindSmpXml(NifFile& nif, const std::string& ni
 			// Normalise backslashes to forward slashes
 			std::replace(xmlRelPath.begin(), xmlRelPath.end(), '\\', '/');
 
+			// Strip leading slashes
+			while (!xmlRelPath.empty() && xmlRelPath[0] == '/')
+				xmlRelPath = xmlRelPath.substr(1);
+
+			// Strip leading "Data/" prefix (case-insensitive) — the base path already
+			// points to the Data folder, so keeping it would double the directory.
+			if (xmlRelPath.size() > 5) {
+				std::string prefix5 = xmlRelPath.substr(0, 5);
+				std::transform(prefix5.begin(), prefix5.end(), prefix5.begin(), ::tolower);
+				if (prefix5 == "data/")
+					xmlRelPath = xmlRelPath.substr(5);
+			}
+
 			// The path is relative to the game Data folder
 			std::string fullPath = baseGamePath + xmlRelPath;
 			if (wxFileName::FileExists(fullPath))
