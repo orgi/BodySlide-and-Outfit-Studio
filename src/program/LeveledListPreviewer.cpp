@@ -20,6 +20,7 @@ wxBEGIN_EVENT_TABLE(LeveledListPreviewer, wxFrame)
 	EVT_CLOSE(LeveledListPreviewer::OnClose)
 	EVT_MENU(LeveledListPreviewer::ID_LoadESP, LeveledListPreviewer::OnLoadESP)
 	EVT_MENU(LeveledListPreviewer::ID_ToggleUntextured, LeveledListPreviewer::OnToggleUntextured)
+	EVT_MENU(LeveledListPreviewer::ID_ToggleBody, LeveledListPreviewer::OnToggleBody)
 wxEND_EVENT_TABLE()
 
 // ---------------------------------------------------------------------------
@@ -40,6 +41,8 @@ LeveledListPreviewer::LeveledListPreviewer(BodySlideApp* app)
 	wxMenu* viewMenu = new wxMenu();
 	viewMenu->AppendCheckItem(ID_ToggleUntextured, _("Show &Untextured Meshes\tU"), _("Show collision and other meshes without textures"));
 	viewMenu->Check(ID_ToggleUntextured, false);
+	viewMenu->AppendCheckItem(ID_ToggleBody, _("Show &Body\tB"), _("Show default body, hands and feet underneath outfit"));
+	viewMenu->Check(ID_ToggleBody, true);
 	menuBar->Append(viewMenu, _("&View"));
 
 	SetMenuBar(menuBar);
@@ -244,6 +247,88 @@ void LeveledListPreviewer::RefreshOutfitList() {
 }
 
 // ---------------------------------------------------------------------------
+// Body mesh loading (base layer: body, hands, feet)
+// ---------------------------------------------------------------------------
+
+bool LeveledListPreviewer::LoadNifFromPath(const std::string& relativePath, const std::string& prefix) {
+	std::string baseGamePath = Config["GameDataPath"];
+	if (!baseGamePath.empty() && baseGamePath.back() != '/' && baseGamePath.back() != '\\')
+		baseGamePath += '/';
+
+	NifFile nif;
+	bool loaded = false;
+
+	// Try loose file (with case-insensitive fallback)
+	std::string fullPath = baseGamePath + relativePath;
+	if (wxFileName::FileExists(fullPath)) {
+		loaded = (nif.Load(fullPath) == 0);
+	}
+	if (!loaded) {
+		std::string resolved = lldata::LeveledListData::ResolveCaseInsensitive(baseGamePath, relativePath);
+		if (!resolved.empty())
+			loaded = (nif.Load(resolved) == 0);
+	}
+
+	// Try BSA/BA2
+	if (!loaded) {
+		for (FSArchiveFile* archive : FSManager::archiveList()) {
+			if (archive && archive->hasFile(relativePath)) {
+				wxMemoryBuffer outData;
+				archive->fileContents(relativePath, outData);
+				if (!outData.IsEmpty()) {
+					std::string content(static_cast<char*>(outData.GetData()), outData.GetDataLen());
+					std::istringstream stream(content, std::istringstream::binary);
+					loaded = (nif.Load(stream) == 0);
+					break;
+				}
+			}
+		}
+	}
+
+	if (!loaded)
+		return false;
+
+	for (auto& shapeName : nif.GetShapeNames()) {
+		// Use prefix to avoid name collisions with outfit shapes
+		std::string displayName = prefix.empty() ? shapeName : (prefix + shapeName);
+		Mesh* m = gls.AddMeshFromNif(&nif, shapeName, nullptr, false);
+		if (!m)
+			continue;
+
+		const std::vector<Color4>* vcolors = nif.GetColorsForShape(shapeName);
+		if (vcolors) {
+			for (size_t v = 0; v < vcolors->size(); v++) {
+				m->vcolors[v].x = vcolors->at(v).r;
+				m->vcolors[v].y = vcolors->at(v).g;
+				m->vcolors[v].z = vcolors->at(v).b;
+				m->valpha[v] = vcolors->at(v).a;
+			}
+		}
+
+		m->CreateBuffers();
+		AddNifShapeTextures(&nif, m->shapeName);
+		bodyShapeNames.push_back(m->shapeName);
+	}
+
+	return true;
+}
+
+void LeveledListPreviewer::LoadBodyMeshes() {
+	// Standard Skyrim female body part paths (will be overridden by CBBE/etc if installed)
+	static const std::vector<std::string> bodyParts = {
+		"meshes/actors/character/character assets/femalebody_1.nif",
+		"meshes/actors/character/character assets/femalehands_1.nif",
+		"meshes/actors/character/character assets/femalefeet_1.nif",
+	};
+
+	for (auto& part : bodyParts) {
+		if (!LoadNifFromPath(part, "_body_")) {
+			wxLogMessage("LeveledListPreviewer: Body part not found: %s", part);
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Outfit selection → 3D preview
 // ---------------------------------------------------------------------------
 
@@ -263,6 +348,11 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	gls.Cleanup();
 	shapeMaterials.clear();
 	untexturedShapes.clear();
+	bodyShapeNames.clear();
+
+	// Load body base layer first (body, hands, feet)
+	if (showBody)
+		LoadBodyMeshes();
 
 	std::string baseGamePath = Config["GameDataPath"];
 	if (!baseGamePath.empty() && baseGamePath.back() != '/' && baseGamePath.back() != '\\')
@@ -512,6 +602,13 @@ void LeveledListPreviewer::OnToggleUntextured(wxCommandEvent& event) {
 	gls.RenderOneFrame();
 }
 
+void LeveledListPreviewer::OnToggleBody(wxCommandEvent& event) {
+	showBody = event.IsChecked();
+	for (auto& name : bodyShapeNames)
+		gls.SetMeshVisibility(name, showBody);
+	gls.RenderOneFrame();
+}
+
 // ---------------------------------------------------------------------------
 // Camera controls
 // ---------------------------------------------------------------------------
@@ -581,13 +678,16 @@ void LLPreviewCanvas::OnKeyUp(wxKeyEvent& event) {
 	switch (event.GetKeyCode()) {
 		case 'T': previewer->ToggleTextures(); break;
 		case 'W': previewer->ToggleWireframe(); break;
-		case 'U': {
-			// Toggle via menu so the checkmark stays in sync
+		case 'U':
+		case 'B': {
+			int menuId = (event.GetKeyCode() == 'U')
+				? LeveledListPreviewer::ID_ToggleUntextured
+				: LeveledListPreviewer::ID_ToggleBody;
 			wxMenuBar* mb = previewer->GetMenuBar();
 			if (mb) {
-				bool newState = !mb->IsChecked(LeveledListPreviewer::ID_ToggleUntextured);
-				mb->Check(LeveledListPreviewer::ID_ToggleUntextured, newState);
-				wxCommandEvent evt(wxEVT_MENU, LeveledListPreviewer::ID_ToggleUntextured);
+				bool newState = !mb->IsChecked(menuId);
+				mb->Check(menuId, newState);
+				wxCommandEvent evt(wxEVT_MENU, menuId);
 				evt.SetInt(newState ? 1 : 0);
 				previewer->GetEventHandler()->ProcessEvent(evt);
 			}
