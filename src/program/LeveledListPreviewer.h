@@ -44,6 +44,10 @@ class LeveledListPreviewer : public wxFrame {
 	bool showUntextured = false;
 	bool showBody = true;
 
+	// Mesh list overlay: floating panel over the GL canvas listing loaded shapes
+	wxScrolledWindow* meshOverlayPanel = nullptr;
+	std::unordered_map<std::string, wxCheckBox*> meshCheckboxes; // shapeName → checkbox
+
 	// Body part tracking: shape name → set of NIF partition body part IDs
 	// (e.g. 32=SBP_32_BODY, 33=SBP_33_HANDS, 37=SBP_37_FEET)
 	std::unordered_map<std::string, std::set<uint16_t>> bodyShapePartMap;
@@ -170,6 +174,11 @@ private:
 	void ApplyPresetToBody(const std::string& presetName);
 	void ApplyPresetToOutfit(const std::string& presetName);
 	static std::string NormalizeNifOutputPath(const std::string& path);
+
+	// Mesh overlay helpers
+	void RefreshMeshOverlay();
+	void SyncMeshOverlayStates();
+	void RepositionMeshOverlay();
 
 	enum {
 		ID_LoadESP = wxID_HIGHEST + 500,

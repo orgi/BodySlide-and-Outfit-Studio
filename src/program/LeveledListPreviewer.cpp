@@ -130,6 +130,17 @@ LeveledListPreviewer::LeveledListPreviewer(BodySlideApp* app)
 	rightSizer->Add(canvas, 1, wxEXPAND);
 	rightPanel->SetSizer(rightSizer);
 
+	// Mesh list overlay — floating panel over the GL canvas, not in sizer
+	meshOverlayPanel = new wxScrolledWindow(rightPanel, wxID_ANY, wxDefaultPosition, wxSize(220, 100),
+		wxVSCROLL | wxBORDER_SIMPLE);
+	meshOverlayPanel->SetScrollRate(0, 8);
+	meshOverlayPanel->Hide();
+
+	canvas->Bind(wxEVT_SIZE, [this](wxSizeEvent& ev) {
+		ev.Skip();
+		RepositionMeshOverlay();
+	});
+
 	// Split
 	splitter->SplitVertically(leftPanel, rightPanel, 320);
 	splitter->SetMinimumPaneSize(200);
@@ -739,6 +750,7 @@ void LeveledListPreviewer::OnHeadEntered(wxCommandEvent& WXUNUSED(event)) {
 			bodyShapeMorphMap.clear();
 			LoadBodyMeshes();
 		}
+		RefreshMeshOverlay();
 		gls.RenderOneFrame();
 		return;
 	}
@@ -795,6 +807,8 @@ void LeveledListPreviewer::OnHeadEntered(wxCommandEvent& WXUNUSED(event)) {
 		bodyShapeMorphMap.clear();
 		LoadBodyMeshes();
 	}
+
+	RefreshMeshOverlay();
 }
 
 // ---------------------------------------------------------------------------
@@ -1163,6 +1177,8 @@ void LeveledListPreviewer::OnHighWeightChanged(wxCommandEvent& event) {
 	if (presetActive && !bodyShapeMorphMap.empty()) {
 		ApplyPresetToBody(currentPresetName);
 		ApplyPresetToOutfit(currentPresetName);
+		// Mesh set unchanged — just sync checkbox states
+		SyncMeshOverlayStates();
 		gls.RenderOneFrame();
 		return;
 	}
@@ -1172,7 +1188,7 @@ void LeveledListPreviewer::OnHighWeightChanged(wxCommandEvent& event) {
 	{
 		long sel = outfitList ? outfitList->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED) : -1;
 		if (sel >= 0 && sel < static_cast<long>(filteredOutfits.size())) {
-			// Reload entire outfit (which also reloads body)
+			// Reload entire outfit (which also reloads body); RefreshMeshOverlay called inside
 			LoadOutfitMeshes(*filteredOutfits[sel]);
 			gls.RenderOneFrame();
 			return;
@@ -1190,6 +1206,7 @@ void LeveledListPreviewer::OnHighWeightChanged(wxCommandEvent& event) {
 
 	LoadBodyMeshes();
 
+	RefreshMeshOverlay();
 	gls.RenderOneFrame();
 }
 
@@ -1470,6 +1487,8 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	gls.RenderOneFrame();
 	wxLog::FlushActive();
 	SetStatusText(wxString::Format(_("Outfit: %s — %d meshes loaded"), outfit.name, loadedCount));
+
+	RefreshMeshOverlay();
 }
 
 // ---------------------------------------------------------------------------
@@ -1653,6 +1672,105 @@ bool LeveledListPreviewer::AddNifShapeTextures(NifFile* fromNif, const std::stri
 }
 
 // ---------------------------------------------------------------------------
+// Mesh list overlay
+// ---------------------------------------------------------------------------
+
+void LeveledListPreviewer::RepositionMeshOverlay() {
+	if (!meshOverlayPanel || !canvas)
+		return;
+	wxPoint pos = canvas->GetPosition();
+	meshOverlayPanel->SetPosition(pos + wxPoint(5, 5));
+}
+
+void LeveledListPreviewer::SyncMeshOverlayStates() {
+	for (auto& [name, cb] : meshCheckboxes) {
+		Mesh* m = gls.GetMesh(name);
+		if (m && cb)
+			cb->SetValue(m->bVisible);
+	}
+}
+
+void LeveledListPreviewer::RefreshMeshOverlay() {
+	if (!meshOverlayPanel)
+		return;
+
+	meshOverlayPanel->DestroyChildren();
+	meshCheckboxes.clear();
+
+	struct ShapeEntry {
+		std::string shapeName;
+		std::string displayName;
+		bool visible;
+	};
+	// Build category lists; skip empties
+	std::vector<std::pair<std::string, std::vector<ShapeEntry>>> categories;
+
+	auto buildCategory = [&](const std::string& label, const std::vector<std::string>& names,
+							  std::function<std::string(const std::string&)> displayFn) {
+		std::vector<ShapeEntry> entries;
+		for (auto& n : names) {
+			Mesh* m = gls.GetMesh(n);
+			entries.push_back({n, displayFn(n), m ? m->bVisible : true});
+		}
+		if (!entries.empty())
+			categories.push_back({label, std::move(entries)});
+	};
+
+	buildCategory("Head", headShapeNames, [](const std::string& n) -> std::string {
+		return (n.size() > 6 && n.substr(0, 6) == "_head_") ? n.substr(6) : n;
+	});
+	buildCategory("Body", bodyShapeNames, [](const std::string& n) -> std::string { return n; });
+	buildCategory("Outfit", outfitShapeNames, [](const std::string& n) -> std::string {
+		// Strip "XXXXXXXX_" FormID prefix added during loading
+		return (n.size() > 9 && n[8] == '_') ? n.substr(9) : n;
+	});
+
+	if (categories.empty()) {
+		meshOverlayPanel->Hide();
+		return;
+	}
+
+	wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
+
+	for (auto& [catLabel, entries] : categories) {
+		wxStaticText* header = new wxStaticText(meshOverlayPanel, wxID_ANY, wxString::FromUTF8(catLabel));
+		wxFont boldFont = header->GetFont();
+		boldFont.SetWeight(wxFONTWEIGHT_BOLD);
+		header->SetFont(boldFont);
+		sizer->Add(header, 0, wxLEFT | wxTOP, 4);
+
+		for (auto& entry : entries) {
+			wxCheckBox* cb = new wxCheckBox(meshOverlayPanel, wxID_ANY,
+				wxString::FromUTF8(entry.displayName));
+			cb->SetValue(entry.visible);
+			std::string shapeName = entry.shapeName;
+			cb->Bind(wxEVT_CHECKBOX, [this, shapeName](wxCommandEvent& ev) {
+				gls.SetMeshVisibility(shapeName, ev.IsChecked());
+				gls.RenderOneFrame();
+			});
+			sizer->Add(cb, 0, wxLEFT | wxBOTTOM, 2);
+			meshCheckboxes[entry.shapeName] = cb;
+		}
+	}
+
+	meshOverlayPanel->SetSizer(sizer);
+	meshOverlayPanel->FitInside();
+
+	// Size: content width + margin, up to half the canvas height
+	wxSize canvasSize = canvas ? canvas->GetSize() : wxSize(600, 400);
+	wxSize minSz = sizer->GetMinSize();
+	int panelW = std::min(std::max(minSz.GetWidth() + 20, 160), 340);
+	int totalH = minSz.GetHeight() + 12;
+	int panelH = std::min(totalH, canvasSize.GetHeight() / 2);
+
+	meshOverlayPanel->SetSize(wxSize(panelW, panelH));
+	RepositionMeshOverlay();
+	meshOverlayPanel->Layout();
+	meshOverlayPanel->Show();
+	meshOverlayPanel->Raise();
+}
+
+// ---------------------------------------------------------------------------
 // Toggle untextured meshes
 // ---------------------------------------------------------------------------
 
@@ -1660,6 +1778,7 @@ void LeveledListPreviewer::OnToggleUntextured(wxCommandEvent& event) {
 	showUntextured = event.IsChecked();
 	for (auto& name : untexturedShapes)
 		gls.SetMeshVisibility(name, showUntextured);
+	SyncMeshOverlayStates();
 	gls.RenderOneFrame();
 }
 
@@ -1667,6 +1786,7 @@ void LeveledListPreviewer::OnToggleBody(wxCommandEvent& event) {
 	showBody = event.IsChecked();
 	for (auto& name : bodyShapeNames)
 		gls.SetMeshVisibility(name, showBody);
+	SyncMeshOverlayStates();
 	gls.RenderOneFrame();
 }
 
@@ -1700,6 +1820,9 @@ void LeveledListPreviewer::MouseWheel(int dW) {
 // ---------------------------------------------------------------------------
 
 void LeveledListPreviewer::OnClose(wxCloseEvent& WXUNUSED(event)) {
+	if (meshOverlayPanel)
+		meshOverlayPanel->Hide();
+
 	if (canvas && context)
 		canvas->SetCurrent(*context);
 
