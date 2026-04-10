@@ -8,16 +8,20 @@
 #pragma once
 
 #include "../components/LeveledListData.h"
+#include "../components/SliderManager.h"
+#include "../components/SliderSet.h"
 #include "../render/GLSurface.h"
 #include "../utils/ConfigurationManager.h"
 
 #include <memory>
 #include <wx/wx.h>
+#include <wx/combobox.h>
 #include <wx/fswatcher.h>
 #include <wx/listctrl.h>
 #include <wx/spinctrl.h>
 #include <wx/srchctrl.h>
 #include <wx/splitter.h>
+#include <wx/textcompleter.h>
 
 class BodySlideApp;
 class LLPreviewCanvas;
@@ -33,6 +37,7 @@ class LeveledListPreviewer : public wxFrame {
 	std::unordered_map<std::string, GLMaterial*> shapeMaterials;
 	std::vector<std::string> untexturedShapes; // shapes with no diffuse texture
 	std::vector<std::string> bodyShapeNames;   // shapes loaded as body base layer
+	std::vector<std::string> headShapeNames;   // shapes loaded as NPC head layer
 	bool showUntextured = false;
 	bool showBody = true;
 
@@ -41,6 +46,8 @@ class LeveledListPreviewer : public wxFrame {
 	wxSearchCtrl* searchCtrl = nullptr;
 	wxSpinCtrl* levelMinSpin = nullptr;
 	wxSpinCtrl* levelMaxSpin = nullptr;
+	wxTextCtrl* headCtrl = nullptr;     // NPC head selector (with autocomplete)
+	wxComboBox* presetCombo = nullptr;  // BodySlide preset selector
 	wxListCtrl* outfitList = nullptr;
 
 	// Data
@@ -49,6 +56,22 @@ class LeveledListPreviewer : public wxFrame {
 	wxString lastESPDirectory;
 	std::string lastESPFilepath;
 	std::unique_ptr<wxFileSystemWatcher> fsWatcher;
+
+	// NPC head
+	std::unordered_map<std::string, size_t> npcByDisplay; // displayName → index in data.GetNPCs()
+	std::string currentHeadEditorId;
+
+	// Body preset morphing
+	struct BodyProject {
+		std::string refNifPath;    // absolute path to reference (unmorphed) NIF
+		std::string sliderSetFile; // .osp file path
+		std::string setName;       // set name within .osp
+	};
+	std::vector<BodyProject> bodyProjects;
+	// Original (pre-morph) verts per body shape, stored when body is loaded
+	std::unordered_map<std::string, std::vector<nifly::Vector3>> bodyRefVerts;
+	std::unordered_map<std::string, std::vector<nifly::Vector2>> bodyRefUVs;
+	std::string currentPresetName;
 
 	wxDECLARE_EVENT_TABLE();
 
@@ -68,6 +91,10 @@ public:
 	void OnSearchChanged(wxCommandEvent& event);
 	void OnLevelChanged(wxSpinEvent& event);
 	void OnOutfitSelected(wxListEvent& event);
+
+	// Head NPC and preset events
+	void OnHeadEntered(wxCommandEvent& event);
+	void OnPresetChanged(wxCommandEvent& event);
 
 	// GL canvas events
 	void Render() { gls.RenderOneFrame(); }
@@ -93,12 +120,19 @@ private:
 						  const std::string& meshName = {});
 	bool LoadNifFromPath(const std::string& relativePath, const std::string& prefix = "");
 	void LoadBodyMeshes();
+	void FindBodySliderProjects();
+	void LoadHeadMesh(const lldata::NPCEntry& npc);
+	void ClearHeadMeshes();
+	void LoadPresetList();
+	void ApplyPresetToBody(const std::string& presetName);
 
 	enum {
 		ID_LoadESP = wxID_HIGHEST + 500,
 		ID_ReloadESP,
 		ID_ToggleUntextured,
 		ID_ToggleBody,
+		ID_HeadNPC,
+		ID_Preset,
 	};
 };
 

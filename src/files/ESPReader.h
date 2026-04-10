@@ -123,6 +123,12 @@ struct OutfitRecord {
 	std::vector<uint32_t> items;
 };
 
+struct NPCRecord {
+	uint32_t formId = 0;
+	std::string editorId;
+	std::string fullName;
+};
+
 // ---------------------------------------------------------------------------
 // ESP Reader
 // ---------------------------------------------------------------------------
@@ -136,6 +142,7 @@ public:
 	std::vector<TextureSetRecord> GetTextureSets() const;
 	std::vector<LeveledItemRecord> GetLeveledItems() const;
 	std::vector<OutfitRecord> GetOutfits() const;
+	std::vector<NPCRecord> GetNPCs() const;
 
 	const Record* GetRecordByFormId(uint32_t formId) const;
 	std::pair<std::string, uint32_t> ResolveFormId(uint32_t localFormId) const;

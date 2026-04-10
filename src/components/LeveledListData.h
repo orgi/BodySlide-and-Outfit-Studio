@@ -16,6 +16,14 @@
 
 namespace lldata {
 
+/// One NPC from a vanilla ESM, for the head preview selector.
+struct NPCEntry {
+	std::string displayName; // "EditorID" or "Full Name [EditorID]"
+	std::string editorId;
+	uint32_t formId = 0;
+	std::string plugin; // e.g. "Skyrim.esm"
+};
+
 /// Per-shape texture override from ARMA MO3S alternate textures.
 struct TextureOverride {
 	std::string shapeName;
@@ -53,6 +61,13 @@ public:
 	/// Get all loaded outfit entries.
 	const std::vector<OutfitEntry>& GetOutfits() const { return outfits; }
 
+	/// Load NPC_ records from vanilla ESMs found in baseDataPath.
+	/// Call after SetBaseDataPath(). Results are sorted by displayName.
+	void LoadNPCs();
+
+	/// Get the loaded NPC list.
+	const std::vector<NPCEntry>& GetNPCs() const { return npcs; }
+
 	/// Get outfits filtered by player level range.
 	std::vector<const OutfitEntry*> FilterByLevel(uint16_t minLevel, uint16_t maxLevel) const;
 
@@ -87,6 +102,7 @@ private:
 	static OutfitPiece MakeStubPiece(uint32_t formId);
 
 	std::vector<OutfitEntry> outfits;
+	std::vector<NPCEntry> npcs;
 	std::string baseDataPath;
 	std::string espFilename;
 	std::string espDirectory;

@@ -457,6 +457,14 @@ static OutfitRecord ParseOutfit(const Record& rec) {
 	return outfit;
 }
 
+static NPCRecord ParseNPC(const Record& rec) {
+	NPCRecord npc;
+	npc.formId = rec.formId;
+	npc.editorId = rec.EditorId();
+	npc.fullName = rec.FullName();
+	return npc;
+}
+
 // ---------------------------------------------------------------------------
 // ESPReader
 // ---------------------------------------------------------------------------
@@ -578,6 +586,19 @@ std::vector<OutfitRecord> ESPReader::GetOutfits() const {
 		auto rit = records.find(fid);
 		if (rit != records.end())
 			result.push_back(ParseOutfit(rit->second));
+	}
+	return result;
+}
+
+std::vector<NPCRecord> ESPReader::GetNPCs() const {
+	std::vector<NPCRecord> result;
+	auto it = recordsByType.find("NPC_");
+	if (it == recordsByType.end())
+		return result;
+	for (uint32_t fid : it->second) {
+		auto rit = records.find(fid);
+		if (rit != records.end())
+			result.push_back(ParseNPC(rit->second));
 	}
 	return result;
 }

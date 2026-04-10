@@ -159,6 +159,63 @@ std::string LeveledListData::ResolveCaseInsensitive(const std::string& baseDir, 
 }
 
 // ---------------------------------------------------------------------------
+// LoadNPCs — load NPC_ records from vanilla ESMs
+// ---------------------------------------------------------------------------
+
+void LeveledListData::LoadNPCs() {
+	npcs.clear();
+	if (baseDataPath.empty())
+		return;
+
+	static const char* vanillaESMs[] = {
+		"Skyrim.esm", "Update.esm", "Dawnguard.esm",
+		"HearthFires.esm", "Dragonborn.esm", nullptr
+	};
+
+	for (int i = 0; vanillaESMs[i]; ++i) {
+		std::string esmPath = baseDataPath + vanillaESMs[i];
+		if (!wxFileName::FileExists(wxString::FromUTF8(esmPath))) {
+			esmPath = ResolveCaseInsensitive(baseDataPath, vanillaESMs[i]);
+			if (esmPath.empty())
+				continue;
+		}
+
+		esp::ESPReader reader;
+		if (!reader.Load(esmPath, {"NPC_"})) {
+			wxLogWarning("LeveledListData::LoadNPCs: failed to load %s", esmPath);
+			continue;
+		}
+
+		size_t countBefore = npcs.size();
+		for (auto& npc : reader.GetNPCs()) {
+			if (npc.editorId.empty())
+				continue;
+
+			NPCEntry entry;
+			entry.editorId = npc.editorId;
+			entry.formId = npc.formId;
+			entry.plugin = vanillaESMs[i];
+
+			// FULL is LSTRING for most vanilla NPCs; show inline name when available
+			if (!npc.fullName.empty() && npc.fullName[0] != '[')
+				entry.displayName = npc.fullName + " [" + npc.editorId + "]";
+			else
+				entry.displayName = npc.editorId;
+
+			npcs.push_back(std::move(entry));
+		}
+		wxLogMessage("LeveledListData::LoadNPCs: %zu NPCs from %s",
+					 npcs.size() - countBefore, vanillaESMs[i]);
+	}
+
+	std::sort(npcs.begin(), npcs.end(), [](const NPCEntry& a, const NPCEntry& b) {
+		return a.displayName < b.displayName;
+	});
+
+	wxLogMessage("LeveledListData::LoadNPCs: %zu NPCs total", npcs.size());
+}
+
+// ---------------------------------------------------------------------------
 // LoadRecordsFromESP — load records from a single file into caches
 // ---------------------------------------------------------------------------
 

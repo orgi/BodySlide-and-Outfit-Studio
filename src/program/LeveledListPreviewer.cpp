@@ -10,6 +10,8 @@
 #include <regex>
 #include <sstream>
 
+#include <wx/dir.h>
+
 using namespace nifly;
 
 extern ConfigurationManager Config;
@@ -24,6 +26,8 @@ wxBEGIN_EVENT_TABLE(LeveledListPreviewer, wxFrame)
 	EVT_MENU(LeveledListPreviewer::ID_ReloadESP, LeveledListPreviewer::OnReloadESP)
 	EVT_MENU(LeveledListPreviewer::ID_ToggleUntextured, LeveledListPreviewer::OnToggleUntextured)
 	EVT_MENU(LeveledListPreviewer::ID_ToggleBody, LeveledListPreviewer::OnToggleBody)
+	EVT_TEXT_ENTER(LeveledListPreviewer::ID_HeadNPC, LeveledListPreviewer::OnHeadEntered)
+	EVT_COMBOBOX(LeveledListPreviewer::ID_Preset, LeveledListPreviewer::OnPresetChanged)
 	EVT_FSWATCHER(wxID_ANY, LeveledListPreviewer::OnFileChanged)
 wxEND_EVENT_TABLE()
 
@@ -80,6 +84,22 @@ LeveledListPreviewer::LeveledListPreviewer(BodySlideApp* app)
 
 	leftSizer->Add(levelSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
 
+	// NPC head selector
+	wxBoxSizer* headSizer = new wxBoxSizer(wxHORIZONTAL);
+	headSizer->Add(new wxStaticText(leftPanel, wxID_ANY, _("Head:")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+	headCtrl = new wxTextCtrl(leftPanel, ID_HeadNPC, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
+	headCtrl->SetToolTip(_("Type an NPC editor ID or name and press Enter"));
+	headSizer->Add(headCtrl, 1);
+	leftSizer->Add(headSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
+
+	// Preset selector
+	wxBoxSizer* presetSizer = new wxBoxSizer(wxHORIZONTAL);
+	presetSizer->Add(new wxStaticText(leftPanel, wxID_ANY, _("Preset:")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+	presetCombo = new wxComboBox(leftPanel, ID_Preset, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxArrayString{}, wxCB_READONLY | wxCB_DROPDOWN);
+	presetCombo->SetToolTip(_("Choose a BodySlide preset to morph the preview body"));
+	presetSizer->Add(presetCombo, 1);
+	leftSizer->Add(presetSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
+
 	// Outfit list
 	outfitList = new wxListCtrl(leftPanel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT | wxLC_SINGLE_SEL);
 	{
@@ -134,6 +154,12 @@ LeveledListPreviewer::LeveledListPreviewer(BodySlideApp* app)
 		int sash = Config.GetIntValue("LLPreviewer/SashPos");
 		splitter->SetSashPosition(sash > 0 ? sash : 320);
 	}
+
+	// Restore persisted head / preset / outfit selections
+	currentHeadEditorId = Config["LLPreviewer/HeadEditorId"];
+	currentPresetName   = Config["LLPreviewer/PresetName"];
+	if (headCtrl && !currentHeadEditorId.empty())
+		headCtrl->SetValue(wxString::FromUTF8(currentHeadEditorId));
 
 	Show();
 
@@ -242,9 +268,43 @@ void LeveledListPreviewer::LoadESPFile(const std::string& filepath) {
 	Config.SetValue("LLPreviewer/LastESPFile", filepath);
 	Config.SetValue("LLPreviewer/LastESPDir", lastESPDirectory.ToStdString());
 
+	// Load NPCs from vanilla ESMs for the head autocomplete (once per session is fine;
+	// only reload if the list is empty so repeated ESP reloads don't re-parse large ESMs)
+	if (data.GetNPCs().empty()) {
+		data.LoadNPCs();
+
+		// Build display→index map and populate autocomplete
+		npcByDisplay.clear();
+		wxArrayString npcNames;
+		auto& npcs = data.GetNPCs();
+		npcNames.reserve(npcs.size());
+		for (size_t i = 0; i < npcs.size(); ++i) {
+			npcByDisplay[npcs[i].displayName] = i;
+			npcNames.push_back(wxString::FromUTF8(npcs[i].displayName));
+		}
+		if (headCtrl)
+			headCtrl->AutoComplete(npcNames);
+	}
+
+	LoadPresetList();
+
 	SetStatusText(wxString::Format(_("Loaded %s — %s"),
 									data.GetFilename(), data.GetLoadInfo()));
 	RefreshOutfitList();
+
+	// Re-select the last outfit if one was persisted
+	{
+		std::string lastOutfit = Config["LLPreviewer/LastOutfit"];
+		if (!lastOutfit.empty()) {
+			for (long i = 0; i < outfitList->GetItemCount(); ++i) {
+				if (outfitList->GetItemText(i).ToStdString() == lastOutfit) {
+					outfitList->SetItemState(i, wxLIST_STATE_SELECTED, wxLIST_STATE_SELECTED);
+					outfitList->EnsureVisible(i);
+					break;
+				}
+			}
+		}
+	}
 }
 
 void LeveledListPreviewer::OnReloadESP(wxCommandEvent&) {
@@ -394,6 +454,297 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 			wxLogMessage("LeveledListPreviewer: Body part not found: %s", part);
 		}
 	}
+
+	// Cache original (pre-morph) vertices so preset changes can start from a clean state
+	bodyRefVerts.clear();
+	bodyRefUVs.clear();
+	for (auto& shapeName : bodyShapeNames) {
+		Mesh* m = gls.GetMesh(shapeName);
+		if (!m) continue;
+		std::vector<nifly::Vector3> verts(m->nVerts);
+		for (int i = 0; i < m->nVerts; ++i)
+			verts[i] = m->TransformPosMeshToModel(m->verts[i]);
+		bodyRefVerts[shapeName] = std::move(verts);
+		// UVs: grab from the mesh's uv array (one Vector2 per vertex)
+		if (m->texcoord) {
+			std::vector<nifly::Vector2> uvs(m->nVerts);
+			for (int i = 0; i < m->nVerts; ++i)
+				uvs[i] = m->texcoord[i];
+			bodyRefUVs[shapeName] = std::move(uvs);
+		}
+	}
+
+	// Find body slider projects once per body load
+	FindBodySliderProjects();
+
+	// Re-apply current preset if one was chosen
+	if (!currentPresetName.empty() && currentPresetName != "(none)")
+		ApplyPresetToBody(currentPresetName);
+}
+
+// ---------------------------------------------------------------------------
+// NPC head mesh loading
+// ---------------------------------------------------------------------------
+
+void LeveledListPreviewer::ClearHeadMeshes() {
+	if (canvas && context)
+		canvas->SetCurrent(*context);
+	for (auto& name : headShapeNames)
+		gls.DeleteMesh(name);
+	headShapeNames.clear();
+}
+
+void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
+	ClearHeadMeshes();
+
+	// FaceGen NIF path: meshes/actors/character/FaceGenData/FaceGeom/{plugin}/{formid:08X}.nif
+	char formIdBuf[16];
+	std::snprintf(formIdBuf, sizeof(formIdBuf), "%08X", npc.formId);
+	std::string relativePath = "meshes/actors/character/FaceGenData/FaceGeom/"
+							   + npc.plugin + "/" + formIdBuf + ".nif";
+
+	std::string resolvedPath = data.ResolveNifPath(relativePath);
+	if (resolvedPath.empty()) {
+		wxLogWarning("LeveledListPreviewer: FaceGen NIF not found: %s", relativePath);
+		return;
+	}
+
+	NifFile nif;
+	if (nif.Load(resolvedPath) != 0) {
+		wxLogWarning("LeveledListPreviewer: Failed to load FaceGen NIF: %s", resolvedPath);
+		return;
+	}
+
+	for (auto& shapeName : nif.GetShapeNames()) {
+		std::string meshName = "_head_" + shapeName;
+		Mesh* m = gls.AddMeshFromNif(&nif, shapeName, nullptr, false);
+		if (!m)
+			continue;
+		m->shapeName = meshName;
+
+		const std::vector<Color4>* vcolors = nif.GetColorsForShape(shapeName);
+		if (vcolors) {
+			for (size_t v = 0; v < vcolors->size(); v++) {
+				m->vcolors[v].x = vcolors->at(v).r;
+				m->vcolors[v].y = vcolors->at(v).g;
+				m->vcolors[v].z = vcolors->at(v).b;
+				m->valpha[v]    = vcolors->at(v).a;
+			}
+		}
+
+		m->CreateBuffers();
+		AddNifShapeTextures(&nif, shapeName, nullptr, meshName);
+		headShapeNames.push_back(meshName);
+	}
+
+	wxLogMessage("LeveledListPreviewer: Loaded head NIF for NPC '%s' (%s): %zu shapes",
+				 npc.editorId, formIdBuf, headShapeNames.size());
+	gls.RenderOneFrame();
+}
+
+void LeveledListPreviewer::OnHeadEntered(wxCommandEvent& WXUNUSED(event)) {
+	if (!headCtrl) return;
+
+	std::string text = headCtrl->GetValue().ToStdString();
+	if (text.empty()) {
+		ClearHeadMeshes();
+		currentHeadEditorId.clear();
+		gls.RenderOneFrame();
+		return;
+	}
+
+	// Check for exact match in display-name map
+	auto it = npcByDisplay.find(text);
+	if (it == npcByDisplay.end()) {
+		// Try matching by editorId directly
+		auto& npcs = data.GetNPCs();
+		for (size_t i = 0; i < npcs.size(); ++i) {
+			if (npcs[i].editorId == text) {
+				it = npcByDisplay.find(npcs[i].displayName);
+				break;
+			}
+		}
+	}
+
+	if (it == npcByDisplay.end()) {
+		SetStatusText(wxString::Format(_("NPC not found: %s"), text));
+		return;
+	}
+
+	auto& npc = data.GetNPCs()[it->second];
+	currentHeadEditorId = npc.editorId;
+	LoadHeadMesh(npc);
+}
+
+// ---------------------------------------------------------------------------
+// BodySlide preset loading and application
+// ---------------------------------------------------------------------------
+
+void LeveledListPreviewer::LoadPresetList() {
+	if (!presetCombo) return;
+
+	std::string projectPath = Config["ProjectPath"];
+	if (projectPath.empty()) projectPath = Config["AppDir"];
+	std::string presetsDir = projectPath + "/SliderPresets";
+
+	PresetCollection presets;
+	std::vector<std::string> noGroups;
+	presets.LoadPresets(presetsDir, "", noGroups, true);
+
+	std::vector<std::string> names;
+	presets.GetPresetNames(names);
+	std::sort(names.begin(), names.end());
+
+	presetCombo->Clear();
+	presetCombo->Append(_("(none)"));
+	for (auto& n : names)
+		presetCombo->Append(wxString::FromUTF8(n));
+
+	// Re-select previously chosen preset
+	if (!currentPresetName.empty()) {
+		int idx = presetCombo->FindString(wxString::FromUTF8(currentPresetName));
+		if (idx != wxNOT_FOUND)
+			presetCombo->SetSelection(idx);
+		else
+			presetCombo->SetSelection(0);
+	}
+	else {
+		presetCombo->SetSelection(0);
+	}
+}
+
+void LeveledListPreviewer::FindBodySliderProjects() {
+	bodyProjects.clear();
+
+	std::string projectPath = Config["ProjectPath"];
+	if (projectPath.empty()) projectPath = Config["AppDir"];
+	std::string sliderSetsDir = projectPath + "/SliderSets";
+
+	// Body output NIF filenames (lower-case) to search for
+	static const std::set<std::string> bodyOutputFiles = {
+		"femalebody_1.nif", "femalehands_1.nif", "femalefeet_1.nif"
+	};
+
+	wxArrayString ospFiles;
+	wxDir::GetAllFiles(wxString::FromUTF8(sliderSetsDir), &ospFiles, "*.osp", wxDIR_FILES);
+	wxDir::GetAllFiles(wxString::FromUTF8(sliderSetsDir), &ospFiles, "*.xml", wxDIR_FILES);
+
+	for (auto& ospPath : ospFiles) {
+		SliderSetFile ssf(ospPath.ToStdString());
+		if (ssf.fail()) continue;
+
+		std::vector<std::string> setNames;
+		ssf.GetSetNames(setNames);
+
+		for (auto& setName : setNames) {
+			std::string outFilePath;
+			ssf.GetSetOutputFilePath(setName, outFilePath);
+			if (outFilePath.empty()) continue;
+
+			// Extract just the filename and compare case-insensitively
+			auto pos = outFilePath.find_last_of("/\\");
+			std::string outFile = (pos != std::string::npos) ? outFilePath.substr(pos + 1) : outFilePath;
+			std::transform(outFile.begin(), outFile.end(), outFile.begin(), ::tolower);
+
+			if (bodyOutputFiles.count(outFile)) {
+				// Get the reference NIF path
+				SliderSet ss;
+				if (ssf.GetSet(setName, ss)) continue;
+				ss.SetBaseDataPath(projectPath + "/ShapeData");
+				std::string refNifPath = ss.GetInputFileName();
+
+				if (!wxFileName::FileExists(wxString::FromUTF8(refNifPath))) continue;
+
+				BodyProject proj;
+				proj.refNifPath    = refNifPath;
+				proj.sliderSetFile = ospPath.ToStdString();
+				proj.setName       = setName;
+				bodyProjects.push_back(std::move(proj));
+
+				wxLogMessage("LeveledListPreviewer: Body project '%s' → %s", setName, outFile);
+			}
+		}
+	}
+
+	wxLogMessage("LeveledListPreviewer: Found %zu body slider project(s)", bodyProjects.size());
+}
+
+void LeveledListPreviewer::ApplyPresetToBody(const std::string& presetName) {
+	if (bodyProjects.empty() || presetName.empty() || presetName == "(none)") {
+		// Reset to stored reference verts if we have them
+		if (!bodyRefVerts.empty()) {
+			if (canvas && context)
+				canvas->SetCurrent(*context);
+			for (auto& kv : bodyRefVerts)
+				gls.Update(kv.first, &kv.second,
+						   bodyRefUVs.count(kv.first) ? &bodyRefUVs[kv.first] : nullptr);
+			gls.RenderOneFrame();
+		}
+		return;
+	}
+
+	if (canvas && context)
+		canvas->SetCurrent(*context);
+
+	std::string projectPath = Config["ProjectPath"];
+	if (projectPath.empty()) projectPath = Config["AppDir"];
+
+	for (auto& proj : bodyProjects) {
+		SliderSetFile ssf(proj.sliderSetFile);
+		if (ssf.fail()) continue;
+
+		SliderSet ss;
+		if (ssf.GetSet(proj.setName, ss)) continue;
+		ss.SetBaseDataPath(projectPath + "/ShapeData");
+
+		DiffDataSets diffData;
+		ss.LoadSetDiffData(diffData);
+
+		SliderManager sliderMgr;
+		sliderMgr.AddSlidersInSet(ss);
+
+		std::vector<std::string> noGroups;
+		sliderMgr.LoadPresets(projectPath + "/SliderPresets", proj.setName, noGroups, true);
+		sliderMgr.InitializeSliders(presetName);
+
+		NifFile refNif;
+		if (refNif.Load(proj.refNifPath) != 0) continue;
+
+		for (auto it = ss.ShapesBegin(); it != ss.ShapesEnd(); ++it) {
+			const std::string& shapeName   = it->first;
+			const std::string& targetShape = it->second.targetShape;
+
+			// Body shapes in GLSurface are stored under original NIF shape names
+			if (!gls.GetMesh(shapeName)) continue;
+
+			auto* shape = refNif.FindBlockByName<NiShape>(shapeName);
+			if (!shape) continue;
+
+			std::vector<Vector3> verts;
+			if (!refNif.GetVertsForShape(shape, verts)) continue;
+
+			std::vector<Vector2> uvs;
+			refNif.GetUvsForShape(shape, uvs);
+
+			// Apply all big-weight slider diffs
+			for (auto& slider : sliderMgr.slidersBig) {
+				if (slider.zap) continue;
+				float val = slider.invert ? 1.0f - slider.value : slider.value;
+				for (auto& ds : slider.linkedDataSets)
+					diffData.ApplyDiff(ds, targetShape, val, &verts);
+			}
+
+			gls.Update(shapeName, &verts, uvs.empty() ? nullptr : &uvs);
+		}
+	}
+
+	gls.RenderOneFrame();
+}
+
+void LeveledListPreviewer::OnPresetChanged(wxCommandEvent& WXUNUSED(event)) {
+	if (!presetCombo) return;
+	currentPresetName = presetCombo->GetValue().ToStdString();
+	ApplyPresetToBody(currentPresetName);
 }
 
 // ---------------------------------------------------------------------------
@@ -417,6 +768,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	shapeMaterials.clear();
 	untexturedShapes.clear();
 	bodyShapeNames.clear();
+	headShapeNames.clear();
 
 	// Load body base layer first (body, hands, feet)
 	if (showBody)
@@ -510,6 +862,17 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 				}
 			}
 			++loadedCount;
+		}
+	}
+
+	// Reload head mesh for the currently selected NPC
+	if (!currentHeadEditorId.empty()) {
+		auto& npcs = data.GetNPCs();
+		for (auto& npc : npcs) {
+			if (npc.editorId == currentHeadEditorId) {
+				LoadHeadMesh(npc);
+				break;
+			}
 		}
 	}
 
@@ -778,7 +1141,16 @@ void LeveledListPreviewer::OnClose(wxCloseEvent& WXUNUSED(event)) {
 		Config.SetValue("LLPreviewer/ColW0", outfitList->GetColumnWidth(0));
 		Config.SetValue("LLPreviewer/ColW1", outfitList->GetColumnWidth(1));
 		Config.SetValue("LLPreviewer/ColW2", outfitList->GetColumnWidth(2));
+
+		// Persist selected outfit name
+		long sel = outfitList->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+		if (sel >= 0)
+			Config.SetValue("LLPreviewer/LastOutfit", outfitList->GetItemText(sel).ToStdString());
 	}
+
+	// Persist head NPC and preset
+	Config.SetValue("LLPreviewer/HeadEditorId", currentHeadEditorId);
+	Config.SetValue("LLPreviewer/PresetName",   currentPresetName);
 
 	int ret = Config.SaveConfig(Config["AppDir"] + "/Config.xml");
 	if (ret)
