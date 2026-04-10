@@ -117,6 +117,12 @@ LeveledListPreviewer::LeveledListPreviewer(BodySlideApp* app)
 	smpSizer->Add(smpToggle_, 0, wxALIGN_CENTER_VERTICAL);
 	leftSizer->Add(smpSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
 
+	// Warning label for vertex count mismatches (hidden by default)
+	warningLabel_ = new wxStaticText(leftPanel, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxST_NO_AUTORESIZE);
+	warningLabel_->SetForegroundColour(wxColour(200, 80, 0)); // orange
+	warningLabel_->Hide();
+	leftSizer->Add(warningLabel_, 0, wxEXPAND | wxLEFT | wxRIGHT, 5);
+
 	// Outfit list
 	outfitList = new wxListCtrl(leftPanel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT | wxLC_SINGLE_SEL);
 	{
@@ -1337,6 +1343,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	outfitShapeMorphMap.clear();
 	outfitRefVerts.clear();
 	outfitGameVerts.clear();
+	morphWarnings_.clear();
 
 	// Load body base layer first (body, hands, feet)
 	if (showBody)
@@ -1487,10 +1494,32 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 					std::vector<Vector3> refVerts;
 					refNif.GetVertsForShape(refShape, refVerts);
 					if (static_cast<int>(refVerts.size()) != m->nVerts) {
-						wxLogWarning("  Shape '%s': vertex count mismatch (game=%d, ref=%d) - rebuild in BodySlide to fix morphing",
+						// Vertex count mismatch: substitute the shape from the
+						// reference NIF so morphing can still be applied.
+						wxLogWarning("  Shape '%s': vertex count mismatch (game=%d, ref=%d) - substituting from reference NIF",
 									 shapeName,
 									 m->nVerts,
 									 static_cast<int>(refVerts.size()));
+						morphWarnings_.push_back(shapeName + ": verts game=" + std::to_string(m->nVerts) + " ref=" + std::to_string(static_cast<int>(refVerts.size())));
+
+						std::string displayName = m->shapeName;
+						GLMaterial* savedMat = m->material;
+
+						gls.DeleteMesh(displayName);
+
+						Mesh* refMesh = gls.AddMeshFromNif(&refNif, refShapeName, nullptr, false);
+						if (refMesh) {
+							refMesh->shapeName = displayName;
+							refMesh->CreateBuffers();
+							if (savedMat) {
+								refMesh->material = savedMat;
+								gls.UpdateShaders(refMesh);
+							}
+							m = refMesh;
+							matchedRefName = refShapeName;
+							matchedRefVerts = std::move(refVerts);
+							wxLogMessage("  Substituted '%s' from reference NIF (%d verts)", displayName, m->nVerts);
+						}
 						break;
 					}
 					matchedRefName = refShapeName;
@@ -1626,6 +1655,29 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	gls.RenderOneFrame();
 	wxLog::FlushActive();
 	SetStatusText(wxString::Format(_("Outfit: %s — %d meshes loaded"), outfit.name, loadedCount));
+
+	// Update vertex mismatch warning label
+	if (warningLabel_) {
+		if (morphWarnings_.empty()) {
+			warningLabel_->Hide();
+		}
+		else {
+			wxString text = wxString::Format(_("Note: %zu shape(s) substituted from reference NIF (vertex count mismatch with game mesh). Rebuild in BodySlide to fix."),
+											 morphWarnings_.size());
+			warningLabel_->SetLabel(text);
+			warningLabel_->Wrap(warningLabel_->GetParent()->GetClientSize().GetWidth() - 10);
+
+			wxString tip;
+			for (auto& w : morphWarnings_) {
+				if (!tip.empty())
+					tip += "\n";
+				tip += w;
+			}
+			warningLabel_->SetToolTip(tip);
+			warningLabel_->Show();
+		}
+		warningLabel_->GetParent()->Layout();
+	}
 
 	RefreshMeshOverlay();
 }
