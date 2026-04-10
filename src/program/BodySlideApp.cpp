@@ -1863,8 +1863,7 @@ void BodySlideApp::InitLanguage() {
 		}
 	}
 	else {
-		wxLogError("The system language '%d' is not supported by your system. Try installing support for this language.", lang);
-		wxMessageBox(wxString::Format(_("The system language '%d' is not supported by your system. Try installing support for this language."), lang));
+		wxLogError("The system language '%d' is not supported by your system. Falling back to English.", lang);
 
 		locale = new wxLocale(wxLANGUAGE_ENGLISH);
 		lang = wxLANGUAGE_ENGLISH;
