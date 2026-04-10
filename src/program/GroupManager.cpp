@@ -6,6 +6,7 @@ See the included LICENSE file
 #include "GroupManager.h"
 #include "../utils/ConfigurationManager.h"
 
+#include <algorithm>
 #include <wx/srchctrl.h>
 
 extern ConfigurationManager Config;
@@ -30,6 +31,13 @@ wxEND_EVENT_TABLE()
 
 GroupManager::GroupManager(wxWindow* parent, std::vector<std::string> outfits)
 	: allOutfits(std::move(outfits)) {
+	// Pre-compute lowercase outfit names for fast filtering
+	allOutfitsLower.reserve(allOutfits.size());
+	for (auto& outfit : allOutfits) {
+		std::string lower = outfit;
+		std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
+		allOutfitsLower.push_back(lower);
+	}
 	wxXmlResource* xrc = wxXmlResource::Get();
 	xrc->Load(wxString::FromUTF8(Config["AppDir"]) + "/res/xrc/GroupManager.xrc");
 	xrc->LoadDialog(this, parent, "dlgGroupManager");
@@ -71,6 +79,8 @@ std::string GroupManager::GetProjectPath() const {
 
 void GroupManager::RefreshUI(const bool clearGroups) {
 	listMembers->Clear();
+	// Invalidate filter cache since members may have changed
+	lastFilteredOutfitItems.clear();
 
 	btSave->Enable(dirty & !fileName.empty());
 
@@ -199,21 +209,37 @@ void GroupManager::DoAddMembers() {
 }
 
 void GroupManager::DoFilterOutfits(const std::string& filter) {
-	wxString filterString = wxString::FromUTF8(filter);
-	filterString.MakeLower();
+	std::string filterLower = filter;
+	std::transform(filterLower.begin(), filterLower.end(), filterLower.begin(), [](unsigned char c) { return std::tolower(c); });
 
-	listOutfits->Clear();
+	// Build set of current members for O(1) lookup instead of O(n) FindString
+	std::unordered_set<std::string> memberSet;
+	for (unsigned int i = 0; i < listMembers->GetCount(); i++)
+		memberSet.insert(listMembers->GetString(i).ToUTF8().data());
 
-	// Add outfits that are no members to list
-	for (auto& outfit : allOutfits) {
-		if (listMembers->FindString(outfit) == wxNOT_FOUND) {
-			wxString outfitName = wxString::FromUTF8(outfit);
+	// Build the new filtered list
+	std::vector<wxString> newItems;
+	newItems.reserve(allOutfits.size());
 
-			// Filter outfit by name
-			if (outfitName.Lower().Contains(filterString))
-				listOutfits->Append(outfitName);
-		}
+	for (size_t i = 0; i < allOutfits.size(); i++) {
+		if (memberSet.count(allOutfits[i]) > 0)
+			continue;
+
+		if (filterLower.empty() || allOutfitsLower[i].find(filterLower) != std::string::npos)
+			newItems.push_back(wxString::FromUTF8(allOutfits[i]));
 	}
+
+	// Skip expensive wxListBox update if the list hasn't changed
+	if (newItems == lastFilteredOutfitItems)
+		return;
+
+	lastFilteredOutfitItems = newItems;
+
+	listOutfits->Freeze();
+	listOutfits->Clear();
+	for (auto& item : newItems)
+		listOutfits->Append(item);
+	listOutfits->Thaw();
 }
 
 void GroupManager::OnLoadGroup(wxFileDirPickerEvent& event) {

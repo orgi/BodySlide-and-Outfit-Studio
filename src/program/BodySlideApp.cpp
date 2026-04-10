@@ -20,6 +20,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "../utils/PlatformUtil.h"
 #include "../utils/StringStuff.h"
 
+#include <algorithm>
 #include <atomic>
 #include <regex>
 #include <wx/wrapsizer.h>
@@ -67,7 +68,8 @@ wxBEGIN_EVENT_TABLE(BodySlideFrame, wxFrame)
 	EVT_TEXT_ENTER(XRCID("presetFilter"), BodySlideFrame::OnPresetFilterChanged)
 	EVT_TEXT(XRCID("presetFilter"), BodySlideFrame::OnPresetFilterChanged)
 	EVT_TIMER(DELAYLOAD_TIMER, BodySlideFrame::OnDelayLoad)
-	EVT_CHOICE(XRCID("outfitChoice"), BodySlideFrame::OnChooseOutfit)
+	EVT_TIMER(OUTFIT_FILTER_TIMER, BodySlideFrame::OnOutfitFilterTimer)
+	EVT_COMBOBOX(XRCID("outfitChoice"), BodySlideFrame::OnChooseOutfit)
 	EVT_CHOICE(XRCID("presetChoice"), BodySlideFrame::OnChoosePreset)
 
 	EVT_BUTTON(XRCID("btnDeleteProject"), BodySlideFrame::OnDeleteProject)
@@ -97,7 +99,7 @@ wxBEGIN_EVENT_TABLE(BodySlideFrame, wxFrame)
 	EVT_MENU(XRCID("menuBrowseOutfitFolder"), BodySlideFrame::OnBrowseOutfitFolder)
 	EVT_MENU(XRCID("menuSaveGroups"), BodySlideFrame::OnSaveGroups)
 
-	EVT_MOVE_END(BodySlideFrame::OnMoveWindow)
+	EVT_MOVE(BodySlideFrame::OnMoveWindow)
 	EVT_SIZE(BodySlideFrame::OnSetSize)
 wxEND_EVENT_TABLE()
 
@@ -550,6 +552,7 @@ int BodySlideApp::LoadSliderSets() {
 	outfitNameOrder.clear();
 	outfitHasZaps.clear();
 	outFileCount.clear();
+	lastDisplayedOutfits.clear();
 
 	wxArrayString files;
 	wxDir::GetAllFiles(wxString::FromUTF8(GetProjectPath()) + "/SliderSets", &files, "*.osp");
@@ -597,7 +600,7 @@ int BodySlideApp::LoadSliderSets() {
 				}
 
 				if (hasZaps)
-					outfitHasZaps.push_back(o);
+					outfitHasZaps.insert(o);
 			}
 
 			sliderDoc.GetSetOutputFilePath(o, outFilePath);
@@ -790,14 +793,20 @@ void BodySlideApp::PopulateOutfitList(const std::string& select) {
 	if (!select.empty())
 		myselect = select;
 
-	wxArrayString items;
-
 	size_t n = outfitNameSource.size();
 	if (n == 0)
 		return;
 
 	ApplyOutfitFilter();
 
+	// Skip expensive wxChoice update if the filtered list and selection haven't changed
+	if (filteredOutfits == lastDisplayedOutfits && myselect == lastOutfitSelect)
+		return;
+
+	lastDisplayedOutfits = filteredOutfits;
+	lastOutfitSelect = myselect;
+
+	wxArrayString items;
 	items.reserve(filteredOutfits.size());
 	for (auto& fo : filteredOutfits)
 		items.Add(wxString::FromUTF8(fo));
@@ -2034,7 +2043,7 @@ void BodySlideApp::ApplyOutfitFilter() {
 			filteredOut = true;
 
 		if (!filteredOut && filterHasZaps) {
-			if (std::find(outfitHasZaps.cbegin(), outfitHasZaps.cend(), no) == outfitHasZaps.cend())
+			if (outfitHasZaps.count(no) == 0)
 				filteredOut = true;
 		}
 
@@ -2044,31 +2053,33 @@ void BodySlideApp::ApplyOutfitFilter() {
 
 
 	if (outfitSrch.empty()) {
-		for (auto& w : workFilterList)
-			filteredOutfits.push_back(w);
+		filteredOutfits = std::move(workFilterList);
 	}
 	else {
-		wxString searchStr = wxString::FromUTF8(outfitSrch);
-		searchStr.MakeLower();
-
 		if (regexFilterOutfits) {
-			std::regex re;
-
-			for (auto& filterEntry : workFilterList) {
-				try {
-					re.assign(outfitSrch, std::regex::icase);
+			try {
+				std::regex re(outfitSrch, std::regex::icase | std::regex::optimize);
+				for (auto& filterEntry : workFilterList) {
 					if (std::regex_search(filterEntry, re))
 						filteredOutfits.push_back(filterEntry);
 				}
-				catch (std::regex_error&) {
-				}
+			}
+			catch (std::regex_error&) {
 			}
 		}
 		else {
+			// Case-insensitive substring search using std::string (avoids wxString overhead)
+			std::string searchLower = outfitSrch;
+			std::transform(searchLower.begin(), searchLower.end(), searchLower.begin(),
+				[](unsigned char c) { return std::tolower(c); });
+
 			for (auto& filterEntry : workFilterList) {
-				wxString entryStr = wxString::FromUTF8(filterEntry);
-				if (entryStr.Lower().Contains(searchStr))
-					filteredOutfits.push_back(entryStr.ToUTF8().data());
+				std::string entryLower = filterEntry;
+				std::transform(entryLower.begin(), entryLower.end(), entryLower.begin(),
+					[](unsigned char c) { return std::tolower(c); });
+
+				if (entryLower.find(searchLower) != std::string::npos)
+					filteredOutfits.push_back(filterEntry);
 			}
 		}
 	}
@@ -3287,7 +3298,7 @@ int BodySlideApp::SaveSliderPositions(const std::string& outputFile, const std::
 }
 
 BodySlideFrame::BodySlideFrame(BodySlideApp* a, const wxSize& size)
-	: delayLoad(this, DELAYLOAD_TIMER) {
+	: delayLoad(this, DELAYLOAD_TIMER), outfitFilterTimer(this, OUTFIT_FILTER_TIMER) {
 	app = a;
 
 	wxXmlResource* xrc = wxXmlResource::Get();
@@ -3305,7 +3316,7 @@ BodySlideFrame::BodySlideFrame(BodySlideApp* a, const wxSize& size)
 		return;
 	}
 
-	outfitChoice = (wxChoice*)FindWindowByName("outfitChoice", this);
+	outfitChoice = (wxComboBox*)FindWindowByName("outfitChoice", this);
 	presetChoice = (wxChoice*)FindWindowByName("presetChoice", this);
 	btnSavePreset = (wxButton*)FindWindowByName("btnSavePreset", this);
 
@@ -3577,8 +3588,7 @@ void BodySlideFrame::PopulateOutfitList(const wxArrayString& items, const wxStri
 		return;
 
 	outfitChoice->Freeze();
-	outfitChoice->Clear();
-	outfitChoice->Append(items);
+	outfitChoice->Set(items);
 	if (!outfitChoice->SetStringSelection(selectItem)) {
 		int i = wxNOT_FOUND;
 		if (selectItem.empty())
@@ -3771,10 +3781,16 @@ void BodySlideFrame::OnSliderReadoutChange(wxCommandEvent& event) {
 }
 
 void BodySlideFrame::OnSearchChange(wxCommandEvent& WXUNUSED(event)) {
-	app->PopulateOutfitList("");
+	// Debounce: restart timer on each keystroke, filter runs after typing pauses
+	outfitFilterTimer.Start(200, wxTIMER_ONE_SHOT);
 }
 
 void BodySlideFrame::OnOutfitSearchChange(wxCommandEvent& WXUNUSED(event)) {
+	// Debounce: restart timer on each keystroke, filter runs after typing pauses
+	outfitFilterTimer.Start(200, wxTIMER_ONE_SHOT);
+}
+
+void BodySlideFrame::OnOutfitFilterTimer(wxTimerEvent& WXUNUSED(event)) {
 	app->PopulateOutfitList("");
 }
 

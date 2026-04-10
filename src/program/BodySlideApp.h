@@ -33,8 +33,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "../FSEngine/FSEngine.h"
 #include "../FSEngine/FSManager.h"
 
+#include <unordered_set>
+
 #include <wx/clrpicker.h>
 #include <wx/cmdline.h>
+#include <wx/combobox.h>
 #include <wx/collpane.h>
 #include <wx/dcbuffer.h>
 #include <wx/dir.h>
@@ -79,7 +82,7 @@ class BodySlideApp : public wxApp {
 	/* Data Items */
 	std::map<std::string, std::string, case_insensitive_compare> outfitNameSource; // All currently defined outfits.
 	std::vector<std::string> outfitNameOrder;									   // All currently defined outfits, in their order of appearance.
-	std::vector<std::string> outfitHasZaps;										   // All currently defined outfits that have visible zaps.
+	std::unordered_set<std::string> outfitHasZaps;								   // All currently defined outfits that have visible zaps.
 	std::map<std::string, std::vector<std::string>> groupMembers;				   // All currently defined groups.
 	std::map<std::string, std::string> groupAlias;								   // Group name aliases.
 	std::vector<std::string> ungroupedOutfits;									   // Outfits without a group.
@@ -90,6 +93,8 @@ class BodySlideApp : public wxApp {
 
 	/* Cache */
 	std::map<std::string, nifly::NifFile, case_insensitive_compare> refNormalsCache; // Cache for reference normals files
+	std::vector<std::string> lastDisplayedOutfits;									 // Cache of previously displayed outfit list
+	std::string lastOutfitSelect;													 // Cache of previously selected outfit
 
 	std::string previewBaseName;
 	std::string previewSetName;
@@ -222,6 +227,7 @@ static const wxCmdLineEntryDesc g_cmdLineDesc[] = {{wxCMD_LINE_OPTION, "gbuild",
 												   wxCMD_LINE_DESC_END};
 
 #define DELAYLOAD_TIMER 299
+#define OUTFIT_FILTER_TIMER 300
 #define SLIDER_LO 1
 #define SLIDER_HI 2
 
@@ -307,8 +313,9 @@ public:
 	std::unordered_map<std::string, SliderCategoryUI*> sliderCategories;
 
 	wxTimer delayLoad;
+	wxTimer outfitFilterTimer;
 
-	wxChoice* outfitChoice = nullptr;
+	wxComboBox* outfitChoice = nullptr;
 	wxChoice* presetChoice = nullptr;
 	wxButton* btnSavePreset = nullptr;
 	wxSearchCtrl* search = nullptr;
@@ -374,6 +381,7 @@ private:
 	void OnSliderReadoutChange(wxCommandEvent& event);
 	void OnSearchChange(wxCommandEvent& event);
 	void OnOutfitSearchChange(wxCommandEvent& event);
+	void OnOutfitFilterTimer(wxTimerEvent& event);
 
 	void OnSliderFilterChanged(wxCommandEvent&);
 	void OnPresetFilterChanged(wxCommandEvent&);

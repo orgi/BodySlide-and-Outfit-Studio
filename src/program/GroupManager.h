@@ -7,6 +7,8 @@ See the included LICENSE file
 
 #include "../components/SliderGroup.h"
 
+#include <unordered_set>
+
 #include <wx/filepicker.h>
 #include <wx/wx.h>
 #include <wx/xrc/xmlres.h>
@@ -32,6 +34,8 @@ private:
 	wxString fileName;
 	std::map<std::string, std::vector<std::string>> groupMembers;
 	std::vector<std::string> allOutfits;
+	std::vector<std::string> allOutfitsLower;	   // Pre-computed lowercase outfit names for fast filtering
+	std::vector<wxString> lastFilteredOutfitItems; // Cache of last displayed items to avoid redundant UI updates
 
 	std::string GetProjectPath() const;
 
