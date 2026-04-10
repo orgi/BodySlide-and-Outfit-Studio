@@ -472,11 +472,19 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 		}
 
 	nifLoaded:
-		// Add all shapes from NIF
+		// Add all shapes from NIF.
+		// Prefix each shape name with the piece's FormID to avoid collisions when
+		// multiple pieces share shape names (e.g. both have a "Body" shape).
+		char piecePrefixBuf[16];
+		std::snprintf(piecePrefixBuf, sizeof(piecePrefixBuf), "%08X_", piece.formId);
+		std::string piecePrefix = piecePrefixBuf;
 		for (auto& shapeName : nif.GetShapeNames()) {
 			Mesh* m = gls.AddMeshFromNif(&nif, shapeName, nullptr, false);
 			if (!m)
 				continue;
+
+			// Rename to avoid collisions with identically-named shapes from other pieces
+			m->shapeName = piecePrefix + shapeName;
 
 			// Vertex colors
 			const std::vector<Color4>* vcolors = nif.GetColorsForShape(shapeName);
@@ -492,7 +500,8 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 			m->CreateBuffers();
 			const std::vector<lldata::TextureOverride>* overrides =
 				piece.textureOverrides.empty() ? nullptr : &piece.textureOverrides;
-			bool hasTexture = AddNifShapeTextures(&nif, m->shapeName, overrides);
+			// Pass original shapeName for texture override matching (overrides use NIF shape names)
+			bool hasTexture = AddNifShapeTextures(&nif, shapeName, overrides, m->shapeName);
 			if (!hasTexture) {
 				untexturedShapes.push_back(m->shapeName);
 				if (!showUntextured) {
@@ -515,7 +524,8 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 // ---------------------------------------------------------------------------
 
 bool LeveledListPreviewer::AddNifShapeTextures(NifFile* fromNif, const std::string& shapeName,
-												const std::vector<lldata::TextureOverride>* overrides) {
+												const std::vector<lldata::TextureOverride>* overrides,
+												const std::string& meshName) {
 	bool hasMat = false;
 	std::string matFile;
 
@@ -668,16 +678,17 @@ bool LeveledListPreviewer::AddNifShapeTextures(NifFile* fromNif, const std::stri
 					 wxString(shapeName), wxString(texFiles[0]),
 					 wxFileName::FileExists(texFiles[0]) ? 1 : 0);
 
-	Mesh* m = gls.GetMesh(shapeName);
+	const std::string& lookupName = meshName.empty() ? shapeName : meshName;
+	Mesh* m = gls.GetMesh(lookupName);
 	if (!m) {
-		wxLogWarning("  GetMesh returned null for '%s'", wxString(shapeName));
+		wxLogWarning("  GetMesh returned null for '%s'", wxString(lookupName));
 		return false;
 	}
 
 	GLMaterial* glMat = gls.AddMaterial(texFiles, vShader, fShader);
 	if (glMat) {
 		m->material = glMat;
-		shapeMaterials[shapeName] = glMat;
+		shapeMaterials[lookupName] = glMat;
 
 		if (hasMat)
 			m->UpdateFromMaterialFile(mat);
