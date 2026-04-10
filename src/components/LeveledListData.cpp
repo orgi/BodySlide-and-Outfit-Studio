@@ -78,7 +78,8 @@ static std::string DirectoryOf(const std::string& filepath) {
 }
 
 /// Recursive helper: resolve components[idx..] starting from currentDir.
-/// When multiple directory entries match case-insensitively, tries each one.
+/// Tries exact match first, then all other case-insensitive matches (handles
+/// duplicate dirs like Clothes/ and clothes/ on a case-sensitive filesystem).
 static std::string ResolveCaseInsensitiveImpl(
 	const wxString& currentDir, const std::vector<std::string>& components, size_t idx) {
 
@@ -100,10 +101,11 @@ static std::string ResolveCaseInsensitiveImpl(
 			std::string result = ResolveCaseInsensitiveImpl(exact + "/", components, idx + 1);
 			if (!result.empty())
 				return result;
+			// exact dir exists but path didn't resolve — fall through to try other case variants
 		}
 	}
 
-	// Case-insensitive scan — try ALL matches (handles duplicate dirs like Clothes/clothes)
+	// Case-insensitive scan — try ALL matches (handles duplicates like Clothes/clothes)
 	wxDir dir(currentDir);
 	if (!dir.IsOpened())
 		return {};

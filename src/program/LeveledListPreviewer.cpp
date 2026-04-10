@@ -21,8 +21,10 @@ extern ConfigurationManager Config;
 wxBEGIN_EVENT_TABLE(LeveledListPreviewer, wxFrame)
 	EVT_CLOSE(LeveledListPreviewer::OnClose)
 	EVT_MENU(LeveledListPreviewer::ID_LoadESP, LeveledListPreviewer::OnLoadESP)
+	EVT_MENU(LeveledListPreviewer::ID_ReloadESP, LeveledListPreviewer::OnReloadESP)
 	EVT_MENU(LeveledListPreviewer::ID_ToggleUntextured, LeveledListPreviewer::OnToggleUntextured)
 	EVT_MENU(LeveledListPreviewer::ID_ToggleBody, LeveledListPreviewer::OnToggleBody)
+	EVT_FSWATCHER(wxID_ANY, LeveledListPreviewer::OnFileChanged)
 wxEND_EVENT_TABLE()
 
 // ---------------------------------------------------------------------------
@@ -38,6 +40,7 @@ LeveledListPreviewer::LeveledListPreviewer(BodySlideApp* app)
 	wxMenuBar* menuBar = new wxMenuBar();
 	wxMenu* fileMenu = new wxMenu();
 	fileMenu->Append(ID_LoadESP, _("&Open ESP...\tCtrl+O"), _("Load a generated leveled list ESP"));
+	fileMenu->Append(ID_ReloadESP, _("&Reload ESP\tCtrl+R"), _("Reload the current ESP file"));
 	menuBar->Append(fileMenu, _("&File"));
 
 	wxMenu* viewMenu = new wxMenu();
@@ -201,6 +204,17 @@ void LeveledListPreviewer::LoadESPFile(const std::string& filepath) {
 		return;
 	}
 
+	lastESPFilepath = filepath;
+
+	// Watch the directory containing the ESP so we catch both in-place writes
+	// (MODIFY) and rename-based writes (CREATE/RENAME), which is what most
+	// build tools use. File-level watches miss rename-based overwrites on Linux.
+	wxFileName espFileName = wxFileName::FileName(wxString::FromUTF8(filepath));
+	fsWatcher = std::make_unique<wxFileSystemWatcher>();
+	fsWatcher->SetOwner(this);
+	fsWatcher->Add(wxFileName::DirName(espFileName.GetPath()),
+				   wxFSW_EVENT_MODIFY | wxFSW_EVENT_CREATE | wxFSW_EVENT_RENAME);
+
 	// Persist for next session
 	Config.SetValue("LLPreviewer/LastESPFile", filepath);
 	Config.SetValue("LLPreviewer/LastESPDir", lastESPDirectory.ToStdString());
@@ -208,6 +222,35 @@ void LeveledListPreviewer::LoadESPFile(const std::string& filepath) {
 	SetStatusText(wxString::Format(_("Loaded %s — %s"),
 									data.GetFilename(), data.GetLoadInfo()));
 	RefreshOutfitList();
+}
+
+void LeveledListPreviewer::OnReloadESP(wxCommandEvent&) {
+	if (lastESPFilepath.empty())
+		return;
+	LoadESPFile(lastESPFilepath);
+}
+
+void LeveledListPreviewer::OnFileChanged(wxFileSystemWatcherEvent& event) {
+	if (lastESPFilepath.empty())
+		return;
+
+	int type = event.GetChangeType();
+	if (!((type & wxFSW_EVENT_MODIFY) || (type & wxFSW_EVENT_CREATE) || (type & wxFSW_EVENT_RENAME)))
+		return;
+
+	// Filter: only reload when our specific ESP file changed.
+	// GetPath() returns the full path of the changed item when watching a directory.
+	wxFileName eventFile = event.GetPath();
+	wxFileName espFile = wxFileName::FileName(wxString::FromUTF8(lastESPFilepath));
+	if (!eventFile.GetFullName().IsSameAs(espFile.GetFullName(), false))
+		return;
+
+	// Use CallAfter so the event handler returns quickly and the file has
+	// finished being written before we reload.
+	CallAfter([this]() {
+		if (!lastESPFilepath.empty())
+			LoadESPFile(lastESPFilepath);
+	});
 }
 
 // ---------------------------------------------------------------------------
@@ -429,14 +472,17 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 			bool hasTexture = AddNifShapeTextures(&nif, m->shapeName, overrides);
 			if (!hasTexture) {
 				untexturedShapes.push_back(m->shapeName);
-				if (!showUntextured)
+				if (!showUntextured) {
+					wxLogWarning("  HIDING shape '%s' (no diffuse)", wxString(m->shapeName));
 					gls.SetMeshVisibility(m->shapeName, false);
+				}
 			}
 			++loadedCount;
 		}
 	}
 
 	gls.RenderOneFrame();
+	wxLog::FlushActive();
 	SetStatusText(wxString::Format(_("Outfit: %s — %d meshes loaded"),
 									outfit.name, loadedCount));
 }
@@ -594,9 +640,16 @@ bool LeveledListPreviewer::AddNifShapeTextures(NifFile* fromNif, const std::stri
 		}
 	}
 
+	if (!texFiles[0].empty())
+		wxLogMessage("  tex[0] for '%s': %s (exists=%d)",
+					 wxString(shapeName), wxString(texFiles[0]),
+					 wxFileName::FileExists(texFiles[0]) ? 1 : 0);
+
 	Mesh* m = gls.GetMesh(shapeName);
-	if (!m)
+	if (!m) {
+		wxLogWarning("  GetMesh returned null for '%s'", wxString(shapeName));
 		return false;
+	}
 
 	GLMaterial* glMat = gls.AddMaterial(texFiles, vShader, fShader);
 	if (glMat) {
@@ -608,6 +661,14 @@ bool LeveledListPreviewer::AddNifShapeTextures(NifFile* fromNif, const std::stri
 
 		gls.UpdateShaders(m);
 	}
+	else {
+		wxLogWarning("  AddMaterial returned null for '%s'", wxString(shapeName));
+	}
+
+	wxLogMessage("  result for '%s': hasDiffuse=%d glMat=%s visible=%d",
+				 wxString(shapeName), hasDiffuse ? 1 : 0,
+				 glMat ? "ok" : "NULL",
+				 m->bVisible ? 1 : 0);
 
 	return hasDiffuse;
 }

@@ -13,6 +13,7 @@
 
 #include <memory>
 #include <wx/wx.h>
+#include <wx/fswatcher.h>
 #include <wx/listctrl.h>
 #include <wx/spinctrl.h>
 #include <wx/srchctrl.h>
@@ -45,6 +46,8 @@ class LeveledListPreviewer : public wxFrame {
 	lldata::LeveledListData data;
 	std::vector<const lldata::OutfitEntry*> filteredOutfits;
 	wxString lastESPDirectory;
+	std::string lastESPFilepath;
+	std::unique_ptr<wxFileSystemWatcher> fsWatcher;
 
 	wxDECLARE_EVENT_TABLE();
 
@@ -57,6 +60,8 @@ public:
 
 	// Menu / toolbar actions
 	void OnLoadESP(wxCommandEvent& event);
+	void OnReloadESP(wxCommandEvent& event);
+	void OnFileChanged(wxFileSystemWatcherEvent& event);
 
 	// List and filter events
 	void OnSearchChanged(wxCommandEvent& event);
@@ -89,6 +94,7 @@ private:
 
 	enum {
 		ID_LoadESP = wxID_HIGHEST + 500,
+		ID_ReloadESP,
 		ID_ToggleUntextured,
 		ID_ToggleBody,
 	};
