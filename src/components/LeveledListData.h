@@ -22,8 +22,8 @@ struct NPCEntry {
 	std::string displayName; // "EditorID" or "Full Name [EditorID]"
 	std::string editorId;
 	uint32_t formId = 0;
-	std::string plugin;       // e.g. "Skyrim.esm"
-	uint32_t wnamFormId = 0;  // WNAM: skin/worn armor FormID (0 = use race default)
+	std::string plugin;		 // e.g. "Skyrim.esm"
+	uint32_t wnamFormId = 0; // WNAM: skin/worn armor FormID (0 = use race default)
 };
 
 /// Per-shape texture override from ARMA MO3S alternate textures.
@@ -33,19 +33,19 @@ struct TextureOverride {
 };
 
 struct OutfitPiece {
-	std::string name;        // ARMO full name
-	uint32_t formId = 0;     // ARMO FormID
-	std::string nifPath;     // MOD2 (female model) path, relative to Data/
-	std::string armorType;   // "Light Armor", "Heavy Armor", "Clothing"
+	std::string name;	   // ARMO full name
+	uint32_t formId = 0;   // ARMO FormID
+	std::string nifPath;   // MOD2 (female model) path, relative to Data/
+	std::string armorType; // "Light Armor", "Heavy Armor", "Clothing"
 	std::vector<int> bodySlots;
 	std::vector<TextureOverride> textureOverrides; // per-shape texture swaps from ARMA MO3S
 };
 
 struct OutfitEntry {
-	std::string name;        // OTFT editor ID (display name)
-	uint32_t formId = 0;     // OTFT FormID
-	std::string editorId;    // OTFT editor ID
-	uint16_t minLevel = 1;   // Minimum player level for this variant
+	std::string name;	   // OTFT editor ID (display name)
+	uint32_t formId = 0;   // OTFT FormID
+	std::string editorId;  // OTFT editor ID
+	uint16_t minLevel = 1; // Minimum player level for this variant
 	std::vector<OutfitPiece> pieces;
 };
 
@@ -98,14 +98,11 @@ private:
 	/// Load records from a single ESP/ESM into the caches.
 	/// masterIndex: the index of this file in the main ESP's master list.
 	/// mainMasters: the master list of the main ESP, used to remap cross-references.
-	void LoadRecordsFromESP(const std::string& filepath, const std::set<std::string>& types,
-							uint8_t masterIndex, const std::vector<std::string>& mainMasters);
+	void LoadRecordsFromESP(const std::string& filepath, const std::set<std::string>& types, uint8_t masterIndex, const std::vector<std::string>& mainMasters);
 
 	/// Resolve LVLI entries recursively to collect referenced FormIDs and their levels.
 	/// Collects both resolved ARMOs and unresolved FormIDs.
-	void ResolveLVLI(uint32_t formId, uint16_t parentLevel,
-					 std::vector<std::pair<uint32_t, uint16_t>>& armoRefs,
-					 std::vector<std::pair<uint32_t, uint16_t>>& unresolvedRefs) const;
+	void ResolveLVLI(uint32_t formId, uint16_t parentLevel, std::vector<std::pair<uint32_t, uint16_t>>& armoRefs, std::vector<std::pair<uint32_t, uint16_t>>& unresolvedRefs) const;
 
 	/// Create a stub piece for an unresolved ARMO FormID.
 	static OutfitPiece MakeStubPiece(uint32_t formId);
@@ -132,9 +129,9 @@ struct CachedArmo {
 	std::string editorId;
 	std::string armorType;
 	uint32_t bodySlotFlags = 0;
-	std::string modelFemale;  // MOD2 — world/ground model (NOT worn mesh)
-	std::string modelMale;    // MOD4 ��� world/ground model
-	uint32_t templateId = 0;  // TNAM — template armor FormID (0 = none)
+	std::string modelFemale;		   // MOD2 — world/ground model (NOT worn mesh)
+	std::string modelMale;			   // MOD4 ��� world/ground model
+	uint32_t templateId = 0;		   // TNAM — template armor FormID (0 = none)
 	std::vector<uint32_t> armatureIds; // MODL — ARMA references for worn meshes
 };
 
@@ -146,11 +143,11 @@ struct CachedAlternateTexture {
 
 struct CachedARMA {
 	std::string editorId;
-	std::string modelMale;    // MOD2 — male 3rd person worn mesh
-	std::string modelFemale;  // MOD3 — female 3rd person worn mesh
+	std::string modelMale;	 // MOD2 — male 3rd person worn mesh
+	std::string modelFemale; // MOD3 — female 3rd person worn mesh
 	uint32_t bodySlotFlags = 0;
 	std::vector<CachedAlternateTexture> altTexFemale; // MO3S
-	std::vector<CachedAlternateTexture> altTexMale;   // MO2S
+	std::vector<CachedAlternateTexture> altTexMale;	  // MO2S
 };
 
 struct CachedTXST {

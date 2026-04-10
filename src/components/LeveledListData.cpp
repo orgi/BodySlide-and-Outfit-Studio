@@ -3,9 +3,9 @@
  */
 
 #include "LeveledListData.h"
-#include "../files/ESPReader.h"
 #include "../../lib/FSEngine/FSEngine.h"
 #include "../../lib/FSEngine/FSManager.h"
+#include "../files/ESPReader.h"
 
 #include <algorithm>
 #include <cctype>
@@ -24,8 +24,7 @@ namespace lldata {
 
 static std::string ToLower(const std::string& s) {
 	std::string out = s;
-	std::transform(out.begin(), out.end(), out.begin(),
-				   [](unsigned char c) { return std::tolower(c); });
+	std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) { return std::tolower(c); });
 	return out;
 }
 
@@ -80,9 +79,7 @@ static std::string DirectoryOf(const std::string& filepath) {
 /// Recursive helper: resolve components[idx..] starting from currentDir.
 /// Tries exact match first, then all other case-insensitive matches (handles
 /// duplicate dirs like Clothes/ and clothes/ on a case-sensitive filesystem).
-static std::string ResolveCaseInsensitiveImpl(
-	const wxString& currentDir, const std::vector<std::string>& components, size_t idx) {
-
+static std::string ResolveCaseInsensitiveImpl(const wxString& currentDir, const std::vector<std::string>& components, size_t idx) {
 	if (idx >= components.size())
 		return {};
 
@@ -167,10 +164,7 @@ void LeveledListData::LoadNPCs() {
 	if (baseDataPath.empty())
 		return;
 
-	static const char* vanillaESMs[] = {
-		"Skyrim.esm", "Update.esm", "Dawnguard.esm",
-		"HearthFires.esm", "Dragonborn.esm", nullptr
-	};
+	static const char* vanillaESMs[] = {"Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm", nullptr};
 
 	for (int i = 0; vanillaESMs[i]; ++i) {
 		std::string esmPath = baseDataPath + vanillaESMs[i];
@@ -205,13 +199,10 @@ void LeveledListData::LoadNPCs() {
 
 			npcs.push_back(std::move(entry));
 		}
-		wxLogMessage("LeveledListData::LoadNPCs: %zu NPCs from %s",
-					 npcs.size() - countBefore, vanillaESMs[i]);
+		wxLogMessage("LeveledListData::LoadNPCs: %zu NPCs from %s", npcs.size() - countBefore, vanillaESMs[i]);
 	}
 
-	std::sort(npcs.begin(), npcs.end(), [](const NPCEntry& a, const NPCEntry& b) {
-		return a.displayName < b.displayName;
-	});
+	std::sort(npcs.begin(), npcs.end(), [](const NPCEntry& a, const NPCEntry& b) { return a.displayName < b.displayName; });
 
 	wxLogMessage("LeveledListData::LoadNPCs: %zu NPCs total", npcs.size());
 }
@@ -220,8 +211,7 @@ void LeveledListData::LoadNPCs() {
 // LoadRecordsFromESP — load records from a single file into caches
 // ---------------------------------------------------------------------------
 
-void LeveledListData::LoadRecordsFromESP(const std::string& filepath, const std::set<std::string>& types,
-										  uint8_t masterIndex, const std::vector<std::string>& mainMasters) {
+void LeveledListData::LoadRecordsFromESP(const std::string& filepath, const std::set<std::string>& types, uint8_t masterIndex, const std::vector<std::string>& mainMasters) {
 	esp::ESPReader reader;
 	if (!reader.Load(filepath, types)) {
 		wxLogWarning("LeveledListData: Failed to load %s", filepath);
@@ -261,8 +251,12 @@ void LeveledListData::LoadRecordsFromESP(const std::string& filepath, const std:
 	};
 
 	wxLogMessage("LeveledListData: Loaded %s (masterIndex=%d, selfIndex=%d, %zu ARMOs, %zu ARMAs, %zu TXSTs)",
-				 wxString(filepath), masterIndex, selfIndex, reader.GetArmors().size(),
-				 reader.GetArmorAddons().size(), reader.GetTextureSets().size());
+				 wxString(filepath),
+				 masterIndex,
+				 selfIndex,
+				 reader.GetArmors().size(),
+				 reader.GetArmorAddons().size(),
+				 reader.GetTextureSets().size());
 
 	// Cache ARMO records (don't overwrite — main ESP takes priority)
 	for (auto& ar : reader.GetArmors()) {
@@ -349,11 +343,9 @@ OutfitPiece LeveledListData::MakeStubPiece(uint32_t formId) {
 
 /// Resolve the worn mesh path and ARMA record for an ARMO.
 /// Returns the mesh path and a pointer to the matched ARMA (for alternate textures).
-static std::pair<std::string, const CachedARMA*> ResolveWornMesh(
-	const CachedArmo& armo,
-	const std::unordered_map<uint32_t, CachedArmo>& armoCache,
-	const std::unordered_map<uint32_t, CachedARMA>& armaCache) {
-
+static std::pair<std::string, const CachedARMA*> ResolveWornMesh(const CachedArmo& armo,
+																 const std::unordered_map<uint32_t, CachedArmo>& armoCache,
+																 const std::unordered_map<uint32_t, CachedARMA>& armaCache) {
 	// Try this ARMO's ARMA references first
 	for (uint32_t armaId : armo.armatureIds) {
 		auto it = armaCache.find(armaId);
@@ -392,11 +384,11 @@ static std::pair<std::string, const CachedARMA*> ResolveWornMesh(
 }
 
 /// Build an OutfitPiece from a cached ARMO, resolving worn mesh through ARMA.
-static OutfitPiece MakePieceFromArmo(
-	uint32_t formId, const CachedArmo& armo,
-	const std::unordered_map<uint32_t, CachedArmo>& armoCache,
-	const std::unordered_map<uint32_t, CachedARMA>& armaCache,
-	const std::unordered_map<uint32_t, CachedTXST>& txstCache) {
+static OutfitPiece MakePieceFromArmo(uint32_t formId,
+									 const CachedArmo& armo,
+									 const std::unordered_map<uint32_t, CachedArmo>& armoCache,
+									 const std::unordered_map<uint32_t, CachedARMA>& armaCache,
+									 const std::unordered_map<uint32_t, CachedTXST>& txstCache) {
 	OutfitPiece piece;
 	piece.formId = formId;
 	piece.name = armo.fullName;
@@ -475,12 +467,10 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 			}
 		}
 
-		wxLogWarning("LeveledListData: Master not found: %s (index %zu)",
-					 wxString(masterName), mi);
+		wxLogWarning("LeveledListData: Master not found: %s (index %zu)", wxString(masterName), mi);
 	}
 
-	wxLogMessage("LeveledListData: After loading %d/%zu masters: %zu ARMOs, %zu ARMAs in cache",
-				 mastersLoaded, masters.size(), armoCache.size(), armaCache.size());
+	wxLogMessage("LeveledListData: After loading %d/%zu masters: %zu ARMOs, %zu ARMAs in cache", mastersLoaded, masters.size(), armoCache.size(), armaCache.size());
 
 	// Now load the main ESP records (these take priority over masters)
 	// We load after masters so the main ESP's records overwrite master records
@@ -494,7 +484,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 		ca.modelFemale = ar.modelFemale;
 		ca.modelMale = ar.modelMale;
 		ca.templateId = ar.templateId.value_or(0);
-		ca.armatureIds = ar.armatureIds; // no remapping needed — main ESP's own FormIDs
+		ca.armatureIds = ar.armatureIds;	  // no remapping needed — main ESP's own FormIDs
 		armoCache[ar.formId] = std::move(ca); // overwrite any master version
 	}
 
@@ -606,19 +596,22 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 	}
 
 	// Sort by name
-	std::sort(outfits.begin(), outfits.end(),
-			  [](const OutfitEntry& a, const OutfitEntry& b) {
-				  return a.name < b.name;
-			  });
+	std::sort(outfits.begin(), outfits.end(), [](const OutfitEntry& a, const OutfitEntry& b) { return a.name < b.name; });
 
 	// Build load info string
 	char buf[256];
-	snprintf(buf, sizeof(buf),
+	snprintf(buf,
+			 sizeof(buf),
 			 "%zu outfits, %d pieces (%d unresolved), %zu ARMOs, %zu ARMAs, "
 			 "%zu LVLIs, %zu masters (%d loaded)",
-			 outfits.size(), totalPieces, unresolvedCount,
-			 armoCache.size(), armaCache.size(), lvliCache.size(),
-			 masters.size(), mastersLoaded);
+			 outfits.size(),
+			 totalPieces,
+			 unresolvedCount,
+			 armoCache.size(),
+			 armaCache.size(),
+			 lvliCache.size(),
+			 masters.size(),
+			 mastersLoaded);
 	loadInfo = buf;
 	wxLogMessage("LeveledListData: %s", loadInfo);
 
@@ -629,11 +622,10 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 // ResolveLVLI — recursive LVLI → ARMO resolution
 // ---------------------------------------------------------------------------
 
-void LeveledListData::ResolveLVLI(
-	uint32_t formId, uint16_t parentLevel,
-	std::vector<std::pair<uint32_t, uint16_t>>& armoRefs,
-	std::vector<std::pair<uint32_t, uint16_t>>& unresolvedRefs) const {
-
+void LeveledListData::ResolveLVLI(uint32_t formId,
+								  uint16_t parentLevel,
+								  std::vector<std::pair<uint32_t, uint16_t>>& armoRefs,
+								  std::vector<std::pair<uint32_t, uint16_t>>& unresolvedRefs) const {
 	auto it = lvliCache.find(formId);
 	if (it == lvliCache.end())
 		return;
@@ -662,9 +654,7 @@ void LeveledListData::ResolveLVLI(
 // Filtering and search
 // ---------------------------------------------------------------------------
 
-std::vector<const OutfitEntry*> LeveledListData::FilterByLevel(
-	uint16_t minLevel, uint16_t maxLevel) const {
-
+std::vector<const OutfitEntry*> LeveledListData::FilterByLevel(uint16_t minLevel, uint16_t maxLevel) const {
 	std::vector<const OutfitEntry*> result;
 	for (auto& entry : outfits) {
 		if (entry.minLevel >= minLevel && entry.minLevel <= maxLevel)
@@ -673,9 +663,7 @@ std::vector<const OutfitEntry*> LeveledListData::FilterByLevel(
 	return result;
 }
 
-std::vector<const OutfitEntry*> LeveledListData::SearchByName(
-	const std::string& query) const {
-
+std::vector<const OutfitEntry*> LeveledListData::SearchByName(const std::string& query) const {
 	std::vector<const OutfitEntry*> result;
 	if (query.empty()) {
 		for (auto& entry : outfits)
@@ -685,8 +673,7 @@ std::vector<const OutfitEntry*> LeveledListData::SearchByName(
 
 	std::string lowerQuery = ToLower(query);
 	for (auto& entry : outfits) {
-		if (ToLower(entry.name).find(lowerQuery) != std::string::npos ||
-			ToLower(entry.editorId).find(lowerQuery) != std::string::npos) {
+		if (ToLower(entry.name).find(lowerQuery) != std::string::npos || ToLower(entry.editorId).find(lowerQuery) != std::string::npos) {
 			result.push_back(&entry);
 		}
 	}
@@ -766,7 +753,11 @@ std::array<std::string, 8> LeveledListData::ResolveSkinTextures(uint32_t wnamFor
 					textures[i] = txstIt->second.textures[i];
 			}
 			wxLogMessage("ResolveSkinTextures: Found body textures from ARMA %08X (%s), TXST %08X (%s): diffuse='%s'",
-						 armaId, arma.editorId, at.txstFormId, txstIt->second.editorId, textures[0]);
+						 armaId,
+						 arma.editorId,
+						 at.txstFormId,
+						 txstIt->second.editorId,
+						 textures[0]);
 			return textures;
 		}
 	}

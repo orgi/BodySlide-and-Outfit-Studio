@@ -30,7 +30,7 @@ static std::string ReadString(const std::vector<uint8_t>& data) {
 	return std::string(reinterpret_cast<const char*>(data.data()), len);
 }
 
-template <typename T>
+template<typename T>
 static T ReadLE(const uint8_t* p) {
 	T val;
 	std::memcpy(&val, p, sizeof(T));
@@ -73,7 +73,7 @@ static std::vector<Subrecord> ParseSubrecords(const uint8_t* data, size_t len) {
 			if (pos + 6 > len)
 				break;
 			srType = std::string(reinterpret_cast<const char*>(data + pos), 4);
-			pos += 6; // skip next subrecord's type+size header
+			pos += 6;	// skip next subrecord's type+size header
 			srSize = 0; // unused — actualSize replaces it
 			(void)srSize;
 

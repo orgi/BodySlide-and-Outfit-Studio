@@ -455,7 +455,10 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 
 	// Always load body from game data — correct textures and consistent with outfits.
 	const std::string suffix = useHighWeight ? "_1.nif" : "_0.nif";
-	struct PartDef { std::string path; BodyPartType type; };
+	struct PartDef {
+		std::string path;
+		BodyPartType type;
+	};
 	std::vector<PartDef> bodyParts = {
 		{"meshes/actors/character/character assets/femalebody" + suffix, BP_BODY},
 		{"meshes/actors/character/character assets/femalehands" + suffix, BP_HANDS},
@@ -1181,10 +1184,8 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	// Remove non-head entries from untexturedShapes and shapeMaterials
 	{
 		std::set<std::string> headSet(headShapeNames.begin(), headShapeNames.end());
-		untexturedShapes.erase(
-			std::remove_if(untexturedShapes.begin(), untexturedShapes.end(),
-						   [&](const std::string& s) { return headSet.find(s) == headSet.end(); }),
-			untexturedShapes.end());
+		untexturedShapes.erase(std::remove_if(untexturedShapes.begin(), untexturedShapes.end(), [&](const std::string& s) { return headSet.find(s) == headSet.end(); }),
+							   untexturedShapes.end());
 		for (auto it = shapeMaterials.begin(); it != shapeMaterials.end();) {
 			if (headSet.find(it->first) == headSet.end())
 				it = shapeMaterials.erase(it);
