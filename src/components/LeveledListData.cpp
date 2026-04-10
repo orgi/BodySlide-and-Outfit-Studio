@@ -77,6 +77,60 @@ static std::string DirectoryOf(const std::string& filepath) {
 	return "";
 }
 
+/// Recursive helper: resolve components[idx..] starting from currentDir.
+/// When multiple directory entries match case-insensitively, tries each one.
+static std::string ResolveCaseInsensitiveImpl(
+	const wxString& currentDir, const std::vector<std::string>& components, size_t idx) {
+
+	if (idx >= components.size())
+		return {};
+
+	wxString target = wxString::FromUTF8(components[idx]);
+	wxString targetLower = target.Lower();
+	bool isLast = (idx == components.size() - 1);
+
+	// Try exact match first (fast path)
+	wxString exact = currentDir + target;
+	if (isLast) {
+		if (wxFileName::FileExists(exact))
+			return exact.ToStdString();
+	}
+	else {
+		if (wxFileName::DirExists(exact)) {
+			std::string result = ResolveCaseInsensitiveImpl(exact + "/", components, idx + 1);
+			if (!result.empty())
+				return result;
+		}
+	}
+
+	// Case-insensitive scan — try ALL matches (handles duplicate dirs like Clothes/clothes)
+	wxDir dir(currentDir);
+	if (!dir.IsOpened())
+		return {};
+
+	wxString entry;
+	bool hasEntry = dir.GetFirst(&entry, wxEmptyString, wxDIR_FILES | wxDIR_DIRS | wxDIR_HIDDEN);
+	while (hasEntry) {
+		if (entry.Lower() == targetLower && entry != target) { // skip exact (already tried)
+			wxString candidate = currentDir + entry;
+			if (isLast) {
+				if (wxFileName::FileExists(candidate))
+					return candidate.ToStdString();
+			}
+			else {
+				if (wxFileName::DirExists(candidate)) {
+					std::string result = ResolveCaseInsensitiveImpl(candidate + "/", components, idx + 1);
+					if (!result.empty())
+						return result;
+				}
+			}
+		}
+		hasEntry = dir.GetNext(&entry);
+	}
+
+	return {};
+}
+
 std::string LeveledListData::ResolveCaseInsensitive(const std::string& baseDir, const std::string& relativePath) {
 	if (baseDir.empty() || relativePath.empty())
 		return {};
@@ -95,46 +149,11 @@ std::string LeveledListData::ResolveCaseInsensitive(const std::string& baseDir, 
 	if (!remaining.empty())
 		components.push_back(remaining);
 
-	// Walk from baseDir, matching each component case-insensitively
-	wxString current = wxString::FromUTF8(baseDir);
-	if (!current.EndsWith("/") && !current.EndsWith("\\"))
-		current += "/";
+	wxString base = wxString::FromUTF8(baseDir);
+	if (!base.EndsWith("/") && !base.EndsWith("\\"))
+		base += "/";
 
-	for (size_t i = 0; i < components.size(); ++i) {
-		wxString target = wxString::FromUTF8(components[i]);
-		wxString targetLower = target.Lower();
-		bool isLast = (i == components.size() - 1);
-
-		// Try exact match first (fast path)
-		wxString exact = current + target;
-		if (isLast ? wxFileName::FileExists(exact) : wxFileName::DirExists(exact)) {
-			current = exact + (isLast ? "" : "/");
-			continue;
-		}
-
-		// Case-insensitive scan of current directory
-		bool found = false;
-		wxDir dir(current);
-		if (!dir.IsOpened())
-			return {};
-
-		wxString entry;
-		// Check files and dirs
-		bool hasEntry = dir.GetFirst(&entry, wxEmptyString, wxDIR_FILES | wxDIR_DIRS | wxDIR_HIDDEN);
-		while (hasEntry) {
-			if (entry.Lower() == targetLower) {
-				current = current + entry + (isLast ? "" : "/");
-				found = true;
-				break;
-			}
-			hasEntry = dir.GetNext(&entry);
-		}
-
-		if (!found)
-			return {};
-	}
-
-	return current.ToStdString();
+	return ResolveCaseInsensitiveImpl(base, components, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -181,8 +200,9 @@ void LeveledListData::LoadRecordsFromESP(const std::string& filepath, const std:
 		return fid;
 	};
 
-	wxLogMessage("LeveledListData: Loaded %s (masterIndex=%d, selfIndex=%d, %zu ARMOs, %zu ARMAs)",
-				 filepath, masterIndex, selfIndex, reader.GetArmors().size(), reader.GetArmorAddons().size());
+	wxLogMessage("LeveledListData: Loaded %s (masterIndex=%d, selfIndex=%d, %zu ARMOs, %zu ARMAs, %zu TXSTs)",
+				 wxString(filepath), masterIndex, selfIndex, reader.GetArmors().size(),
+				 reader.GetArmorAddons().size(), reader.GetTextureSets().size());
 
 	// Cache ARMO records (don't overwrite — main ESP takes priority)
 	for (auto& ar : reader.GetArmors()) {
@@ -268,8 +288,10 @@ static std::pair<std::string, const CachedARMA*> ResolveWornMesh(
 	// Try this ARMO's ARMA references first
 	for (uint32_t armaId : armo.armatureIds) {
 		auto it = armaCache.find(armaId);
-		if (it == armaCache.end())
+		if (it == armaCache.end()) {
+			wxLogWarning("  ARMA %08X not found in cache (referenced by ARMO '%s')", armaId, wxString(armo.editorId));
 			continue;
+		}
 		if (!it->second.modelFemale.empty())
 			return {it->second.modelFemale, &it->second};
 		if (!it->second.modelMale.empty())
@@ -382,8 +404,12 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 			}
 		}
 
-		wxLogWarning("LeveledListData: Master not found: %s (index %zu)", masterName, mi);
+		wxLogWarning("LeveledListData: Master not found: %s (index %zu)",
+					 wxString(masterName), mi);
 	}
+
+	wxLogMessage("LeveledListData: After loading %d/%zu masters: %zu ARMOs, %zu ARMAs in cache",
+				 mastersLoaded, masters.size(), armoCache.size(), armaCache.size());
 
 	// Now load the main ESP records (these take priority over masters)
 	// We load after masters so the main ESP's records overwrite master records
