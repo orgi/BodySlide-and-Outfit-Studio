@@ -52,6 +52,20 @@ class LeveledListPreviewer : public wxFrame {
 	std::unordered_map<std::string, std::string> shapeNifSource; // shapeName → source NIF path
 	std::set<std::string> expandedNifGroups;					 // NIF paths currently expanded in overlay
 
+	// "Use Any" variant groups: only one variant per group is shown at a time
+	struct UseAnyVariant {
+		std::string label;					 // display name for this variant
+		std::vector<std::string> shapeNames; // shapes belonging to this variant
+	};
+	struct UseAnyGroup {
+		int groupId = -1;
+		std::vector<UseAnyVariant> variants;
+		int activeIndex = 0; // which variant is currently shown
+	};
+	std::vector<UseAnyGroup> useAnyGroups_;
+	// Map shape name → (group index in useAnyGroups_, variant index) for quick lookup
+	std::unordered_map<std::string, std::pair<size_t, size_t>> shapeToVariantGroup_;
+
 	// Body part tracking: shape name → set of NIF partition body part IDs
 	// (e.g. 32=SBP_32_BODY, 33=SBP_33_HANDS, 37=SBP_37_FEET)
 	std::unordered_map<std::string, std::set<uint16_t>> bodyShapePartMap;
@@ -169,6 +183,7 @@ private:
 	void RefreshMeshOverlay();
 	void SyncMeshOverlayStates();
 	void RepositionMeshOverlay();
+	void SwitchUseAnyVariant(size_t groupIdx, int newVariantIdx);
 
 	// SMP physics helpers
 	void SetupSmpSimulation();

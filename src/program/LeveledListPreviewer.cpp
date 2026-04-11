@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <map>
 #include <regex>
 #include <sstream>
 #include <unordered_set>
@@ -909,9 +910,7 @@ void LeveledListPreviewer::ApplyPresetToBody(const std::string& presetName) {
 				continue;
 
 			float val = 0.0f;
-			bool found = useHighWeight
-				? presets.GetBigPreset(presetName, morph->name, val)
-				: presets.GetSmallPreset(presetName, morph->name, val);
+			bool found = useHighWeight ? presets.GetBigPreset(presetName, morph->name, val) : presets.GetSmallPreset(presetName, morph->name, val);
 			if (!found || val == 0.0f)
 				continue;
 
@@ -986,9 +985,7 @@ void LeveledListPreviewer::ApplyPresetToOutfit(const std::string& presetName) {
 				continue;
 
 			float val = 0.0f;
-			bool found = useHighWeight
-				? presets.GetBigPreset(presetName, morph->name, val)
-				: presets.GetSmallPreset(presetName, morph->name, val);
+			bool found = useHighWeight ? presets.GetBigPreset(presetName, morph->name, val) : presets.GetSmallPreset(presetName, morph->name, val);
 			if (!found || val == 0.0f)
 				continue;
 
@@ -1136,13 +1133,18 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	outfitShapeNames.clear();
 	outfitGameVerts.clear();
 	outfitShapeNifName_.clear();
+	useAnyGroups_.clear();
+	shapeToVariantGroup_.clear();
 
-	// Collect ARMO-declared body slots from all outfit pieces.
-	// Skyrim hides skin (default body) parts based on ARMO slot declarations.
+	// Collect ARMO-declared body slots from outfit pieces.
+	// For "Use Any" groups, only count slots from variant 0 (the initially active one).
 	std::set<int> outfitDeclaredSlots;
-	for (auto& piece : outfit.pieces)
+	for (auto& piece : outfit.pieces) {
+		if (piece.useAnyGroup >= 0 && piece.useAnyVariant != 0)
+			continue; // skip non-active variants for slot computation
 		for (int slot : piece.bodySlots)
 			outfitDeclaredSlots.insert(slot);
+	}
 
 	// Load default body/hands/feet.  After outfit pieces are loaded below,
 	// body shapes whose slots are declared by the outfit will be removed.
@@ -1155,13 +1157,22 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 
 	int loadedCount = 0;
 
+	// Track shapes per piece for variant group building
+	struct PieceShapeInfo {
+		int useAnyGroup;
+		int useAnyVariant;
+		std::string pieceName;
+		std::vector<std::string> shapeNames;
+	};
+	std::vector<PieceShapeInfo> pieceInfos;
+
 	for (auto& piece : outfit.pieces) {
 		if (piece.nifPath.empty()) {
 			wxLogMessage("  Piece '%s' [%08X]: no model path, skipping", piece.name, piece.formId);
 			continue;
 		}
 
-		wxLogMessage("  Piece '%s' [%08X]: nifPath=%s", piece.name, piece.formId, piece.nifPath);
+		wxLogMessage("  Piece '%s' [%08X]: nifPath=%s (group=%d, variant=%d)", piece.name, piece.formId, piece.nifPath, piece.useAnyGroup, piece.useAnyVariant);
 
 		// When in low weight mode, try the _0.nif variant of the piece
 		std::string piecePath = piece.nifPath;
@@ -1234,6 +1245,11 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 		// Try to pre-load .tri file for this piece NIF
 		TriFile* pieceTri = GetOrLoadTriFile(piecePath);
 
+		PieceShapeInfo psi;
+		psi.useAnyGroup = piece.useAnyGroup;
+		psi.useAnyVariant = piece.useAnyVariant;
+		psi.pieceName = piece.name;
+
 		for (auto& shapeName : nif.GetShapeNames()) {
 			Mesh* m = gls.AddMeshFromNif(&nif, shapeName, nullptr, false);
 			if (!m)
@@ -1266,6 +1282,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 			}
 			outfitShapeNames.push_back(m->shapeName);
 			shapeNifSource[m->shapeName] = piecePath;
+			psi.shapeNames.push_back(m->shapeName);
 			++loadedCount;
 
 			// Cache game verts for reset and .tri morphing
@@ -1277,6 +1294,55 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 				outfitShapeNifName_[m->shapeName] = shapeName;
 				wxLogMessage("  Outfit morph: '%s' has .tri (nif shape '%s', %d verts)", m->shapeName, shapeName, m->nVerts);
 			}
+		}
+
+		if (!psi.shapeNames.empty())
+			pieceInfos.push_back(std::move(psi));
+	}
+
+	// Build "Use Any" variant groups and set initial visibility.
+	// Group pieces by useAnyGroup, then create UseAnyGroup entries with variants.
+	{
+		std::map<int, std::map<int, std::vector<PieceShapeInfo*>>> groupMap;
+		for (auto& psi : pieceInfos) {
+			if (psi.useAnyGroup >= 0)
+				groupMap[psi.useAnyGroup][psi.useAnyVariant].push_back(&psi);
+		}
+
+		for (auto& [groupId, variantMap] : groupMap) {
+			UseAnyGroup group;
+			group.groupId = groupId;
+			group.activeIndex = 0;
+
+			for (auto& [variantIdx, pieces] : variantMap) {
+				UseAnyVariant variant;
+				// Build label from piece names (use first piece's name, or combine)
+				if (!pieces.empty())
+					variant.label = pieces[0]->pieceName;
+				if (pieces.size() > 1)
+					variant.label += " (+" + std::to_string(pieces.size() - 1) + ")";
+
+				for (auto* p : pieces) {
+					for (auto& sn : p->shapeNames)
+						variant.shapeNames.push_back(sn);
+				}
+				group.variants.push_back(std::move(variant));
+			}
+
+			// Register shape → group mapping and set visibility
+			size_t groupIdx = useAnyGroups_.size();
+			for (size_t vi = 0; vi < group.variants.size(); ++vi) {
+				bool isActive = (static_cast<int>(vi) == group.activeIndex);
+				for (auto& sn : group.variants[vi].shapeNames) {
+					shapeToVariantGroup_[sn] = {groupIdx, vi};
+					if (!isActive)
+						gls.SetMeshVisibility(sn, false);
+				}
+			}
+
+			wxLogMessage("  Use Any group %d: %zu variants, showing variant 0 ('%s')", groupId, group.variants.size(), group.variants.empty() ? "" : group.variants[0].label);
+
+			useAnyGroups_.push_back(std::move(group));
 		}
 	}
 
@@ -1579,6 +1645,36 @@ void LeveledListPreviewer::SyncMeshOverlayStates() {
 	RefreshMeshOverlay();
 }
 
+void LeveledListPreviewer::SwitchUseAnyVariant(size_t groupIdx, int newVariantIdx) {
+	if (groupIdx >= useAnyGroups_.size())
+		return;
+	auto& group = useAnyGroups_[groupIdx];
+	if (newVariantIdx < 0 || newVariantIdx >= static_cast<int>(group.variants.size()))
+		return;
+	if (newVariantIdx == group.activeIndex)
+		return;
+
+	// Hide old active variant
+	if (group.activeIndex >= 0 && group.activeIndex < static_cast<int>(group.variants.size())) {
+		for (auto& sn : group.variants[group.activeIndex].shapeNames)
+			gls.SetMeshVisibility(sn, false);
+	}
+
+	// Show new active variant (but keep untextured shapes hidden if appropriate)
+	group.activeIndex = newVariantIdx;
+	std::set<std::string> untexturedSet(untexturedShapes.begin(), untexturedShapes.end());
+	for (auto& sn : group.variants[newVariantIdx].shapeNames) {
+		if (!showUntextured && untexturedSet.count(sn))
+			continue; // keep hidden — no valid texture
+		gls.SetMeshVisibility(sn, true);
+	}
+
+	wxLogMessage("  Switched Use Any group %d to variant %d ('%s')", group.groupId, newVariantIdx, group.variants[newVariantIdx].label);
+
+	gls.RenderOneFrame();
+	RefreshMeshOverlay();
+}
+
 void LeveledListPreviewer::RefreshMeshOverlay() {
 	if (!meshOverlayPanel)
 		return;
@@ -1641,11 +1737,36 @@ void LeveledListPreviewer::RefreshMeshOverlay() {
 	if (!bodyCat.groups.empty())
 		categories.push_back(std::move(bodyCat));
 
-	auto outfitCat = buildCategory("Outfit", outfitShapeNames, [](const std::string& n) -> std::string { return (n.size() > 9 && n[8] == '_') ? n.substr(9) : n; });
+	// For outfit shapes, include non-grouped shapes AND shapes from the active variant of each group.
+	// Non-active variant shapes are excluded from the overlay.
+	std::set<std::string> activeVariantShapes;
+	for (auto& group : useAnyGroups_) {
+		if (group.activeIndex >= 0 && group.activeIndex < static_cast<int>(group.variants.size())) {
+			for (auto& sn : group.variants[group.activeIndex].shapeNames)
+				activeVariantShapes.insert(sn);
+		}
+	}
+
+	std::vector<std::string> visibleOutfitShapes;
+	for (auto& n : outfitShapeNames) {
+		auto it = shapeToVariantGroup_.find(n);
+		if (it == shapeToVariantGroup_.end()) {
+			// Not in a variant group — always include
+			visibleOutfitShapes.push_back(n);
+		}
+		else if (activeVariantShapes.count(n)) {
+			// In a variant group and is the active variant — include
+			visibleOutfitShapes.push_back(n);
+		}
+	}
+
+	auto outfitCat = buildCategory("Outfit", visibleOutfitShapes, [](const std::string& n) -> std::string { return (n.size() > 9 && n[8] == '_') ? n.substr(9) : n; });
 	if (!outfitCat.groups.empty())
 		categories.push_back(std::move(outfitCat));
 
-	if (categories.empty()) {
+	bool hasVariantGroups = !useAnyGroups_.empty();
+
+	if (categories.empty() && !hasVariantGroups) {
 		meshOverlayPanel->Hide();
 		return;
 	}
@@ -1731,6 +1852,34 @@ void LeveledListPreviewer::RefreshMeshOverlay() {
 					meshCheckboxes[entry.shapeName] = cb;
 				}
 			}
+		}
+	}
+
+	// --- "Use Any" variant group selectors ---
+	if (!useAnyGroups_.empty()) {
+		wxStaticText* variantHeader = new wxStaticText(meshOverlayPanel, wxID_ANY, wxT("Variants (select one)"));
+		wxFont boldFont = variantHeader->GetFont();
+		boldFont.SetWeight(wxFONTWEIGHT_BOLD);
+		variantHeader->SetFont(boldFont);
+		sizer->Add(variantHeader, 0, wxLEFT | wxTOP, 4);
+
+		for (size_t gi = 0; gi < useAnyGroups_.size(); ++gi) {
+			auto& group = useAnyGroups_[gi];
+			if (group.variants.size() <= 1)
+				continue; // single variant — no selector needed
+
+			// Build choice items
+			wxArrayString choices;
+			for (auto& v : group.variants)
+				choices.Add(wxString::FromUTF8(v.label));
+
+			wxChoice* choice = new wxChoice(meshOverlayPanel, wxID_ANY, wxDefaultPosition, wxDefaultSize, choices);
+			choice->SetSelection(group.activeIndex);
+
+			size_t capturedGi = gi;
+			choice->Bind(wxEVT_CHOICE, [this, capturedGi](wxCommandEvent& ev) { SwitchUseAnyVariant(capturedGi, ev.GetSelection()); });
+
+			sizer->Add(choice, 0, wxLEFT | wxTOP | wxRIGHT | wxEXPAND, 8);
 		}
 	}
 

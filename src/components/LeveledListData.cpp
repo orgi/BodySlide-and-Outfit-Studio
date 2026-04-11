@@ -10,7 +10,9 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <map>
 #include <set>
+#include <tuple>
 
 #include <wx/dir.h>
 #include <wx/filename.h>
@@ -526,6 +528,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 	for (auto& li : mainReader.GetLeveledItems()) {
 		CachedLVLI cl;
 		cl.editorId = li.editorId;
+		cl.flags = li.flags;
 		for (auto& e : li.entries)
 			cl.entries.emplace_back(e.reference, e.level);
 		lvliCache[li.formId] = std::move(cl);
@@ -541,6 +544,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 	// Build outfit entries from OTFT records
 	int totalPieces = 0;
 	int unresolvedCount = 0;
+	int groupCounter = 0;
 
 	for (auto& [otftId, otft] : otftCache) {
 		OutfitEntry entry;
@@ -558,25 +562,32 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 				continue;
 			}
 
-			// LVLI reference? Resolve recursively
+			// LVLI reference? Resolve with Use Any group tracking
 			auto lvliIt = lvliCache.find(itemId);
 			if (lvliIt != lvliCache.end()) {
-				std::vector<std::pair<uint32_t, uint16_t>> armoRefs;
+				std::vector<OutfitPiece> resolvedPieces;
 				std::vector<std::pair<uint32_t, uint16_t>> unresolvedRefs;
-				ResolveLVLI(itemId, 1, armoRefs, unresolvedRefs);
+				ResolveLVLIGrouped(itemId, 1, -1, -1, groupCounter, resolvedPieces, unresolvedRefs);
 
-				for (auto& [armoId, level] : armoRefs) {
-					auto ait = armoCache.find(armoId);
-					if (ait == armoCache.end()) {
-						unresolvedRefs.emplace_back(armoId, level);
-						continue;
+				// Deduplicate ARMOs: within each (group, variant), keep first occurrence of each FormID.
+				// Across different variants, the same ARMO is expected (variants share common pieces).
+				{
+					std::set<std::tuple<int, int, uint32_t>> seen;
+					std::vector<OutfitPiece> deduped;
+					for (auto& p : resolvedPieces) {
+						auto key = std::make_tuple(p.useAnyGroup, p.useAnyVariant, p.formId);
+						if (seen.insert(key).second)
+							deduped.push_back(std::move(p));
 					}
+					resolvedPieces = std::move(deduped);
+				}
 
-					entry.pieces.push_back(MakePieceFromArmo(armoId, ait->second, armoCache, armaCache, txstCache));
+				for (auto& piece : resolvedPieces) {
+					if (piece.useAnyGroup >= 0) {
+						wxLogMessage("  LVLI piece '%s' [%08X]: group=%d, variant=%d", wxString(piece.name), piece.formId, piece.useAnyGroup, piece.useAnyVariant);
+					}
+					entry.pieces.push_back(std::move(piece));
 					++totalPieces;
-
-					if (level > entry.minLevel)
-						entry.minLevel = level;
 				}
 
 				// Create stub pieces for unresolved references
@@ -651,6 +662,80 @@ void LeveledListData::ResolveLVLI(uint32_t formId,
 
 		// Unresolved reference (ARMO in a master we couldn't load)
 		unresolvedRefs.emplace_back(ref, effectiveLevel);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ResolveLVLIGrouped — recursive LVLI → ARMO resolution with Use Any tracking
+// ---------------------------------------------------------------------------
+
+void LeveledListData::ResolveLVLIGrouped(uint32_t formId,
+										 uint16_t parentLevel,
+										 int parentGroup,
+										 int parentVariant,
+										 int& groupCounter,
+										 std::vector<OutfitPiece>& pieces,
+										 std::vector<std::pair<uint32_t, uint16_t>>& unresolvedRefs) const {
+	auto it = lvliCache.find(formId);
+	if (it == lvliCache.end())
+		return;
+
+	auto& lvli = it->second;
+	bool isUseAll = (lvli.flags & 0x04) != 0;
+
+	if (isUseAll) {
+		// Use All: include all entries, preserve parent group/variant
+		for (auto& [ref, level] : lvli.entries) {
+			uint16_t effectiveLevel = std::max(parentLevel, level);
+
+			auto armoIt = armoCache.find(ref);
+			if (armoIt != armoCache.end()) {
+				auto piece = MakePieceFromArmo(ref, armoIt->second, armoCache, armaCache, txstCache);
+				piece.useAnyGroup = parentGroup;
+				piece.useAnyVariant = parentVariant;
+				pieces.push_back(std::move(piece));
+				continue;
+			}
+
+			auto lvliIt2 = lvliCache.find(ref);
+			if (lvliIt2 != lvliCache.end()) {
+				ResolveLVLIGrouped(ref, effectiveLevel, parentGroup, parentVariant, groupCounter, pieces, unresolvedRefs);
+				continue;
+			}
+
+			unresolvedRefs.emplace_back(ref, effectiveLevel);
+		}
+	}
+	else {
+		// Use Any: each entry is an alternative variant — assign a new group
+		int groupId = groupCounter++;
+		int variantIdx = 0;
+		wxLogMessage("  LVLI '%s' [%08X] is Use Any → group %d with %zu variants", wxString(lvli.editorId), formId, groupId, lvli.entries.size());
+
+		for (auto& [ref, level] : lvli.entries) {
+			uint16_t effectiveLevel = std::max(parentLevel, level);
+
+			auto armoIt = armoCache.find(ref);
+			if (armoIt != armoCache.end()) {
+				auto piece = MakePieceFromArmo(ref, armoIt->second, armoCache, armaCache, txstCache);
+				piece.useAnyGroup = groupId;
+				piece.useAnyVariant = variantIdx;
+				pieces.push_back(std::move(piece));
+				++variantIdx;
+				continue;
+			}
+
+			auto lvliIt2 = lvliCache.find(ref);
+			if (lvliIt2 != lvliCache.end()) {
+				// Recurse: the sub-LVLI's entries inherit this group + variant
+				ResolveLVLIGrouped(ref, effectiveLevel, groupId, variantIdx, groupCounter, pieces, unresolvedRefs);
+				++variantIdx;
+				continue;
+			}
+
+			unresolvedRefs.emplace_back(ref, effectiveLevel);
+			++variantIdx;
+		}
 	}
 }
 

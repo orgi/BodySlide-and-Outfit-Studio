@@ -39,6 +39,8 @@ struct OutfitPiece {
 	std::string armorType; // "Light Armor", "Heavy Armor", "Clothing"
 	std::vector<int> bodySlots;
 	std::vector<TextureOverride> textureOverrides; // per-shape texture swaps from ARMA MO3S
+	int useAnyGroup = -1;						   // "Use Any" variant group ID (-1 = not in a group)
+	int useAnyVariant = -1;						   // variant index within the group (-1 = not in a group)
 };
 
 struct OutfitEntry {
@@ -134,6 +136,16 @@ private:
 	/// Collects both resolved ARMOs and unresolved FormIDs.
 	void ResolveLVLI(uint32_t formId, uint16_t parentLevel, std::vector<std::pair<uint32_t, uint16_t>>& armoRefs, std::vector<std::pair<uint32_t, uint16_t>>& unresolvedRefs) const;
 
+	/// Resolve LVLI recursively with "Use Any" group tracking.
+	/// Pieces from "Use Any" LVLIs are tagged with a group ID and variant index.
+	void ResolveLVLIGrouped(uint32_t formId,
+							uint16_t parentLevel,
+							int parentGroup,
+							int parentVariant,
+							int& groupCounter,
+							std::vector<OutfitPiece>& pieces,
+							std::vector<std::pair<uint32_t, uint16_t>>& unresolvedRefs) const;
+
 	/// Create a stub piece for an unresolved ARMO FormID.
 	static OutfitPiece MakeStubPiece(uint32_t formId);
 
@@ -190,6 +202,7 @@ struct CachedTXST {
 
 struct CachedLVLI {
 	std::string editorId;
+	uint8_t flags = 0;									// LVLF flags: 0x04 = Use All
 	std::vector<std::pair<uint32_t, uint16_t>> entries; // (reference, level)
 };
 
