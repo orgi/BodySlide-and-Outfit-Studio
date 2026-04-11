@@ -569,22 +569,14 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 				std::vector<std::pair<uint32_t, uint16_t>> unresolvedRefs;
 				ResolveLVLIGrouped(itemId, 1, -1, -1, groupCounter, resolvedPieces, unresolvedRefs);
 
-				// Deduplicate ARMOs: within each (group, variant), keep first occurrence of each FormID.
-				// Across different variants, the same ARMO is expected (variants share common pieces).
-				{
-					std::set<std::tuple<int, int, uint32_t>> seen;
-					std::vector<OutfitPiece> deduped;
-					for (auto& p : resolvedPieces) {
-						auto key = std::make_tuple(p.useAnyGroup, p.useAnyVariant, p.formId);
-						if (seen.insert(key).second)
-							deduped.push_back(std::move(p));
-					}
-					resolvedPieces = std::move(deduped);
-				}
-
 				for (auto& piece : resolvedPieces) {
 					if (piece.useAnyGroup >= 0) {
-						wxLogMessage("  LVLI piece '%s' [%08X]: group=%d, variant=%d", wxString(piece.name), piece.formId, piece.useAnyGroup, piece.useAnyVariant);
+						wxLogMessage("  LVLI piece '%s' [%08X]: group=%d, variant=%d, nif=%s",
+									 wxString(piece.name),
+									 piece.formId,
+									 piece.useAnyGroup,
+									 piece.useAnyVariant,
+									 wxString(piece.nifPath));
 					}
 					entry.pieces.push_back(std::move(piece));
 					++totalPieces;
@@ -604,6 +596,48 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 			// Neither ARMO nor LVLI — create stub
 			entry.pieces.push_back(MakeStubPiece(itemId));
 			++unresolvedCount;
+		}
+
+		// Merge variants within each "Use Any" group when they produce the
+		// same visual result.  Two variants are visually identical when
+		// they resolve to the exact same set of NIF paths (e.g. enchanted
+		// copies sharing identical meshes).  Multi-piece variants that mix
+		// different NIFs are kept separate.
+		{
+			// Step 1: collect the NIF-path-set for each (group, variant)
+			std::map<int, std::map<int, std::set<std::string>>> groupVariantNifs;
+			for (auto& p : entry.pieces) {
+				if (p.useAnyGroup < 0 || p.nifPath.empty())
+					continue;
+				groupVariantNifs[p.useAnyGroup][p.useAnyVariant].insert(p.nifPath);
+			}
+
+			// Step 2: within each group, assign a new variant index to
+			// each unique NIF-path-set and remap piece variants.
+			for (auto& [groupId, variantNifs] : groupVariantNifs) {
+				std::map<std::set<std::string>, int> nifSetToNew;
+				std::map<int, int> oldToNew;
+
+				for (auto& [varIdx, nifSet] : variantNifs) {
+					auto it2 = nifSetToNew.find(nifSet);
+					if (it2 == nifSetToNew.end()) {
+						int next = static_cast<int>(nifSetToNew.size());
+						nifSetToNew[nifSet] = next;
+						oldToNew[varIdx] = next;
+					}
+					else {
+						oldToNew[varIdx] = it2->second;
+					}
+				}
+
+				for (auto& p : entry.pieces) {
+					if (p.useAnyGroup != groupId)
+						continue;
+					auto remapIt = oldToNew.find(p.useAnyVariant);
+					if (remapIt != oldToNew.end())
+						p.useAnyVariant = remapIt->second;
+				}
+			}
 		}
 
 		// Always add outfit, even if all pieces are stubs

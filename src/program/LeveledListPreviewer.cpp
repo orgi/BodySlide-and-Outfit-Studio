@@ -1204,7 +1204,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 
 		// If resolvedPath is relative (from archive), try loading from archive
 		if (resolvedPath == piecePath) {
-			// Try loading from BSA/BA2
+			bool loaded = false;
 			for (FSArchiveFile* archive : FSManager::archiveList()) {
 				if (archive && archive->hasFile(piecePath)) {
 					wxMemoryBuffer outData;
@@ -1212,20 +1212,21 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 					if (!outData.IsEmpty()) {
 						std::string content(static_cast<char*>(outData.GetData()), outData.GetDataLen());
 						std::istringstream stream(content, std::istringstream::binary);
-						if (nif.Load(stream) == 0)
-							goto nifLoaded;
+						if (nif.Load(stream) == 0) {
+							loaded = true;
+							break;
+						}
 					}
 				}
 			}
-			continue; // Could not load from archive
+			if (!loaded)
+				continue; // Could not load from archive
 		}
 		else {
 			// Loose file
 			if (nif.Load(fullPath) != 0)
 				continue;
 		}
-
-	nifLoaded:
 		// Extract SMP XML path from NIF extra data
 		{
 			std::string xmlPath = FindSmpXml(nif, piece.nifPath);
@@ -1271,7 +1272,6 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 
 			m->CreateBuffers();
 			const std::vector<lldata::TextureOverride>* overrides = piece.textureOverrides.empty() ? nullptr : &piece.textureOverrides;
-			// Pass original shapeName for texture override matching (overrides use NIF shape names)
 			bool hasTexture = AddNifShapeTextures(&nif, shapeName, overrides, m->shapeName);
 			if (!hasTexture) {
 				untexturedShapes.push_back(m->shapeName);
