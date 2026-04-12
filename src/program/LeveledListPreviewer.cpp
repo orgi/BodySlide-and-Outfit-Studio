@@ -1135,6 +1135,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	outfitShapeNifName_.clear();
 	useAnyGroups_.clear();
 	shapeToVariantGroup_.clear();
+	shapeArmoName.clear();
 
 	// Collect ARMO-declared body slots from outfit pieces.
 	// For "Use Any" groups, only count slots from variant 0 (the initially active one).
@@ -1282,6 +1283,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 			}
 			outfitShapeNames.push_back(m->shapeName);
 			shapeNifSource[m->shapeName] = piecePath;
+			shapeArmoName[m->shapeName] = piece.name;
 			psi.shapeNames.push_back(m->shapeName);
 			++loadedCount;
 
@@ -1705,22 +1707,31 @@ void LeveledListPreviewer::RefreshMeshOverlay() {
 		// Group shapes by NIF source path, preserving order
 		std::vector<std::string> orderedNifs;
 		std::unordered_map<std::string, std::vector<ShapeEntry>> byNif;
+		std::unordered_map<std::string, std::string> nifDisplayName; // nifPath → display name
 		for (auto& n : names) {
 			Mesh* m = gls.GetMesh(n);
 			std::string nif = "unknown";
 			auto srcIt = shapeNifSource.find(n);
 			if (srcIt != shapeNifSource.end())
 				nif = srcIt->second;
-			if (byNif.find(nif) == byNif.end())
+			if (byNif.find(nif) == byNif.end()) {
 				orderedNifs.push_back(nif);
+				// Prefer ARMO display name; fall back to NIF filename
+				auto armoIt = shapeArmoName.find(n);
+				if (armoIt != shapeArmoName.end() && !armoIt->second.empty()) {
+					nifDisplayName[nif] = armoIt->second;
+				}
+				else {
+					auto slashPos = nif.find_last_of("/\\");
+					nifDisplayName[nif] = (slashPos != std::string::npos) ? nif.substr(slashPos + 1) : nif;
+				}
+			}
 			byNif[nif].push_back({n, displayFn(n), m ? m->bVisible : true});
 		}
 		for (auto& nifPath : orderedNifs) {
 			NifGroup grp;
 			grp.nifPath = nifPath;
-			// Extract just the filename from the path
-			auto slashPos = nifPath.find_last_of("/\\");
-			grp.displayName = (slashPos != std::string::npos) ? nifPath.substr(slashPos + 1) : nifPath;
+			grp.displayName = nifDisplayName[nifPath];
 			grp.shapes = std::move(byNif[nifPath]);
 			cat.groups.push_back(std::move(grp));
 		}
