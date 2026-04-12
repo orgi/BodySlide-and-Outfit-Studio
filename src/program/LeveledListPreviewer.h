@@ -50,6 +50,7 @@ class LeveledListPreviewer : public wxFrame {
 	wxScrolledWindow* meshOverlayPanel = nullptr;
 	std::unordered_map<std::string, wxCheckBox*> meshCheckboxes; // shapeName → checkbox
 	std::unordered_map<std::string, std::string> shapeNifSource; // shapeName → source NIF path
+	std::unordered_map<std::string, std::string> shapeArmoName;	 // shapeName → ARMO display name
 	std::set<std::string> expandedNifGroups;					 // NIF paths currently expanded in overlay
 
 	// "Use Any" variant groups: only one variant per group is shown at a time
