@@ -340,82 +340,103 @@ OutfitPiece LeveledListData::MakeStubPiece(uint32_t formId) {
 }
 
 // ---------------------------------------------------------------------------
-// ResolveModelPath — follow TNAM template chain to find a model
+// ResolveModelPath — follow TNAM template chain to find models
 // ---------------------------------------------------------------------------
 
-/// Resolve the worn mesh path and ARMA record for an ARMO.
-/// Returns the mesh path and a pointer to the matched ARMA (for alternate textures).
-static std::pair<std::string, const CachedARMA*> ResolveWornMesh(const CachedArmo& armo,
-																 const std::unordered_map<uint32_t, CachedArmo>& armoCache,
-																 const std::unordered_map<uint32_t, CachedARMA>& armaCache) {
-	// Try this ARMO's ARMA references first
-	for (uint32_t armaId : armo.armatureIds) {
+/// Resolve the worn mesh paths and ARMA records for an ARMO.
+/// Returns a list of (mesh path, ARMA pointer) pairs.
+static std::vector<std::pair<std::string, const CachedARMA*>> ResolveWornMeshes(const CachedArmo& armo,
+																				const std::unordered_map<uint32_t, CachedArmo>& armoCache,
+																				const std::unordered_map<uint32_t, CachedARMA>& armaCache) {
+	std::vector<std::pair<std::string, const CachedARMA*>> results;
+	std::set<std::string> seenNifs;
+
+	auto addArma = [&](uint32_t armaId) {
 		auto it = armaCache.find(armaId);
 		if (it == armaCache.end()) {
-			wxLogWarning("  ARMA %08X not found in cache (referenced by ARMO '%s')", armaId, wxString(armo.editorId));
-			continue;
+			wxLogWarning("  ARMA %08X not found in cache", armaId);
+			return;
 		}
-		if (!it->second.modelFemale.empty())
-			return {it->second.modelFemale, &it->second};
-		if (!it->second.modelMale.empty())
-			return {it->second.modelMale, &it->second};
+		const std::string& model = !it->second.modelFemale.empty() ? it->second.modelFemale : it->second.modelMale;
+		if (!model.empty()) {
+			std::string normalized = NormalizeMeshPath(model);
+			if (seenNifs.insert(normalized).second)
+				results.push_back({model, &it->second});
+		}
+	};
+
+	// Try this ARMO's ARMA references first
+	for (uint32_t armaId : armo.armatureIds) {
+		addArma(armaId);
 	}
 
-	// Follow template chain (enchanted copies inherit from base armor)
-	uint32_t tid = armo.templateId;
-	for (int depth = 0; depth < 10 && tid != 0; ++depth) {
-		auto tit = armoCache.find(tid);
-		if (tit == armoCache.end())
-			break;
-		auto& tmpl = tit->second;
+	// If no meshes found, follow template chain (enchanted copies inherit from base armor)
+	if (results.empty()) {
+		uint32_t tid = armo.templateId;
+		for (int depth = 0; depth < 10 && tid != 0; ++depth) {
+			auto tit = armoCache.find(tid);
+			if (tit == armoCache.end())
+				break;
+			auto& tmpl = tit->second;
 
-		for (uint32_t armaId : tmpl.armatureIds) {
-			auto ait = armaCache.find(armaId);
-			if (ait == armaCache.end())
-				continue;
-			if (!ait->second.modelFemale.empty())
-				return {ait->second.modelFemale, &ait->second};
-			if (!ait->second.modelMale.empty())
-				return {ait->second.modelMale, &ait->second};
+			for (uint32_t armaId : tmpl.armatureIds) {
+				addArma(armaId);
+			}
+
+			if (!results.empty())
+				break;
+
+			tid = tmpl.templateId;
 		}
-
-		tid = tmpl.templateId;
 	}
 
-	return {{}, nullptr};
+	return results;
 }
 
-/// Build an OutfitPiece from a cached ARMO, resolving worn mesh through ARMA.
-static OutfitPiece MakePieceFromArmo(uint32_t formId,
-									 const CachedArmo& armo,
-									 const std::unordered_map<uint32_t, CachedArmo>& armoCache,
-									 const std::unordered_map<uint32_t, CachedARMA>& armaCache,
-									 const std::unordered_map<uint32_t, CachedTXST>& txstCache) {
-	OutfitPiece piece;
-	piece.formId = formId;
-	piece.name = armo.fullName;
-	piece.armorType = armo.armorType;
-	piece.bodySlots = DecodeBodySlots(armo.bodySlotFlags);
+/// Build OutfitPiece(s) from a cached ARMO, resolving worn meshes through ARMA.
+static void AddPiecesFromArmo(uint32_t formId,
+							  const CachedArmo& armo,
+							  const std::unordered_map<uint32_t, CachedArmo>& armoCache,
+							  const std::unordered_map<uint32_t, CachedARMA>& armaCache,
+							  const std::unordered_map<uint32_t, CachedTXST>& txstCache,
+							  std::vector<OutfitPiece>& outPieces) {
+	auto meshes = ResolveWornMeshes(armo, armoCache, armaCache);
 
-	auto [modelPath, arma] = ResolveWornMesh(armo, armoCache, armaCache);
-	piece.nifPath = NormalizeMeshPath(modelPath);
-
-	// Resolve alternate textures from the matched ARMA
-	if (arma) {
-		auto& altTexList = arma->altTexFemale.empty() ? arma->altTexMale : arma->altTexFemale;
-		for (auto& at : altTexList) {
-			auto txstIt = txstCache.find(at.txstFormId);
-			if (txstIt == txstCache.end())
-				continue;
-			TextureOverride ovr;
-			ovr.shapeName = at.shapeName;
-			for (int i = 0; i < 8; ++i)
-				ovr.textures[i] = txstIt->second.textures[i];
-			piece.textureOverrides.push_back(std::move(ovr));
-		}
+	if (meshes.empty()) {
+		// Add a single piece with no mesh so it's visible as "missing" in logs
+		OutfitPiece piece;
+		piece.formId = formId;
+		piece.name = armo.fullName;
+		piece.armorType = armo.armorType;
+		piece.bodySlots = DecodeBodySlots(armo.bodySlotFlags);
+		outPieces.push_back(std::move(piece));
+		return;
 	}
 
-	return piece;
+	for (auto& [modelPath, arma] : meshes) {
+		OutfitPiece piece;
+		piece.formId = formId;
+		piece.name = armo.fullName;
+		piece.armorType = armo.armorType;
+		piece.bodySlots = DecodeBodySlots(armo.bodySlotFlags);
+		piece.nifPath = NormalizeMeshPath(modelPath);
+
+		// Resolve alternate textures from the matched ARMA
+		if (arma) {
+			auto& altTexList = arma->altTexFemale.empty() ? arma->altTexMale : arma->altTexFemale;
+			for (auto& at : altTexList) {
+				auto txstIt = txstCache.find(at.txstFormId);
+				if (txstIt == txstCache.end())
+					continue;
+				TextureOverride ovr;
+				ovr.shapeName = at.shapeName;
+				for (int i = 0; i < 8; ++i)
+					ovr.textures[i] = txstIt->second.textures[i];
+				piece.textureOverrides.push_back(std::move(ovr));
+			}
+		}
+		outPieces.push_back(std::move(piece));
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -557,8 +578,12 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 			// Direct ARMO reference?
 			auto armoIt = armoCache.find(itemId);
 			if (armoIt != armoCache.end()) {
-				entry.pieces.push_back(MakePieceFromArmo(itemId, armoIt->second, armoCache, armaCache, txstCache));
-				++totalPieces;
+				std::vector<OutfitPiece> resolved;
+				AddPiecesFromArmo(itemId, armoIt->second, armoCache, armaCache, txstCache, resolved);
+				for (auto& p : resolved) {
+					entry.pieces.push_back(std::move(p));
+					++totalPieces;
+				}
 				continue;
 			}
 
@@ -572,10 +597,10 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 				// Deduplicate ARMOs: within each (group, variant), keep first occurrence of each FormID.
 				// Across different variants, the same ARMO is expected (variants share common pieces).
 				{
-					std::set<std::tuple<int, int, uint32_t>> seen;
+					std::set<std::tuple<int, int, uint32_t, std::string>> seen;
 					std::vector<OutfitPiece> deduped;
 					for (auto& p : resolvedPieces) {
-						auto key = std::make_tuple(p.useAnyGroup, p.useAnyVariant, p.formId);
+						auto key = std::make_tuple(p.useAnyGroup, p.useAnyVariant, p.formId, p.nifPath);
 						if (seen.insert(key).second)
 							deduped.push_back(std::move(p));
 					}
@@ -690,10 +715,13 @@ void LeveledListData::ResolveLVLIGrouped(uint32_t formId,
 
 			auto armoIt = armoCache.find(ref);
 			if (armoIt != armoCache.end()) {
-				auto piece = MakePieceFromArmo(ref, armoIt->second, armoCache, armaCache, txstCache);
-				piece.useAnyGroup = parentGroup;
-				piece.useAnyVariant = parentVariant;
-				pieces.push_back(std::move(piece));
+				std::vector<OutfitPiece> resolved;
+				AddPiecesFromArmo(ref, armoIt->second, armoCache, armaCache, txstCache, resolved);
+				for (auto& piece : resolved) {
+					piece.useAnyGroup = parentGroup;
+					piece.useAnyVariant = parentVariant;
+					pieces.push_back(std::move(piece));
+				}
 				continue;
 			}
 
@@ -717,10 +745,13 @@ void LeveledListData::ResolveLVLIGrouped(uint32_t formId,
 
 			auto armoIt = armoCache.find(ref);
 			if (armoIt != armoCache.end()) {
-				auto piece = MakePieceFromArmo(ref, armoIt->second, armoCache, armaCache, txstCache);
-				piece.useAnyGroup = groupId;
-				piece.useAnyVariant = variantIdx;
-				pieces.push_back(std::move(piece));
+				std::vector<OutfitPiece> resolved;
+				AddPiecesFromArmo(ref, armoIt->second, armoCache, armaCache, txstCache, resolved);
+				for (auto& piece : resolved) {
+					piece.useAnyGroup = groupId;
+					piece.useAnyVariant = variantIdx;
+					pieces.push_back(std::move(piece));
+				}
 				++variantIdx;
 				continue;
 			}

@@ -1240,10 +1240,11 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 		}
 
 		// Add all shapes from NIF.
-		// Prefix each shape name with the piece's FormID to avoid collisions when
-		// multiple pieces share shape names (e.g. both have a "Body" shape).
-		char piecePrefixBuf[16];
-		std::snprintf(piecePrefixBuf, sizeof(piecePrefixBuf), "%08X_", piece.formId);
+		// Prefix each shape name with the piece's FormID and an index to avoid
+		// collisions when one ARMO has multiple pieces/NIFs (ARMAs) or when
+		// multiple pieces share shape names.
+		char piecePrefixBuf[32];
+		std::snprintf(piecePrefixBuf, sizeof(piecePrefixBuf), "%08X_%d_", piece.formId, loadedCount);
 		std::string piecePrefix = piecePrefixBuf;
 
 		// Try to pre-load .tri file for this piece NIF
