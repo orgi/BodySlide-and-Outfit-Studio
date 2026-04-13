@@ -1092,6 +1092,9 @@ void LeveledListPreviewer::OnOutfitSelected(wxListEvent& event) {
 	if (sel < 0 || sel >= static_cast<long>(filteredOutfits.size()))
 		return;
 
+	// Persist for reloads/filtering
+	Config.SetValue("LLPreviewer/LastOutfit", filteredOutfits[sel]->name);
+
 	LoadOutfitMeshes(*filteredOutfits[sel]);
 }
 
