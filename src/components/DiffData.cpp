@@ -53,7 +53,7 @@ bool OSDataFile::Read(const std::string& fileName) {
 
 	uint32_t dataCount = 0;
 	file.read((char*)&dataCount, 4);
-	if (file.fail())
+	if (file.fail() || dataCount > 10000)
 		return false;
 
 	uint8_t nameLength = 0;
@@ -69,10 +69,8 @@ bool OSDataFile::Read(const std::string& fileName) {
 
 		TargetDataDiffs diffs;
 		file.read((char*)&diffSize, 2);
-		if (file.fail() || file.eof())
+		if (file.fail() || file.eof() || diffSize > 1000000)
 			break;
-
-		diffs.reserve(diffSize);
 
 		std::vector<DiffStruct> diffData(diffSize);
 		file.read((char*)diffData.data(), diffSize * sizeof(DiffStruct));
