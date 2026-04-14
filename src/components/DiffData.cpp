@@ -53,18 +53,25 @@ bool OSDataFile::Read(const std::string& fileName) {
 
 	uint32_t dataCount = 0;
 	file.read((char*)&dataCount, 4);
-	dataDiffs.reserve(dataCount);
+	if (file.fail())
+		return false;
 
 	uint8_t nameLength = 0;
 	std::string dataName;
 	uint16_t diffSize = 0;
 	for (uint32_t i = 0; i < dataCount; ++i) {
 		file.read((char*)&nameLength, 1);
+		if (file.fail() || file.eof())
+			break;
+
 		dataName.resize(nameLength, ' ');
 		file.read((char*)&dataName.front(), nameLength);
 
 		TargetDataDiffs diffs;
 		file.read((char*)&diffSize, 2);
+		if (file.fail() || file.eof())
+			break;
+
 		diffs.reserve(diffSize);
 
 		std::vector<DiffStruct> diffData(diffSize);
@@ -207,20 +214,10 @@ bool DiffDataSets::LoadData(const std::map<std::string, std::map<std::string, st
 		}
 	}
 #else
-	// Parallel OSD file loading using std::async
-	std::map<std::string, std::future<std::unique_ptr<OSDataFile>>> futures;
+	// Sequential OSD file loading to avoid thread explosion in already parallel build loops
 	for (auto& osd : osdNames) {
-		futures[osd.first] = std::async(std::launch::async, [&osd]() {
-			auto osdFile = std::make_unique<OSDataFile>();
-			if (!osdFile->Read(osd.first))
-				return std::unique_ptr<OSDataFile>();
-			return osdFile;
-		});
-	}
-
-	for (auto& osd : osdNames) {
-		auto osdFile = futures[osd.first].get();
-		if (!osdFile)
+		auto osdFile = std::make_unique<OSDataFile>();
+		if (!osdFile->Read(osd.first))
 			continue;
 
 		for (auto& dataNames : osd.second) {
