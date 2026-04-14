@@ -3023,8 +3023,6 @@ int BodySlideApp::BuildListBodies(
 			zapIdx.clear();
 		}
 
-		currentDiffs.Clear();
-
 		/* Create directory for the outfit */
 		wxString dir = wxString::FromUTF8(datapath + currentSet.GetOutputPath());
 		bool success = wxFileName::Mkdir(dir, wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL);
@@ -3142,6 +3140,8 @@ int BodySlideApp::BuildListBodies(
 				return;
 			}
 		}
+
+		currentDiffs.Clear();
 	};
 
 	// Multi-threading for 64-bit only due to memory limits of 32-bit builds
