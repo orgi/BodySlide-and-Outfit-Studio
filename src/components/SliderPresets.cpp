@@ -80,12 +80,15 @@ bool PresetCollection::GetSliderExists(const std::string& set, const std::string
 }
 
 bool PresetCollection::GetBigPreset(const std::string& set, const std::string& slider, float& big) {
-	float b;
-	if (namedSliderPresets.find(set) == namedSliderPresets.end())
+	auto setIt = namedSliderPresets.find(set);
+	if (setIt == namedSliderPresets.end())
 		return false;
-	if (namedSliderPresets[set].find(slider) == namedSliderPresets[set].end())
+
+	auto sliderIt = setIt->second.find(slider);
+	if (sliderIt == setIt->second.end())
 		return false;
-	b = namedSliderPresets[set][slider].big;
+
+	float b = sliderIt->second.big;
 	if (b > -10000.0f) {
 		big = b;
 		return true;
@@ -94,12 +97,15 @@ bool PresetCollection::GetBigPreset(const std::string& set, const std::string& s
 }
 
 bool PresetCollection::GetSmallPreset(const std::string& set, const std::string& slider, float& small) {
-	float b;
-	if (namedSliderPresets.find(set) == namedSliderPresets.end())
+	auto setIt = namedSliderPresets.find(set);
+	if (setIt == namedSliderPresets.end())
 		return false;
-	if (namedSliderPresets[set].find(slider) == namedSliderPresets[set].end())
+
+	auto sliderIt = setIt->second.find(slider);
+	if (sliderIt == setIt->second.end())
 		return false;
-	b = namedSliderPresets[set][slider].small;
+
+	float b = sliderIt->second.small;
 	if (b > -10000.0f) {
 		small = b;
 		return true;

@@ -180,7 +180,7 @@ public:
 					  std::vector<nifly::Vector3>& verts,
 					  std::vector<uint16_t>& zapidx,
 					  std::vector<nifly::Vector2>* uvs = nullptr);
-	bool WriteMorphTRI(const std::string& triPath, SliderSet& sliderSet, nifly::NifFile& nif, std::unordered_map<std::string, std::vector<uint16_t>>& zapIndices);
+	bool WriteMorphTRI(const std::string& triPath, SliderSet& sliderSet, nifly::NifFile& nif, std::unordered_map<std::string, std::vector<uint16_t>>& zapIndices, DiffDataSets* diffData = nullptr);
 
 	void CopySliderValues(bool toHigh);
 	void ShowPreview();

@@ -22,6 +22,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include <algorithm>
 #include <atomic>
+#include <functional>
 #include <regex>
 #include <wx/wrapsizer.h>
 #include <wx/treelist.h>
@@ -1099,9 +1100,11 @@ static std::vector<ContinuousRange> FindContinuousRanges(const std::vector<uint1
 	return ranges;
 }
 
-bool BodySlideApp::WriteMorphTRI(const std::string& triPath, SliderSet& sliderSet, NifFile& nif, std::unordered_map<std::string, std::vector<uint16_t>>& zapIndices) {
-	DiffDataSets currentDiffs;
-	sliderSet.LoadSetDiffData(currentDiffs);
+bool BodySlideApp::WriteMorphTRI(const std::string& triPath, SliderSet& sliderSet, NifFile& nif, std::unordered_map<std::string, std::vector<uint16_t>>& zapIndices, DiffDataSets* diffData) {
+	DiffDataSets localDiffs;
+	DiffDataSets& currentDiffs = (diffData ? *diffData : localDiffs);
+	if (!diffData)
+		sliderSet.LoadSetDiffData(currentDiffs);
 
 	TriFile tri;
 	std::string triFilePath = triPath + ".tri";
@@ -2140,6 +2143,11 @@ void BodySlideApp::LoadPresets(const std::string& sliderSet) {
 }
 
 int BodySlideApp::BuildBodies(bool localPath, bool clean, bool tri, bool forceNormals) {
+	auto scope_guard = std::unique_ptr<void, std::function<void(void*)>>((void*)1, [&](void*) {
+		refNormalsCache.clear();
+		std::map<std::string, nifly::NifFile, case_insensitive_compare>().swap(refNormalsCache);
+	});
+
 	std::string inputFileName = activeSet.GetInputFileName();
 	NifFile nifSmall;
 	NifFile nifBig;
@@ -2227,8 +2235,6 @@ int BodySlideApp::BuildBodies(bool localPath, bool clean, bool tri, bool forceNo
 		wxMessageBox(msg, _("Process Successful"));
 		return 0;
 	}
-
-	refNormalsCache.clear();
 
 	std::fstream file;
 	PlatformUtil::OpenFileStream(file, inputFileName, std::ios::in | std::ios::binary);
@@ -2342,7 +2348,7 @@ int BodySlideApp::BuildBodies(bool localPath, bool clean, bool tri, bool forceNo
 		// Remove everything before and including the meshes path
 		triPathTrimmed = std::regex_replace(triPathTrimmed, std::regex(".*meshes\\\\", std::regex_constants::icase), "");
 
-		if (!WriteMorphTRI(outFileNameBig, activeSet, nifBig, zapIdxAll)) {
+		if (!WriteMorphTRI(outFileNameBig, activeSet, nifBig, zapIdxAll, &dataSets)) {
 			wxLogError("Failed to write TRI file to '%s'!", triPath);
 			wxMessageBox(wxString().Format(_("Failed to write TRI file to the following location\n\n%s"), triPath), _("Unable to process"), wxOK | wxICON_ERROR);
 		}
@@ -2458,11 +2464,17 @@ int BodySlideApp::BuildBodies(bool localPath, bool clean, bool tri, bool forceNo
 
 	wxLogMessage("%s", msg);
 	wxMessageBox(msg, _("Process Successful"));
+
 	return 0;
 }
 
 int BodySlideApp::BuildListBodies(
 	std::vector<std::string>& outfitList, std::map<std::string, std::string>& failedOutfits, bool clean, bool tri, bool forceNormals, const std::string& custPath) {
+	auto scope_guard = std::unique_ptr<void, std::function<void(void*)>>((void*)1, [&](void*) {
+		refNormalsCache.clear();
+		std::map<std::string, nifly::NifFile, case_insensitive_compare>().swap(refNormalsCache);
+	});
+
 	std::string datapath = custPath;
 
 	wxLogMessage("Started batch build with options: Custom Path = %s, Cleaning = %s, TRI = %s",
@@ -2724,20 +2736,23 @@ int BodySlideApp::BuildListBodies(
 		}
 	}
 
-	refNormalsCache.clear();
-
 	wxProgressDialog progWnd(_("Processing Outfits"), _("Starting..."), 1000, sliderView, wxPD_AUTO_HIDE | wxPD_APP_MODAL | wxPD_ELAPSED_TIME);
 	progWnd.SetSize(400, 150);
 	float progstep = 1000.0f / outfitList.size();
 	std::atomic<int> count = 0;
 
+	std::mutex refNormalsMutex;
 #ifdef _PPL_H
 	concurrency::concurrent_unordered_map<std::string, std::string> failedOutfitsCon;
 #else
 	std::mutex failedMutex;
-	std::mutex refNormalsMutex;
 	std::unordered_map<std::string, std::string> failedOutfitsCon;
 #endif
+
+	// Load BuildSelection file for zap choices
+	BuildSelectionFile buildSelFile;
+	BuildSelection buildSelection;
+	GetBuildSelection(buildSelFile, buildSelection);
 
 	auto buildOutfit = [&](const std::string& outfit) {
 		++count;
@@ -2815,11 +2830,6 @@ int BodySlideApp::BuildListBodies(
 			nifSmall.CopyFrom(nifBig);
 
 		currentSet.LoadSetDiffData(currentDiffs);
-
-		// Load BuildSelection file for zap choices
-		BuildSelectionFile buildSelFile;
-		BuildSelection buildSelection;
-		GetBuildSelection(buildSelFile, buildSelection);
 
 		bool keepZappedShapes = currentSet.KeepZappedShapes();
 
@@ -2968,9 +2978,7 @@ int BodySlideApp::BuildListBodies(
 				nifBig.CalcNormalsForShape(shape, forceNormals, it->second.smoothSeamNormals);
 
 				if (forceNormals) {
-#ifndef _PPL_H
 					std::lock_guard<std::mutex> lock(refNormalsMutex);
-#endif
 					ApplyReferenceNormals(nifBig);
 				}
 			}
@@ -2994,9 +3002,7 @@ int BodySlideApp::BuildListBodies(
 					nifSmall.CalcNormalsForShape(shapeSmall, forceNormals, it->second.smoothSeamNormals);
 
 					if (forceNormals) {
-#ifndef _PPL_H
 						std::lock_guard<std::mutex> lock(refNormalsMutex);
-#endif
 						ApplyReferenceNormals(nifSmall);
 					}
 				}
@@ -3053,7 +3059,7 @@ int BodySlideApp::BuildListBodies(
 												std::regex(".*meshes\\\\", std::regex_constants::icase),
 												""); // Remove everything before and including the meshes path
 
-			if (!WriteMorphTRI(outFileNameBig, currentSet, nifBig, zapIdxAll))
+			if (!WriteMorphTRI(outFileNameBig, currentSet, nifBig, zapIdxAll, &currentDiffs))
 				wxLogError("Failed to create TRI file to '%s'!", triPath);
 
 			if (targetGame != FO4 && targetGame != FO4VR && targetGame != FO76) {
@@ -3138,11 +3144,17 @@ int BodySlideApp::BuildListBodies(
 
 	// Multi-threading for 64-bit only due to memory limits of 32-bit builds
 #ifdef _PPL_H
+	concurrency::cancellation_token_source cts;
 	// Parallel loop is run inside a task
-	auto buildTask = concurrency::create_task([&] { concurrency::parallel_for_each(outfitList.begin(), outfitList.end(), buildOutfit); });
+	auto buildTask = concurrency::create_task([&] { concurrency::parallel_for_each(outfitList.begin(), outfitList.end(), buildOutfit); }, cts.get_token());
 
 	// Yield outside of task
 	while (!buildTask.is_done()) {
+		int curCount = count.load();
+		wxString progMsg = wxString::Format(_("Processing outfits (%d of %d)..."), curCount, (int)outfitList.size());
+		if (!progWnd.Update((int)(curCount * progstep), progMsg))
+			cts.cancel();
+
 		Yield();
 		wxMilliSleep(100);
 	}
@@ -3151,32 +3163,40 @@ int BodySlideApp::BuildListBodies(
 	unsigned int numThreads = std::max(1u, std::thread::hardware_concurrency());
 	std::vector<std::future<void>> futures;
 	size_t nextOutfit = 0;
+	bool cancelled = false;
 
 	while (nextOutfit < outfitList.size() || !futures.empty()) {
 		// Launch new tasks up to thread limit
-		while (futures.size() < numThreads && nextOutfit < outfitList.size()) {
+		while (!cancelled && futures.size() < numThreads && nextOutfit < outfitList.size()) {
 			const std::string& outfit = outfitList[nextOutfit++];
 			futures.push_back(std::async(std::launch::async, buildOutfit, outfit));
 		}
 
-		// Update progress on main thread
-		int curCount = count.load();
-		wxString progMsg = wxString::Format(_("Processing outfits (%d of %d)..."), curCount, (int)outfitList.size());
-		progWnd.Update((int)(curCount * progstep), progMsg);
-
-		// Reap completed futures
+		// Reap completed futures and update progress
 		for (auto it = futures.begin(); it != futures.end();) {
-			if (it->wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+			if (it->wait_for(std::chrono::milliseconds(10)) == std::future_status::ready) {
 				it->get();
 				it = futures.erase(it);
+
+				// Update progress occasionally
+				int curCount = count.load();
+				if (curCount % 10 == 0 || nextOutfit == outfitList.size() || (cancelled && futures.empty())) {
+					wxString progMsg = wxString::Format(_("Processing outfits (%d of %d)..."), curCount, (int)outfitList.size());
+					if (!progWnd.Update((int)(curCount * progstep), progMsg)) {
+						cancelled = true;
+						nextOutfit = outfitList.size();
+					}
+				}
 			}
 			else {
 				++it;
 			}
 		}
 
-		Yield();
-		wxMilliSleep(50);
+		if (!futures.empty()) {
+			Yield();
+			wxMilliSleep(20);
+		}
 	}
 #endif
 
@@ -3211,6 +3231,7 @@ void BodySlideApp::GroupBuild(const std::vector<std::string>& groupNames) {
 	}
 
 	std::vector<std::string> groups;
+	sliderManager.ClearPresets();
 	sliderManager.LoadPresets(GetProjectPath() + "/SliderPresets", "", groups, true);
 
 	std::map<std::string, std::string> failedOutfits;
