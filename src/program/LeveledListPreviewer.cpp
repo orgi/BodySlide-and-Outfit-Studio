@@ -506,7 +506,7 @@ bool LeveledListPreviewer::LoadNifFromPath(const std::string& relativePath, cons
 	for (auto& shapeName : nif.GetShapeNames()) {
 		// Use prefix to avoid name collisions with outfit shapes
 		std::string displayName = prefix.empty() ? shapeName : (prefix + shapeName);
-		Mesh* m = gls.AddMeshFromNif(&nif, shapeName, nullptr, false);
+		Mesh* m = gls.AddMeshFromNif(&nif, shapeName, displayName, nullptr, false);
 		if (!m)
 			continue;
 
@@ -521,8 +521,9 @@ bool LeveledListPreviewer::LoadNifFromPath(const std::string& relativePath, cons
 		}
 
 		m->CreateBuffers();
-		AddNifShapeTextures(&nif, m->shapeName);
-		bodyShapeNames.push_back(m->shapeName);
+		AddNifShapeTextures(&nif, shapeName, nullptr, m->shapeName);
+		if (std::find(bodyShapeNames.begin(), bodyShapeNames.end(), m->shapeName) == bodyShapeNames.end())
+			bodyShapeNames.push_back(m->shapeName);
 		shapeNifSource[m->shapeName] = relativePath;
 
 		// Extract partition body part IDs from NIF dismember skin
@@ -550,14 +551,17 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 	// Determine which body NIF paths to load.
 	// If an NPC is selected and has a WNAM skin armor, use that NPC's body meshes.
 	// Otherwise fall back to the default character assets.
+	//
+	// Only load body parts whose slots are NOT already provided by the outfit.
+	// If the outfit declares e.g. slot 32, it supplies its own body mesh and we
+	// must not load the default/WNAM body underneath it.
 	const std::string suffix = useHighWeight ? "_1.nif" : "_0.nif";
-	static const std::vector<std::string> defaultBodyNifs = {
-		"meshes/actors/character/character assets/femalebody",
-		"meshes/actors/character/character assets/femalehands",
-		"meshes/actors/character/character assets/femalefeet",
-	};
 
-	std::vector<std::string> bodyNifs;
+	struct SlotNif {
+		int slot;
+		std::string path;
+	};
+	std::vector<SlotNif> bodyNifs;
 
 	// Try NPC-specific paths from WNAM → ARMO → ARMA
 	if (!currentHeadEditorId.empty()) {
@@ -578,11 +582,11 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 		if (wnamFormId != 0) {
 			auto paths = data.ResolveBodyNifPaths(wnamFormId, useHighWeight);
 			if (!paths.body.empty())
-				bodyNifs.push_back(paths.body);
+				bodyNifs.push_back({32, paths.body});
 			if (!paths.hands.empty())
-				bodyNifs.push_back(paths.hands);
+				bodyNifs.push_back({33, paths.hands});
 			if (!paths.feet.empty())
-				bodyNifs.push_back(paths.feet);
+				bodyNifs.push_back({37, paths.feet});
 
 			if (!bodyNifs.empty())
 				wxLogMessage("LeveledListPreviewer: Using NPC '%s' body meshes (WNAM %08X)", currentHeadEditorId, wnamFormId);
@@ -591,13 +595,18 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 
 	// Fall back to defaults for any missing slots (or when no NPC selected)
 	if (bodyNifs.empty()) {
-		for (auto& base : defaultBodyNifs)
-			bodyNifs.push_back(base + suffix);
+		bodyNifs.push_back({32, "meshes/actors/character/character assets/femalebody" + suffix});
+		bodyNifs.push_back({33, "meshes/actors/character/character assets/femalehands" + suffix});
+		bodyNifs.push_back({37, "meshes/actors/character/character assets/femalefeet" + suffix});
 	}
 
-	for (auto& nifPath : bodyNifs) {
-		if (!LoadNifFromPath(nifPath))
-			wxLogMessage("LeveledListPreviewer: Body part not found: %s", nifPath);
+	for (auto& entry : bodyNifs) {
+		if (outfitDeclaredSlots.count(entry.slot)) {
+			wxLogMessage("  Skipping body slot %d — covered by outfit", entry.slot);
+			continue;
+		}
+		if (!LoadNifFromPath(entry.path))
+			wxLogMessage("LeveledListPreviewer: Body part not found: %s", entry.path);
 	}
 
 	if (bodyShapeNames.empty())
@@ -676,7 +685,7 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 
 	// Apply current preset if one was chosen
 	if (!currentPresetName.empty() && currentPresetName != "(none)")
-		ApplyPresetToBody(currentPresetName);
+		ApplyPresetToBody(currentPresetName, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -715,10 +724,9 @@ void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
 
 	for (auto& shapeName : nif.GetShapeNames()) {
 		std::string meshName = "_head_" + shapeName;
-		Mesh* m = gls.AddMeshFromNif(&nif, shapeName, nullptr, false);
+		Mesh* m = gls.AddMeshFromNif(&nif, shapeName, meshName, nullptr, false);
 		if (!m)
 			continue;
-		m->shapeName = meshName;
 
 		const std::vector<Color4>* vcolors = nif.GetColorsForShape(shapeName);
 		if (vcolors) {
@@ -857,7 +865,7 @@ void LeveledListPreviewer::LoadPresetList() {
 	}
 }
 
-void LeveledListPreviewer::ApplyPresetToBody(const std::string& presetName) {
+void LeveledListPreviewer::ApplyPresetToBody(const std::string& presetName, bool deferredRender) {
 	if (bodyGameVerts.empty()) {
 		wxLogMessage("ApplyPresetToBody: no body verts cached");
 		return;
@@ -870,7 +878,8 @@ void LeveledListPreviewer::ApplyPresetToBody(const std::string& presetName) {
 	if (presetName.empty() || presetName == "(none)") {
 		for (auto& [shapeName, verts] : bodyGameVerts)
 			gls.Update(shapeName, &verts, nullptr);
-		gls.RenderOneFrame();
+		if (!deferredRender)
+			gls.RenderOneFrame();
 		return;
 	}
 
@@ -925,11 +934,12 @@ void LeveledListPreviewer::ApplyPresetToBody(const std::string& presetName) {
 		gls.Update(shapeName, &verts, nullptr);
 	}
 
-	gls.RenderOneFrame();
+	if (!deferredRender)
+		gls.RenderOneFrame();
 	wxLog::FlushActive();
 }
 
-void LeveledListPreviewer::ApplyPresetToOutfit(const std::string& presetName) {
+void LeveledListPreviewer::ApplyPresetToOutfit(const std::string& presetName, bool deferredRender) {
 	if (outfitGameVerts.empty())
 		return;
 
@@ -940,7 +950,8 @@ void LeveledListPreviewer::ApplyPresetToOutfit(const std::string& presetName) {
 	if (presetName.empty() || presetName == "(none)") {
 		for (auto& [shapeName, verts] : outfitGameVerts)
 			gls.Update(shapeName, &verts, nullptr);
-		gls.RenderOneFrame();
+		if (!deferredRender)
+			gls.RenderOneFrame();
 		return;
 	}
 
@@ -1000,7 +1011,8 @@ void LeveledListPreviewer::ApplyPresetToOutfit(const std::string& presetName) {
 		gls.Update(displayName, &verts, nullptr);
 	}
 
-	gls.RenderOneFrame();
+	if (!deferredRender)
+		gls.RenderOneFrame();
 	wxLog::FlushActive();
 }
 
@@ -1109,40 +1121,62 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 		canvas->SetCurrent(*context);
 
 	// Selectively clear outfit and body meshes, keeping head meshes
-	for (auto& name : outfitShapeNames) {
-		gls.DeleteMesh(name);
-		shapeNifSource.erase(name);
-	}
-	for (auto& name : bodyShapeNames) {
-		gls.DeleteMesh(name);
-		shapeNifSource.erase(name);
-	}
-
-	// Clean up tracking for deleted shapes
-	// Remove non-head entries from untexturedShapes and shapeMaterials
+	// Clean up tracking for all deleted shapes (non-head)
 	{
 		std::set<std::string> headSet(headShapeNames.begin(), headShapeNames.end());
-		untexturedShapes.erase(std::remove_if(untexturedShapes.begin(), untexturedShapes.end(), [&](const std::string& s) { return headSet.find(s) == headSet.end(); }),
-							   untexturedShapes.end());
+		auto isNotHead = [&](const std::string& name) { return headSet.find(name) == headSet.end(); };
+
+		for (auto& name : outfitShapeNames)
+			gls.DeleteMesh(name);
+		for (auto& name : bodyShapeNames)
+			gls.DeleteMesh(name);
+
+		for (auto it = shapeNifSource.begin(); it != shapeNifSource.end();) {
+			if (isNotHead(it->first))
+				it = shapeNifSource.erase(it);
+			else
+				++it;
+		}
+		for (auto it = bodyShapePartMap.begin(); it != bodyShapePartMap.end();) {
+			if (isNotHead(it->first))
+				it = bodyShapePartMap.erase(it);
+			else
+				++it;
+		}
+		for (auto it = bodyGameVerts.begin(); it != bodyGameVerts.end();) {
+			if (isNotHead(it->first))
+				it = bodyGameVerts.erase(it);
+			else
+				++it;
+		}
 		for (auto it = shapeMaterials.begin(); it != shapeMaterials.end();) {
-			if (headSet.find(it->first) == headSet.end())
+			if (isNotHead(it->first))
 				it = shapeMaterials.erase(it);
 			else
 				++it;
 		}
+		for (auto it = shapeArmoName.begin(); it != shapeArmoName.end();) {
+			if (isNotHead(it->first))
+				it = shapeArmoName.erase(it);
+			else
+				++it;
+		}
+
+		untexturedShapes.erase(std::remove_if(untexturedShapes.begin(), untexturedShapes.end(), isNotHead), untexturedShapes.end());
+
+		bodyShapeNames.clear();
+		outfitShapeNames.clear();
+		outfitGameVerts.clear();
+		outfitShapeNifName_.clear();
+		useAnyGroups_.clear();
+		shapeToVariantGroup_.clear();
 	}
 
-	bodyShapeNames.clear();
-	outfitShapeNames.clear();
-	outfitGameVerts.clear();
-	outfitShapeNifName_.clear();
-	useAnyGroups_.clear();
-	shapeToVariantGroup_.clear();
-	shapeArmoName.clear();
+	gls.RenderOneFrame();
 
 	// Collect ARMO-declared body slots from outfit pieces.
 	// For "Use Any" groups, only count slots from variant 0 (the initially active one).
-	std::set<int> outfitDeclaredSlots;
+	outfitDeclaredSlots.clear();
 	for (auto& piece : outfit.pieces) {
 		if (piece.useAnyGroup >= 0 && piece.useAnyVariant != 0)
 			continue; // skip non-active variants for slot computation
@@ -1256,12 +1290,12 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 		psi.pieceName = piece.name;
 
 		for (auto& shapeName : nif.GetShapeNames()) {
-			Mesh* m = gls.AddMeshFromNif(&nif, shapeName, nullptr, false);
+			std::string displayName = piecePrefix + shapeName;
+			Mesh* m = gls.AddMeshFromNif(&nif, shapeName, displayName, nullptr, false);
 			if (!m)
 				continue;
 
-			// Rename to avoid collisions with identically-named shapes from other pieces
-			m->shapeName = piecePrefix + shapeName;
+			outfitShapeNifName_[m->shapeName] = shapeName;
 
 			// Vertex colors
 			const std::vector<Color4>* vcolors = nif.GetColorsForShape(shapeName);
@@ -1285,7 +1319,8 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 					gls.SetMeshVisibility(m->shapeName, false);
 				}
 			}
-			outfitShapeNames.push_back(m->shapeName);
+			if (std::find(outfitShapeNames.begin(), outfitShapeNames.end(), m->shapeName) == outfitShapeNames.end())
+				outfitShapeNames.push_back(m->shapeName);
 			shapeNifSource[m->shapeName] = piecePath;
 			shapeArmoName[m->shapeName] = piece.name;
 			psi.shapeNames.push_back(m->shapeName);
@@ -1297,7 +1332,6 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 				for (int i = 0; i < m->nVerts; i++)
 					gameVerts[i] = Mesh::TransformPosMeshToNif(m->verts[i]);
 				outfitGameVerts[m->shapeName] = std::move(gameVerts);
-				outfitShapeNifName_[m->shapeName] = shapeName;
 				wxLogMessage("  Outfit morph: '%s' has .tri (nif shape '%s', %d verts)", m->shapeName, shapeName, m->nVerts);
 			}
 		}
@@ -1366,7 +1400,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 
 	// Apply preset to outfit pieces
 	if (!outfitGameVerts.empty() && !currentPresetName.empty() && currentPresetName != "(none)")
-		ApplyPresetToOutfit(currentPresetName);
+		ApplyPresetToOutfit(currentPresetName, true);
 
 	// If SMP is running, sync the morphed mesh vertices to the simulator.
 	// SMP auto-restore above captured unmorphed verts; now that the preset has
@@ -1381,34 +1415,6 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 			for (int i = 0; i < mesh->nVerts; i++)
 				nifVerts[i] = Mesh::TransformPosMeshToNif(mesh->verts[i]);
 			smpSimulator_->UpdateSkinPositions(name, nifVerts);
-		}
-	}
-
-	// Remove default body shapes whose partition slots are declared by
-	// the outfit's ARMO records.  This matches game behavior: when an
-	// outfit ARMO claims a slot, the NPC's skin mesh for that slot is
-	// hidden and the outfit's own NIF provides the replacement.
-	if (!bodyShapePartMap.empty() && !outfitDeclaredSlots.empty()) {
-		std::vector<std::string> toRemove;
-		for (auto& [shapeName, partIds] : bodyShapePartMap) {
-			bool allCovered = true;
-			for (uint16_t pid : partIds) {
-				if (!outfitDeclaredSlots.count(pid)) {
-					allCovered = false;
-					break;
-				}
-			}
-			if (allCovered) {
-				wxLogMessage("  Removing body shape '%s' — slots declared by outfit ARMO", shapeName);
-				toRemove.push_back(shapeName);
-			}
-		}
-		for (auto& name : toRemove) {
-			gls.DeleteMesh(name);
-			shapeNifSource.erase(name);
-			bodyShapePartMap.erase(name);
-			bodyGameVerts.erase(name);
-			bodyShapeNames.erase(std::remove(bodyShapeNames.begin(), bodyShapeNames.end(), name), bodyShapeNames.end());
 		}
 	}
 
@@ -1428,8 +1434,12 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 						hasNpcSkinTextures = true;
 						wxLogMessage("LeveledListPreviewer: NPC '%s' skin texture resolved (deferred): %s", npc.editorId, npcSkinTextures[0]);
 						// Body meshes already loaded above — need to reload with skin textures
-						for (auto& name : bodyShapeNames)
+						for (auto& name : bodyShapeNames) {
 							gls.DeleteMesh(name);
+							shapeNifSource.erase(name);
+							shapeMaterials.erase(name);
+							shapeArmoName.erase(name);
+						}
 						bodyShapeNames.clear();
 						bodyGameVerts.clear();
 						bodyShapePartMap.clear();
@@ -1441,11 +1451,11 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 		}
 	}
 
-	gls.RenderOneFrame();
 	wxLog::FlushActive();
 	SetStatusText(wxString::Format(_("Outfit: %s — %d meshes loaded"), outfit.name, loadedCount));
 
 	RefreshMeshOverlay();
+	gls.RenderOneFrame();
 }
 
 // ---------------------------------------------------------------------------
@@ -1775,7 +1785,12 @@ void LeveledListPreviewer::RefreshMeshOverlay() {
 		}
 	}
 
-	auto outfitCat = buildCategory("Outfit", visibleOutfitShapes, [](const std::string& n) -> std::string { return (n.size() > 9 && n[8] == '_') ? n.substr(9) : n; });
+	auto outfitCat = buildCategory("Outfit", visibleOutfitShapes, [this](const std::string& n) -> std::string {
+		auto it = outfitShapeNifName_.find(n);
+		if (it != outfitShapeNifName_.end())
+			return it->second;
+		return n;
+	});
 	if (!outfitCat.groups.empty())
 		categories.push_back(std::move(outfitCat));
 
@@ -2186,9 +2201,9 @@ void LeveledListPreviewer::SetupSmpSimulation() {
 			continue;
 
 		std::string origShapeName;
-		size_t underscorePos = shapeName.find('_');
-		if (underscorePos != std::string::npos && underscorePos == 8)
-			origShapeName = shapeName.substr(9);
+		auto nameIt = outfitShapeNifName_.find(shapeName);
+		if (nameIt != outfitShapeNifName_.end())
+			origShapeName = nameIt->second;
 		else
 			origShapeName = shapeName;
 

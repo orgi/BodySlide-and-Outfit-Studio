@@ -119,6 +119,9 @@ class LeveledListPreviewer : public wxFrame {
 	// SMP XML paths discovered for the current outfit (displayName → xmlPath)
 	std::unordered_map<std::string, std::string> smpXmlPaths_;
 
+	// Declared body slots for the current outfit (ARMO partition IDs)
+	std::set<int> outfitDeclaredSlots;
+
 	wxDECLARE_EVENT_TABLE();
 
 public:
@@ -176,8 +179,8 @@ private:
 	void LoadHeadMesh(const lldata::NPCEntry& npc);
 	void ClearHeadMeshes();
 	void LoadPresetList();
-	void ApplyPresetToBody(const std::string& presetName);
-	void ApplyPresetToOutfit(const std::string& presetName);
+	void ApplyPresetToBody(const std::string& presetName, bool deferredRender = false);
+	void ApplyPresetToOutfit(const std::string& presetName, bool deferredRender = false);
 	TriFile* GetOrLoadTriFile(const std::string& nifRelativePath);
 
 	// Mesh overlay helpers

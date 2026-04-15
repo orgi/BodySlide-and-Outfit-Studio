@@ -317,10 +317,10 @@ public:
 	Mesh* AddVisSeamEdges(const Mesh* refMesh, bool asMesh = false);
 	std::vector<Mesh*> AddFloor(float width = 100.0f, float stepSmall = 1.0f, float stepBig = 5.0f);
 
-	Mesh* AddMeshFromNif(nifly::NifFile* nif, const std::string& shapeName, nifly::Vector3* color = nullptr, bool postProcess = true);
+	Mesh* AddMeshFromNif(nifly::NifFile* nif, const std::string& shapeName, const std::string& displayName = "", nifly::Vector3* color = nullptr, bool postProcess = true);
 	void Update(const std::string& shapeName, std::vector<nifly::Vector3>* vertices, std::vector<nifly::Vector2>* uvs = nullptr, std::unordered_set<int>* changed = nullptr);
 	void Update(Mesh* m, std::vector<nifly::Vector3>* vertices, std::vector<nifly::Vector2>* uvs = nullptr, std::unordered_set<int>* changed = nullptr);
-	Mesh* ReloadMeshFromNif(nifly::NifFile* nif, std::string shapeName, bool postProcess = true);
+	Mesh* ReloadMeshFromNif(nifly::NifFile* nif, const std::string& shapeName, const std::string& displayName = "", bool postProcess = true);
 	void RecalculateMeshBVH(const std::string& shapeName);
 
 	bool SetMeshVisibility(const std::string& name, bool visible = true);

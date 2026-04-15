@@ -148,12 +148,12 @@ Mesh* PreviewWindow::GetMesh(const std::string& shapeName) {
 	return gls.GetMesh(shapeName);
 }
 
-void PreviewWindow::AddMeshFromNif(NifFile* nif, char* shapeName) {
+void PreviewWindow::AddMeshFromNif(NifFile* nif, const std::string& shapeName, const std::string& displayName) {
 	std::vector<std::string> shapeList = nif->GetShapeNames();
 	for (size_t i = 0; i < shapeList.size(); i++) {
 		std::string& shapeListName = shapeList[i];
-		if (!shapeName || (shapeName && shapeListName == shapeName)) {
-			Mesh* m = gls.AddMeshFromNif(nif, shapeListName, nullptr, false);
+		if (shapeName.empty() || shapeListName == shapeName) {
+			Mesh* m = gls.AddMeshFromNif(nif, shapeListName, displayName, nullptr, false);
 			if (!m)
 				continue;
 
@@ -163,15 +163,15 @@ void PreviewWindow::AddMeshFromNif(NifFile* nif, char* shapeName) {
 	}
 }
 
-void PreviewWindow::RefreshMeshFromNif(NifFile* nif, char* shapeName) {
+void PreviewWindow::RefreshMeshFromNif(NifFile* nif, const std::string& shapeName) {
 	std::vector<std::string> shapeList = nif->GetShapeNames();
-	if (shapeName == nullptr)
+	if (shapeName.empty())
 		gls.ClearMeshes();
 
 	for (size_t i = 0; i < shapeList.size(); i++) {
 		std::string& shapeListName = shapeList[i];
-		if (!shapeName || (shapeName && shapeListName == shapeName)) {
-			Mesh* m = gls.ReloadMeshFromNif(nif, shapeListName, false);
+		if (shapeName.empty() || shapeListName == shapeName) {
+			Mesh* m = gls.ReloadMeshFromNif(nif, shapeListName, "", false);
 			if (!m)
 				continue;
 

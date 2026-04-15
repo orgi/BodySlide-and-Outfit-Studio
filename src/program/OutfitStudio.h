@@ -167,7 +167,7 @@ public:
 
 	void SetNotifyWindow(wxWindow* win);
 
-	void AddMeshFromNif(nifly::NifFile* nif, const std::string& shapeName);
+	void AddMeshFromNif(nifly::NifFile* nif, const std::string& shapeName, const std::string& displayName = "");
 
 	void RenameShape(const std::string& shapeName, const std::string& newShapeName) { gls.RenameMesh(shapeName, newShapeName); }
 

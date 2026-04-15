@@ -1217,12 +1217,12 @@ void GLSurface::UpdateShaders(Mesh* m) {
 	}
 }
 
-Mesh* GLSurface::ReloadMeshFromNif(NifFile* nif, std::string shapeName, bool postProcess) {
-	DeleteMesh(shapeName);
-	return AddMeshFromNif(nif, shapeName, nullptr, postProcess);
+Mesh* GLSurface::ReloadMeshFromNif(NifFile* nif, const std::string& shapeName, const std::string& displayName, bool postProcess) {
+	DeleteMesh(displayName.empty() ? shapeName : displayName);
+	return AddMeshFromNif(nif, shapeName, displayName, nullptr, postProcess);
 }
 
-Mesh* GLSurface::AddMeshFromNif(NifFile* nif, const std::string& shapeName, Vector3* color, bool postProcess) {
+Mesh* GLSurface::AddMeshFromNif(NifFile* nif, const std::string& shapeName, const std::string& displayName, Vector3* color, bool postProcess) {
 	auto shape = nif->FindBlockByName<NiShape>(shapeName);
 	if (!shape)
 		return nullptr;
@@ -1359,7 +1359,7 @@ Mesh* GLSurface::AddMeshFromNif(NifFile* nif, const std::string& shapeName, Vect
 	if (m->nTris > 0)
 		m->tris = std::make_unique<Triangle[]>(m->nTris);
 
-	m->shapeName = shapeName;
+	m->shapeName = displayName.empty() ? shapeName : displayName;
 
 	// Load verts. NIF verts are scaled up by approx. 10 and rotated on the x axis (Z up, Y forward).
 	// Scale down by 10 and rotate on x axis by flipping y and z components. To face the camera, this also mirrors

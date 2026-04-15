@@ -351,13 +351,16 @@ static std::vector<std::pair<std::string, const CachedARMA*>> ResolveWornMeshes(
 	std::vector<std::pair<std::string, const CachedARMA*>> results;
 	std::set<std::string> seenNifs;
 
-	auto addArma = [&](uint32_t armaId) {
+	// Add an ARMA's model to results. If femaleOnly is true, only use modelFemale.
+	auto addArma = [&](uint32_t armaId, bool femaleOnly) {
 		auto it = armaCache.find(armaId);
 		if (it == armaCache.end()) {
-			wxLogWarning("  ARMA %08X not found in cache", armaId);
+			if (!femaleOnly)
+				wxLogWarning("  ARMA %08X not found in cache", armaId);
 			return;
 		}
-		const std::string& model = !it->second.modelFemale.empty() ? it->second.modelFemale : it->second.modelMale;
+		const std::string& model = !it->second.modelFemale.empty() ? it->second.modelFemale
+		                         : (femaleOnly ? std::string{} : it->second.modelMale);
 		if (!model.empty()) {
 			std::string normalized = NormalizeMeshPath(model);
 			if (seenNifs.insert(normalized).second)
@@ -365,10 +368,20 @@ static std::vector<std::pair<std::string, const CachedARMA*>> ResolveWornMeshes(
 		}
 	};
 
+	// Two-pass collection for each set of ARMAs:
+	// Pass 1 — female models only (avoids loading male-only race variants for female previews)
+	// Pass 2 — male fallback only if pass 1 found nothing
+	auto collectArmatures = [&](const std::vector<uint32_t>& ids) {
+		for (uint32_t armaId : ids)
+			addArma(armaId, true);
+		if (results.empty()) {
+			for (uint32_t armaId : ids)
+				addArma(armaId, false);
+		}
+	};
+
 	// Try this ARMO's ARMA references first
-	for (uint32_t armaId : armo.armatureIds) {
-		addArma(armaId);
-	}
+	collectArmatures(armo.armatureIds);
 
 	// If no meshes found, follow template chain (enchanted copies inherit from base armor)
 	if (results.empty()) {
@@ -377,16 +390,13 @@ static std::vector<std::pair<std::string, const CachedARMA*>> ResolveWornMeshes(
 			auto tit = armoCache.find(tid);
 			if (tit == armoCache.end())
 				break;
-			auto& tmpl = tit->second;
 
-			for (uint32_t armaId : tmpl.armatureIds) {
-				addArma(armaId);
-			}
+			collectArmatures(tit->second.armatureIds);
 
 			if (!results.empty())
 				break;
 
-			tid = tmpl.templateId;
+			tid = tit->second.templateId;
 		}
 	}
 
@@ -418,7 +428,9 @@ static void AddPiecesFromArmo(uint32_t formId,
 		piece.formId = formId;
 		piece.name = armo.fullName;
 		piece.armorType = armo.armorType;
-		piece.bodySlots = DecodeBodySlots(armo.bodySlotFlags);
+		// Use ARMA-level body slot flags so each piece only claims the slots
+		// its own mesh actually covers, rather than the broader ARMO flags.
+		piece.bodySlots = DecodeBodySlots(arma ? arma->bodySlotFlags : armo.bodySlotFlags);
 		piece.nifPath = NormalizeMeshPath(modelPath);
 
 		// Resolve alternate textures from the matched ARMA

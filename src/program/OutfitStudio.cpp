@@ -11988,14 +11988,14 @@ void wxGLPanel::SetNotifyWindow(wxWindow* win) {
 	os = dynamic_cast<OutfitStudioFrame*>(win);
 }
 
-void wxGLPanel::AddMeshFromNif(NifFile* nif, const std::string& shapeName) {
+void wxGLPanel::AddMeshFromNif(NifFile* nif, const std::string& shapeName, const std::string& displayName) {
 	std::vector<std::string> shapeList = nif->GetShapeNames();
 
 	for (size_t i = 0; i < shapeList.size(); i++) {
 		if (!shapeName.empty() && shapeList[i] != shapeName)
 			continue;
 
-		Mesh* m = gls.AddMeshFromNif(nif, shapeList[i]);
+		Mesh* m = gls.AddMeshFromNif(nif, shapeList[i], displayName);
 		if (!m)
 			continue;
 
