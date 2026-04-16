@@ -57,6 +57,7 @@ class LeveledListPreviewer : public wxFrame {
 
 	// "Use Any" variant groups: only one variant per group is shown at a time
 	struct UseAnyVariant {
+		int variantIdx = -1;				 // original variant index from ESP
 		std::string label;					 // display name for this variant
 		std::vector<std::string> shapeNames; // shapes belonging to this variant
 	};
@@ -85,6 +86,7 @@ class LeveledListPreviewer : public wxFrame {
 
 	// Data
 	lldata::LeveledListData data;
+	const lldata::OutfitEntry* currentOutfit = nullptr;
 	std::vector<const lldata::OutfitEntry*> filteredOutfits;
 	wxString lastESPDirectory;
 	std::string lastESPFilepath;
@@ -181,6 +183,8 @@ private:
 	void LoadBodyMeshes();
 	void LoadHeadMesh(const lldata::NPCEntry& npc);
 	void ClearHeadMeshes();
+	void UpdateHeadVisibility();
+	void UpdateActiveSlotsAndVisibility();
 	void LoadPresetList();
 	void ApplyPresetToBody(const std::string& presetName, bool deferredRender = false);
 	void ApplyPresetToOutfit(const std::string& presetName, bool deferredRender = false);

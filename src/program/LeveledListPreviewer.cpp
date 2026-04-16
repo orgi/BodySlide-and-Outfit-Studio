@@ -547,8 +547,20 @@ bool LeveledListPreviewer::LoadNifFromPath(const std::string& relativePath, cons
 }
 
 void LeveledListPreviewer::LoadBodyMeshes() {
-	bodyGameVerts.clear();
-	bodyShapePartMap.clear();
+	// Selectively clear body shape info, keeping head info
+	{
+		std::set<std::string> headSet(headShapeNames.begin(), headShapeNames.end());
+		auto isNotHead = [&](const std::string& name) { return headSet.find(name) == headSet.end(); };
+
+		for (auto it = bodyGameVerts.begin(); it != bodyGameVerts.end();) {
+			if (isNotHead(it->first)) it = bodyGameVerts.erase(it);
+			else ++it;
+		}
+		for (auto it = bodyShapePartMap.begin(); it != bodyShapePartMap.end();) {
+			if (isNotHead(it->first)) it = bodyShapePartMap.erase(it);
+			else ++it;
+		}
+	}
 
 	// Determine which body NIF paths to load.
 	// If an NPC is selected and has a WNAM skin armor, use that NPC's body meshes.
@@ -709,6 +721,8 @@ void LeveledListPreviewer::ClearHeadMeshes() {
 	for (auto& name : headShapeNames) {
 		gls.DeleteMesh(name);
 		shapeNifSource.erase(name);
+		bodyShapePartMap.erase(name);
+		shapeMaterials.erase(name);
 	}
 	headShapeNames.clear();
 }
@@ -753,7 +767,34 @@ void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
 		AddNifShapeTextures(&nif, shapeName, nullptr, meshName);
 		headShapeNames.push_back(meshName);
 		shapeNifSource[meshName] = relativePath;
+
+		// Extract partition body part IDs from NIF dismember skin
+		auto* shape = nif.FindBlockByName<NiShape>(shapeName);
+		if (shape) {
+			NiVector<BSDismemberSkinInstance::PartitionInfo> partInfo;
+			std::vector<int> triParts;
+			bool gotParts = nif.GetShapePartitions(shape, partInfo, triParts);
+			
+			// Fallback: if GetShapePartitions fails (e.g. no NiSkinPartition), 
+			// try to get slot info directly from BSDismemberSkinInstance if it exists.
+			if (!gotParts || partInfo.empty()) {
+				auto* bsdSkin = nif.GetHeader().GetBlock<BSDismemberSkinInstance>(shape->SkinInstanceRef());
+				if (bsdSkin) {
+					partInfo = bsdSkin->partitions;
+					gotParts = true;
+				}
+			}
+
+			if (gotParts && !partInfo.empty()) {
+				std::set<uint16_t> partIds;
+				for (size_t i = 0; i < partInfo.size(); ++i)
+					partIds.insert(partInfo[i].partID);
+				bodyShapePartMap[meshName] = std::move(partIds);
+			}
+		}
 	}
+
+	UpdateHeadVisibility();
 
 	wxLogMessage("LeveledListPreviewer: Loaded head NIF for NPC '%s' (%s): %zu shapes", npc.editorId, formIdBuf, headShapeNames.size());
 	gls.RenderOneFrame();
@@ -840,6 +881,71 @@ void LeveledListPreviewer::OnHeadEntered(wxCommandEvent& WXUNUSED(event)) {
 // ---------------------------------------------------------------------------
 // BodySlide preset loading and application
 // ---------------------------------------------------------------------------
+
+void LeveledListPreviewer::UpdateHeadVisibility() {
+	if (headShapeNames.empty())
+		return;
+
+	// According to the user, ONLY slot 31 is the hair slot.
+	bool hideHair = outfitDeclaredSlots.count(31) != 0;
+
+	for (const auto& meshName : headShapeNames) {
+		Mesh* m = gls.GetMesh(meshName);
+		if (!m) continue;
+
+		bool visible = true;
+		auto it = bodyShapePartMap.find(meshName);
+		if (it != bodyShapePartMap.end()) {
+			// ONLY hide if it's a hair slot (31) AND the outfit includes it (31).
+			if (it->second.count(31)) {
+				if (hideHair) {
+					visible = false;
+				}
+			}
+		}
+
+		if (m->bVisible != visible) {
+			m->bVisible = visible;
+		}
+	}
+}
+
+void LeveledListPreviewer::UpdateActiveSlotsAndVisibility() {
+	if (!currentOutfit)
+		return;
+
+	outfitDeclaredSlots.clear();
+	for (auto& piece : currentOutfit->pieces) {
+		if (piece.useAnyGroup >= 0) {
+			if (useAnyGroups_.empty()) {
+				// Initial load: no groups built yet, assume variant 0
+				if (piece.useAnyVariant != 0)
+					continue;
+			}
+			else {
+				// Switching variants: use the current built group state
+				bool isActive = false;
+				for (auto& g : useAnyGroups_) {
+					if (g.groupId == piece.useAnyGroup) {
+						// Active variant is indexed by g.activeIndex
+						if (g.activeIndex >= 0 && g.activeIndex < static_cast<int>(g.variants.size())) {
+							if (g.variants[g.activeIndex].variantIdx == piece.useAnyVariant) {
+								isActive = true;
+								break;
+							}
+						}
+					}
+				}
+				if (!isActive)
+					continue;
+			}
+		}
+		for (int slot : piece.bodySlots)
+			outfitDeclaredSlots.insert(slot);
+	}
+
+	UpdateHeadVisibility();
+}
 
 void LeveledListPreviewer::LoadPresetList() {
 	if (!presetCombo)
@@ -1122,6 +1228,7 @@ void LeveledListPreviewer::OnOutfitSelected(wxListEvent& event) {
 }
 
 void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
+	currentOutfit = &outfit;
 	// Stop any running SMP simulation
 	StopSmpSimulation();
 	smpXmlPaths_.clear();
@@ -1185,15 +1292,8 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 
 	gls.RenderOneFrame();
 
-	// Collect ARMO-declared body slots from outfit pieces.
-	// For "Use Any" groups, only count slots from variant 0 (the initially active one).
-	outfitDeclaredSlots.clear();
-	for (auto& piece : outfit.pieces) {
-		if (piece.useAnyGroup >= 0 && piece.useAnyVariant != 0)
-			continue; // skip non-active variants for slot computation
-		for (int slot : piece.bodySlots)
-			outfitDeclaredSlots.insert(slot);
-	}
+	// Population algorithm is now identical for initial load and switches.
+	UpdateActiveSlotsAndVisibility();
 
 	// Load default body/hands/feet for slots NOT declared by the outfit ARMO.
 	if (showBody)
@@ -1367,6 +1467,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 
 			for (auto& [variantIdx, pieces] : variantMap) {
 				UseAnyVariant variant;
+				variant.variantIdx = variantIdx;
 				// Build label from piece names (use first piece's name, or combine)
 				if (!pieces.empty())
 					variant.label = pieces[0]->pieceName;
@@ -1697,6 +1798,9 @@ void LeveledListPreviewer::SwitchUseAnyVariant(size_t groupIdx, int newVariantId
 	}
 
 	wxLogMessage("  Switched Use Any group %d to variant %d ('%s')", group.groupId, newVariantIdx, group.variants[newVariantIdx].label);
+
+	// Use exactly the same algorithm as initial load for re-calculating slots and visibility
+	UpdateActiveSlotsAndVisibility();
 
 	gls.RenderOneFrame();
 	RefreshMeshOverlay();
