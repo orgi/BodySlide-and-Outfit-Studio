@@ -2,9 +2,11 @@
 
 set -eu
 
+mkdir -p Release
 (
     cd Release
-    cmake --build . --config Release
+    cmake .. -DCMAKE_BUILD_TYPE=Release
+    cmake --build .
 )
 
 export WX_BODYSLIDE_DATA_DIR="$HOME/Games/Skyrim Special Edition/Data/CalienteTools/Bodyslide"

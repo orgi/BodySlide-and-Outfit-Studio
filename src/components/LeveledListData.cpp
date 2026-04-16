@@ -428,9 +428,9 @@ static void AddPiecesFromArmo(uint32_t formId,
 		piece.formId = formId;
 		piece.name = armo.fullName;
 		piece.armorType = armo.armorType;
-		// Use ARMA-level body slot flags so each piece only claims the slots
-		// its own mesh actually covers, rather than the broader ARMO flags.
-		piece.bodySlots = DecodeBodySlots(arma ? arma->bodySlotFlags : armo.bodySlotFlags);
+		// Use ARMO-level body slot flags — the ARMO record is the authoritative declaration
+		// of which body slots this armor piece occupies, matching how the game processes it.
+		piece.bodySlots = DecodeBodySlots(armo.bodySlotFlags);
 		piece.nifPath = NormalizeMeshPath(modelPath);
 
 		// Resolve alternate textures from the matched ARMA

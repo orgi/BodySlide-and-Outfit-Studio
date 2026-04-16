@@ -593,16 +593,25 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 		}
 	}
 
-	// Fall back to defaults for any missing slots (or when no NPC selected)
-	if (bodyNifs.empty()) {
+	// Fill in default paths for any slots not provided by the NPC's WNAM
+	// (or when no NPC is selected). A WNAM may supply only the body path,
+	// leaving hands/feet uncovered — always ensure all three slots have a path.
+	auto hasSlot = [&](int slot) {
+		for (auto& s : bodyNifs)
+			if (s.slot == slot)
+				return true;
+		return false;
+	};
+	if (!hasSlot(32))
 		bodyNifs.push_back({32, "meshes/actors/character/character assets/femalebody" + suffix});
+	if (!hasSlot(33))
 		bodyNifs.push_back({33, "meshes/actors/character/character assets/femalehands" + suffix});
+	if (!hasSlot(37))
 		bodyNifs.push_back({37, "meshes/actors/character/character assets/femalefeet" + suffix});
-	}
 
 	for (auto& entry : bodyNifs) {
 		if (outfitDeclaredSlots.count(entry.slot)) {
-			wxLogMessage("  Skipping body slot %d — covered by outfit", entry.slot);
+			wxLogMessage("  Skipping body slot %d — covered by outfit ARMO", entry.slot);
 			continue;
 		}
 		if (!LoadNifFromPath(entry.path))
@@ -1184,8 +1193,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 			outfitDeclaredSlots.insert(slot);
 	}
 
-	// Load default body/hands/feet.  After outfit pieces are loaded below,
-	// body shapes whose slots are declared by the outfit will be removed.
+	// Load default body/hands/feet for slots NOT declared by the outfit ARMO.
 	if (showBody)
 		LoadBodyMeshes();
 
@@ -1339,6 +1347,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 		if (!psi.shapeNames.empty())
 			pieceInfos.push_back(std::move(psi));
 	}
+
 
 	// Build "Use Any" variant groups and set initial visibility.
 	// Group pieces by useAnyGroup, then create UseAnyGroup entries with variants.

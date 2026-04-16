@@ -119,7 +119,8 @@ class LeveledListPreviewer : public wxFrame {
 	// SMP XML paths discovered for the current outfit (displayName → xmlPath)
 	std::unordered_map<std::string, std::string> smpXmlPaths_;
 
-	// Declared body slots for the current outfit (ARMO partition IDs)
+	// Body slots declared by the current outfit's ARMO records (e.g. 32=body, 33=hands, 37=feet).
+	// Used post-load to delete default body shapes whose slots are fully claimed by the outfit.
 	std::set<int> outfitDeclaredSlots;
 
 	wxDECLARE_EVENT_TABLE();
