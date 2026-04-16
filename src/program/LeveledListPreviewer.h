@@ -30,10 +30,12 @@
 class BodySlideApp;
 class LLPreviewCanvas;
 
+wxDECLARE_EVENT(wxEVT_LEVELEDLIST_CLOSED, wxCommandEvent);
+
 extern ConfigurationManager Config;
 
 class LeveledListPreviewer : public wxFrame {
-	BodySlideApp* app = nullptr;
+	wxEvtHandler* eventHandler = nullptr;
 	LLPreviewCanvas* canvas = nullptr;
 	std::unique_ptr<wxGLContext> context;
 
@@ -126,7 +128,7 @@ class LeveledListPreviewer : public wxFrame {
 	wxDECLARE_EVENT_TABLE();
 
 public:
-	LeveledListPreviewer(BodySlideApp* app);
+	LeveledListPreviewer(wxEvtHandler* handler = nullptr);
 	~LeveledListPreviewer();
 
 	void OnShown();

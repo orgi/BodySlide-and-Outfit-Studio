@@ -1,0 +1,257 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Resources">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav</Extensions>
+    </Filter>
+    <Filter Include="Libraries">
+      <UniqueIdentifier>{6d6b425f-03aa-4210-b6af-ac49bf12352d}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Libraries\FSEngine">
+      <UniqueIdentifier>{6f3ea695-40d7-4be2-a951-168ba3339081}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Libraries\TinyXML-2">
+      <UniqueIdentifier>{fd5a7d0f-084f-4202-b4d6-67732f2c2302}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Components">
+      <UniqueIdentifier>{8e852d2f-5f87-416d-be07-c75179e8f57e}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Files">
+      <UniqueIdentifier>{782be5c1-aa6f-4e54-acb4-c89dc11d2fcb}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Program">
+      <UniqueIdentifier>{82ef2505-7b08-4871-b498-b758d860f25c}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Rendering">
+      <UniqueIdentifier>{def5c486-38d5-46f3-87b8-5d17825c309e}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Utilities">
+      <UniqueIdentifier>{575c3247-33ba-4a9b-8af4-649cb8b54d10}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Libraries\LZ4F">
+      <UniqueIdentifier>{1dd6227a-2c07-441b-a703-df5e11788296}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Libraries\SOIL2">
+      <UniqueIdentifier>{746df173-aa97-45f5-9200-676a6b050846}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Libraries\nifly">
+      <UniqueIdentifier>{04ceb037-1b27-4876-8d21-d93a532d5246}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Libraries\nifly\src">
+      <UniqueIdentifier>{a4a64824-9052-40c3-9138-04fab014641c}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Libraries\gli">
+      <UniqueIdentifier>{e366b310-4d8d-4f5e-b43d-0aa7f0edeef1}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Libraries\gli\glm">
+      <UniqueIdentifier>{cf289f86-ccae-4cd8-81db-71adb8328b06}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Libraries\gli\glm\detail">
+      <UniqueIdentifier>{9222d26f-5381-4e83-b3d9-bbef711a1f09}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="BodySlide.ico">
+      <Filter>Resources</Filter>
+    </Image>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="LeveledListViewer.rc">
+      <Filter>Resources</Filter>
+    </ResourceCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="lib\FSEngine\FSBSA.h">
+      <Filter>Libraries\FSEngine</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\FSEngine\FSEngine.h">
+      <Filter>Libraries\FSEngine</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\FSEngine\FSManager.h">
+      <Filter>Libraries\FSEngine</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\TinyXML-2\tinyxml2.h">
+      <Filter>Libraries\TinyXML-2</Filter>
+    </ClInclude>
+    <ClInclude Include="src\components\LeveledListData.h">
+      <Filter>Components</Filter>
+    </ClInclude>
+    <ClInclude Include="src\components\SmpSimulator.h">
+      <Filter>Components</Filter>
+    </ClInclude>
+    <ClInclude Include="src\files\ESPReader.h">
+      <Filter>Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\files\MaterialFile.h">
+      <Filter>Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\files\ResourceLoader.h">
+      <Filter>Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\files\TriFile.h">
+      <Filter>Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\files\wxDDSImage.h">
+      <Filter>Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\program\LeveledListApp.h">
+      <Filter>Program</Filter>
+    </ClInclude>
+    <ClInclude Include="src\program\LeveledListPreviewer.h">
+      <Filter>Program</Filter>
+    </ClInclude>
+    <ClInclude Include="src\render\GLExtensions.h">
+      <Filter>Rendering</Filter>
+    </ClInclude>
+    <ClInclude Include="src\render\GLMaterial.h">
+      <Filter>Rendering</Filter>
+    </ClInclude>
+    <ClInclude Include="src\render\GLOffscreenBuffer.h">
+      <Filter>Rendering</Filter>
+    </ClInclude>
+    <ClInclude Include="src\render\GLShader.h">
+      <Filter>Rendering</Filter>
+    </ClInclude>
+    <ClInclude Include="src\render\GLSurface.h">
+      <Filter>Rendering</Filter>
+    </ClInclude>
+    <ClInclude Include="src\utils\ConfigurationManager.h">
+      <Filter>Utilities</Filter>
+    </ClInclude>
+    <ClInclude Include="src\utils\Log.h">
+      <Filter>Utilities</Filter>
+    </ClInclude>
+    <ClInclude Include="src\utils\PlatformUtil.h">
+      <Filter>Utilities</Filter>
+    </ClInclude>
+    <ClInclude Include="src\utils\StringStuff.h">
+      <Filter>Utilities</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="lib\FSEngine\FSBSA.cpp">
+      <Filter>Libraries\FSEngine</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\FSEngine\FSEngine.cpp">
+      <Filter>Libraries\FSEngine</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\FSEngine\FSManager.cpp">
+      <Filter>Libraries\FSEngine</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\gli\glm\detail\glm.cpp">
+      <Filter>Libraries\gli\glm\detail</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\LZ4F\lz4.c">
+      <Filter>Libraries\LZ4F</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\LZ4F\lz4frame.c">
+      <Filter>Libraries\LZ4F</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\LZ4F\lz4hc.c">
+      <Filter>Libraries\LZ4F</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\LZ4F\xxhash.c">
+      <Filter>Libraries\LZ4F</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\nifly\src\Animation.cpp">
+      <Filter>Libraries\nifly\src</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\nifly\src\BasicTypes.cpp">
+      <Filter>Libraries\nifly\src</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\nifly\src\bhk.cpp">
+      <Filter>Libraries\nifly\src</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\nifly\src\ExtraData.cpp">
+      <Filter>Libraries\nifly\src</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\nifly\src\Factory.cpp">
+      <Filter>Libraries\nifly\src</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\nifly\src\Geometry.cpp">
+      <Filter>Libraries\nifly\src</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\nifly\src\NifFile.cpp">
+      <Filter>Libraries\nifly\src</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\nifly\src\NifUtil.cpp">
+      <Filter>Libraries\nifly\src</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\nifly\src\Nodes.cpp">
+      <Filter>Libraries\nifly\src</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\nifly\src\Object3d.cpp">
+      <Filter>Libraries\nifly\src</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\nifly\src\Objects.cpp">
+      <Filter>Libraries\nifly\src</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\nifly\src\Particles.cpp">
+      <Filter>Libraries\nifly\src</Filter>
+    </ClCompile>
+    <ClCompile Include="lib\nifly\src\Shaders.cpp" />
+    <ClCompile Include="lib\nifly\src\Skin.cpp" />
+    <ClCompile Include="lib\SOIL2\image_DXT.c" />
+    <ClCompile Include="lib\SOIL2\image_helper.c" />
+    <ClCompile Include="lib\SOIL2\SOIL2.c" />
+    <ClCompile Include="lib\SOIL2\wfETC.c" />
+    <ClCompile Include="lib\TinyXML-2\tinyxml2.cpp">
+      <Filter>Libraries\TinyXML-2</Filter>
+    </ClCompile>
+    <ClCompile Include="src\components\LeveledListData.cpp">
+      <Filter>Components</Filter>
+    </ClCompile>
+    <ClCompile Include="src\components\SmpSimulator.cpp">
+      <Filter>Components</Filter>
+    </ClCompile>
+    <ClCompile Include="src\files\ESPReader.cpp">
+      <Filter>Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\files\MaterialFile.cpp">
+      <Filter>Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\files\ResourceLoader.cpp">
+      <Filter>Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\files\TriFile.cpp">
+      <Filter>Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\files\wxDDSImage.cpp">
+      <Filter>Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\program\LeveledListApp.cpp">
+      <Filter>Program</Filter>
+    </ClCompile>
+    <ClCompile Include="src\program\LeveledListPreviewer.cpp">
+      <Filter>Program</Filter>
+    </ClCompile>
+    <ClCompile Include="src\render\GLExtensions.cpp">
+      <Filter>Rendering</Filter>
+    </ClCompile>
+    <ClCompile Include="src\render\GLMaterial.cpp">
+      <Filter>Rendering</Filter>
+    </ClCompile>
+    <ClCompile Include="src\render\GLOffscreenBuffer.cpp">
+      <Filter>Rendering</Filter>
+    </ClCompile>
+    <ClCompile Include="src\render\GLShader.cpp">
+      <Filter>Rendering</Filter>
+    </ClCompile>
+    <ClCompile Include="src\render\GLSurface.cpp">
+      <Filter>Rendering</Filter>
+    </ClCompile>
+    <ClCompile Include="src\utils\ConfigurationManager.cpp">
+      <Filter>Utilities</Filter>
+    </ClCompile>
+    <ClCompile Include="src\utils\Log.cpp">
+      <Filter>Utilities</Filter>
+    </ClCompile>
+    <ClCompile Include="src\utils\PlatformUtil.cpp">
+      <Filter>Utilities</Filter>
+    </ClCompile>
+    <ClCompile Include="src\utils\StringStuff.cpp">
+      <Filter>Utilities</Filter>
+    </ClCompile>
+  </ItemGroup>
+</Project>

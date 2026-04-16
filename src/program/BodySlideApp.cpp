@@ -4502,6 +4502,8 @@ void BodySlideApp::ShowLeveledListPreviewer() {
 	}
 
 	llPreviewer = new LeveledListPreviewer(this);
+	llPreviewer->Bind(wxEVT_LEVELEDLIST_CLOSED, [this](wxCommandEvent&) { llPreviewer = nullptr; });
+	llPreviewer->Show();
 }
 
 void BodySlideFrame::OnChooseTargetGame(wxCommandEvent& event) {

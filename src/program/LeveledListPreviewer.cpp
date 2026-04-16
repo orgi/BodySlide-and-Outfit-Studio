@@ -18,6 +18,8 @@
 
 using namespace nifly;
 
+wxDEFINE_EVENT(wxEVT_LEVELEDLIST_CLOSED, wxCommandEvent);
+
 extern ConfigurationManager Config;
 
 // ---------------------------------------------------------------------------
@@ -41,9 +43,9 @@ wxEND_EVENT_TABLE()
 // Construction / destruction
 // ---------------------------------------------------------------------------
 
-LeveledListPreviewer::LeveledListPreviewer(BodySlideApp* app)
+LeveledListPreviewer::LeveledListPreviewer(wxEvtHandler* handler)
 	: wxFrame(nullptr, wxID_ANY, _("Leveled List Previewer"), wxDefaultPosition, wxDefaultSize)
-	, app(app)
+	, eventHandler(handler)
 	, smpTimer_(this, ID_SmpTimer) {
 	SetIcon(wxIcon(wxString::FromUTF8(Config["AppDir"]) + "/res/images/BodySlide.png", wxBITMAP_TYPE_PNG));
 
@@ -2034,8 +2036,10 @@ void LeveledListPreviewer::OnClose(wxCloseEvent& WXUNUSED(event)) {
 	StopSmpSimulation();
 
 	Destroy();
-	if (app)
-		app->LeveledListPreviewerClosed();
+	if (eventHandler) {
+		wxCommandEvent closeEvent(wxEVT_LEVELEDLIST_CLOSED);
+		eventHandler->ProcessEvent(closeEvent);
+	}
 }
 
 // ---------------------------------------------------------------------------

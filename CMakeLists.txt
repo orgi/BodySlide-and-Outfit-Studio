@@ -104,8 +104,19 @@ set(BSsources
 	src/ui/wxNormalsGenDlg.cpp
 	)
 
+set(LLsources
+	${commonsources}
+	src/files/wxDDSImage.cpp
+	src/files/ESPReader.cpp
+	src/components/LeveledListData.cpp
+	src/components/SmpSimulator.cpp
+	src/program/LeveledListApp.cpp
+	src/program/LeveledListPreviewer.cpp
+	)
+
 add_executable(OutfitStudio ${OSsources})
 add_executable(BodySlide ${BSsources})
+add_executable(LeveledListViewer ${LLsources})
 
 target_compile_definitions(OutfitStudio PRIVATE USE_FBXSDK)
 
@@ -115,6 +126,10 @@ target_include_directories(OutfitStudio SYSTEM PRIVATE
 	/usr/include/wine/windows
 	)
 target_include_directories(BodySlide SYSTEM PRIVATE
+	/usr/include/wine/windows
+	${BULLET_INCLUDE_DIRS}
+	)
+target_include_directories(LeveledListViewer SYSTEM PRIVATE
 	/usr/include/wine/windows
 	${BULLET_INCLUDE_DIRS}
 	)
@@ -130,6 +145,12 @@ target_include_directories(BodySlide PUBLIC
 	lib/nifly/external
 	lib/TinyXML-2
 	)
+target_include_directories(LeveledListViewer PUBLIC
+	lib/gli
+	lib/nifly/include
+	lib/nifly/external
+	lib/TinyXML-2
+	)
 
 target_link_libraries(OutfitStudio
 	${wxWidgets_LIBRARIES}
@@ -139,6 +160,14 @@ target_link_libraries(OutfitStudio
 	xml2)
 
 target_link_libraries(BodySlide
+	${wxWidgets_LIBRARIES}
+	${OPENGL_LIBRARIES}
+	${GLEW_LIBRARIES}
+	${BULLET_LIBRARIES}
+	xml2
+	z)
+
+target_link_libraries(LeveledListViewer
 	${wxWidgets_LIBRARIES}
 	${OPENGL_LIBRARIES}
 	${GLEW_LIBRARIES}
