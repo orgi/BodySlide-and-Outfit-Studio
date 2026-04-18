@@ -736,6 +736,13 @@ bool ESPReader::Load(const std::string& filepath, const std::set<std::string>& r
 	if (headerOut.result != ReadResult::Record || headerOut.record.type != "TES4")
 		return false;
 
+	// Extract HEDR (header data)
+	if (auto* hedr = headerOut.record.GetSubrecord("HEDR")) {
+		if (hedr->data.size() >= 12) {
+			nextObjectId = ReadLE<uint32_t>(hedr->data.data() + 8);
+		}
+	}
+
 	// Extract master list from TES4 header
 	for (auto* mast : headerOut.record.GetSubrecords("MAST")) {
 		masters.push_back(ReadString(mast->data));
