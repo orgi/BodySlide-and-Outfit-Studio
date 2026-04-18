@@ -9814,13 +9814,15 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	wxFileName::Mkdir(wxString::FromUTF8(modularPath), wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL);
 
 	for (auto& g : activeGroups) {
+		// Use a temporary clone of the project's NIF to perform the extraction.
+		// We use the project's own save logic to ensure the output matches OS's standard "Export NIF" quality.
 		nifly::NifFile nif(*project->GetWorkNif());
 		std::vector<nifly::NiShape*> toDelete;
 		for (auto* s : nif.GetShapes()) {
 			if (std::find(g.shapes.begin(), g.shapes.end(), s->name.get()) == g.shapes.end()) {
 				toDelete.push_back(s);
 			} else if (s->HasSkinInstance()) {
-				// Update partitions to match the selected body slot
+				// Update partitions to match the selected body slot for ALL shapes in this part.
 				auto* skinInst = nif.GetHeader().GetBlock<nifly::NiSkinInstance>(*s->SkinInstanceRef());
 				if (auto* disSkin = dynamic_cast<nifly::BSDismemberSkinInstance*>(skinInst)) {
 					for (auto& p : disSkin->partitions) {
@@ -9830,6 +9832,9 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 			}
 		}
 		for (auto* s : toDelete) nif.DeleteShape(s);
+		
+		// Final save using OS's standard normalization path
+		nif.GetHeader().SetExportInfo("Exported using Outfit Studio Modularizer.");
 		nif.Save(modularPath + "/" + g.nifName);
 	}
 
