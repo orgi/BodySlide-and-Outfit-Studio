@@ -9800,7 +9800,19 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	for (auto& g : activeGroups) {
 		nifly::NifFile nif(*project->GetWorkNif());
 		std::vector<nifly::NiShape*> toDelete;
-		for (auto* s : nif.GetShapes()) if (std::find(g.shapes.begin(), g.shapes.end(), s->name.get()) == g.shapes.end()) toDelete.push_back(s);
+		for (auto* s : nif.GetShapes()) {
+			if (std::find(g.shapes.begin(), g.shapes.end(), s->name.get()) == g.shapes.end()) {
+				toDelete.push_back(s);
+			} else if (s->HasSkinInstance()) {
+				// Update partitions to match the selected body slot
+				auto* skinInst = nif.GetHeader().GetBlock<nifly::NiSkinInstance>(*s->SkinInstanceRef());
+				if (auto* disSkin = dynamic_cast<nifly::BSDismemberSkinInstance*>(skinInst)) {
+					for (auto& p : disSkin->partitions) {
+						p.partID = (uint16_t)g.slot;
+					}
+				}
+			}
+		}
 		for (auto* s : toDelete) nif.DeleteShape(s);
 		nif.Save(modularPath + "/" + g.nifName);
 	}
