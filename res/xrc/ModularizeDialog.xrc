@@ -12,7 +12,7 @@
 				<flag>wxALL|wxEXPAND</flag>
 				<border>10</border>
 				<object class="wxFlexGridSizer">
-					<rows>3</rows>
+					<rows>4</rows>
 					<cols>2</cols>
 					<vgap>8</vgap>
 					<hgap>10</hgap>
@@ -38,7 +38,7 @@
 						<flag>wxALL|wxALIGN_CENTER_VERTICAL</flag>
 						<border>5</border>
 						<object class="wxStaticText">
-							<label>Remaining:</label>
+							<label>Remaining Name:</label>
 						</object>
 					</object>
 					<object class="sizeritem">
@@ -55,16 +55,16 @@
 						<flag>wxALL|wxALIGN_CENTER_VERTICAL</flag>
 						<border>5</border>
 						<object class="wxStaticText">
-							<label>Default Slot:</label>
+							<label>Remaining Slot:</label>
 						</object>
 					</object>
 					<object class="sizeritem">
 						<option>1</option>
 						<flag>wxALL|wxEXPAND</flag>
 						<border>5</border>
-						<object class="wxTextCtrl" name="txtDefaultSlot">
-							<value>52</value>
-							<tooltip>The default body slot for modular parts.</tooltip>
+						<object class="wxTextCtrl" name="txtRemainingSlot">
+							<value>32</value>
+							<tooltip>The body slot for the remaining (base) parts.</tooltip>
 						</object>
 					</object>
 				</object>

@@ -183,11 +183,14 @@ public:
 	// Handles both 4-byte lstring indices (localized ESPs) and inline strings.
 	std::string ResolveFullName(const Record& rec) const;
 
+	uint32_t GetNextObjectId() const { return nextObjectId; }
+
 private:
 	std::unordered_map<uint32_t, Record> records;
 	std::unordered_map<std::string, std::vector<uint32_t>> recordsByType; // type -> formId list
 	std::vector<std::string> masters;
 	std::string filename;
+	uint32_t nextObjectId = 0x800;
 
 	bool localized = false;
 	std::unordered_map<uint32_t, std::string> stringTable; // lstring id → UTF-8 text

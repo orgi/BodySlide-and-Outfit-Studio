@@ -9708,6 +9708,25 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		txtPrefix->SetValue(wxString::FromUTF8(folderPath + " Modular"));
 	}
 
+	// Detect current slot from first available shape
+	uint32_t currentProjectSlot = 32;
+	if (project && project->GetWorkNif()) {
+		std::vector<std::string> shapes = GetShapeList();
+		if (!shapes.empty()) {
+			auto* shape = project->GetWorkNif()->FindBlockByName<nifly::NiShape>(shapes[0]);
+			if (shape) {
+				nifly::NiVector<nifly::BSDismemberSkinInstance::PartitionInfo> partInfo;
+				std::vector<int> triParts;
+				if (project->GetWorkNif()->GetShapePartitions(shape, partInfo, triParts) && !partInfo.empty()) {
+					currentProjectSlot = partInfo[0].partID;
+				}
+			}
+		}
+	}
+	if (auto* txtRemSlot = XRCCTRL(dlg, "txtRemainingSlot", wxTextCtrl)) {
+		txtRemSlot->SetValue(wxString::Format("%u", currentProjectSlot));
+	}
+
 	// 2. Setup Scrolled Window
 	wxScrolledWindow* scroll = XRCCTRL(dlg, "scrollShapes", wxScrolledWindow);
 	wxBoxSizer* scrollSizer = new wxBoxSizer(wxVERTICAL);
@@ -9715,9 +9734,6 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	std::vector<ShapeCtrl> activeCtrls;
 
 	uint32_t currentSlot = 52;
-	if (auto* txtDefSlot = XRCCTRL(dlg, "txtDefaultSlot", wxTextCtrl)) {
-		try { currentSlot = std::stoul(txtDefSlot->GetValue().ToStdString()); } catch(...) {}
-	}
 
 	for (size_t i = 0; i < selections.GetCount(); ++i) {
 		ShapeItemData* data = dynamic_cast<ShapeItemData*>(outfitShapes->GetItemData(selections[i]));
@@ -9750,9 +9766,9 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	// 3. Process Input
 	std::string basePrefix = XRCCTRL(dlg, "txtBasePrefix", wxTextCtrl)->GetValue().ToStdString();
 	std::string remainingPartName = XRCCTRL(dlg, "txtRemainingName", wxTextCtrl)->GetValue().ToStdString();
-	uint32_t defaultSlot = 52;
-	if (auto* txtDefSlot = XRCCTRL(dlg, "txtDefaultSlot", wxTextCtrl)) {
-		try { defaultSlot = std::stoul(txtDefSlot->GetValue().ToStdString()); } catch(...) {}
+	uint32_t remainingSlot = 32;
+	if (auto* txtRemSlot = XRCCTRL(dlg, "txtRemainingSlot", wxTextCtrl)) {
+		try { remainingSlot = std::stoul(txtRemSlot->GetValue().ToStdString()); } catch(...) {}
 	}
 
 	struct ModularGroup { std::string partName; std::string fullName; std::string nifName; std::vector<std::string> shapes; uint32_t slot; };
@@ -9769,7 +9785,7 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		if (groupsMap.find(pName) == groupsMap.end()) {
 			ModularGroup g; g.partName = pName; g.fullName = basePrefix + " " + pName; 
 			g.nifName = sanitize(pName) + ".nif"; 
-			try { g.slot = std::stoul(ctrl.slotText->GetValue().ToStdString()); } catch(...) { g.slot = defaultSlot; }
+			try { g.slot = std::stoul(ctrl.slotText->GetValue().ToStdString()); } catch(...) { g.slot = 52; }
 			groupsMap[pName] = g;
 		}
 		groupsMap[pName].shapes.push_back(ctrl.originalName);
@@ -9786,7 +9802,7 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	std::vector<ModularGroup> activeGroups;
 	if (!unselectedShapes.empty()) {
 		ModularGroup g; g.partName = remainingPartName; g.fullName = basePrefix + " " + remainingPartName; 
-		g.nifName = sanitize(remainingPartName) + ".nif"; g.shapes = unselectedShapes; g.slot = 32;
+		g.nifName = sanitize(remainingPartName) + ".nif"; g.shapes = unselectedShapes; g.slot = remainingSlot;
 		activeGroups.push_back(g);
 	}
 	for (auto const& [name, g] : groupsMap) activeGroups.push_back(g);
@@ -9798,10 +9814,27 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	wxFileName::Mkdir(wxString::FromUTF8(modularPath), wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL);
 
 	for (auto& g : activeGroups) {
+		// Use a temporary clone of the project's NIF to perform the extraction.
+		// We use the project's own save logic to ensure the output matches OS's standard "Export NIF" quality.
 		nifly::NifFile nif(*project->GetWorkNif());
 		std::vector<nifly::NiShape*> toDelete;
-		for (auto* s : nif.GetShapes()) if (std::find(g.shapes.begin(), g.shapes.end(), s->name.get()) == g.shapes.end()) toDelete.push_back(s);
+		for (auto* s : nif.GetShapes()) {
+			if (std::find(g.shapes.begin(), g.shapes.end(), s->name.get()) == g.shapes.end()) {
+				toDelete.push_back(s);
+			} else if (s->HasSkinInstance()) {
+				// Update partitions to match the selected body slot for ALL shapes in this part.
+				auto* skinInst = nif.GetHeader().GetBlock<nifly::NiSkinInstance>(*s->SkinInstanceRef());
+				if (auto* disSkin = dynamic_cast<nifly::BSDismemberSkinInstance*>(skinInst)) {
+					for (auto& p : disSkin->partitions) {
+						p.partID = (uint16_t)g.slot;
+					}
+				}
+			}
+		}
 		for (auto* s : toDelete) nif.DeleteShape(s);
+		
+		// Final save using OS's standard normalization path
+		nif.GetHeader().SetExportInfo("Exported using Outfit Studio Modularizer.");
 		nif.Save(modularPath + "/" + g.nifName);
 	}
 
@@ -9873,16 +9906,16 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	std::string t2 = norm(project->mBaseFile.ToStdString());
 	
 	for (const auto& espFile : espFiles) {
-		std::string espPath = espFile.ToStdString();
-		wxLogMessage("Scanning for master in: %s", espPath);
+		std::string espName = wxFileName(espFile).GetFullName().ToStdString();
+		wxLogMessage("Scanning for master in: %s", espName);
 		esp::ESPReader reader; 
 		try {
-			if (reader.Load(espPath, {"ARMO", "ARMA"})) {
+			if (reader.Load(espFile.ToStdString(), {"ARMO", "ARMA"})) {
 				auto addons = reader.GetArmorAddons();
 				for (const auto& arma : addons) {
 					std::string mF = norm(arma.modelFemale), mM = norm(arma.modelMale);
 					if (mF == t1 || mM == t1 || mF == t1_0 || mM == t1_0 || mF == t1_1 || mM == t1_1 || mF == t2 || mM == t2) {
-						masterEsp = wxFileName(espFile).GetFullName().ToStdString(); originalArma = arma;
+						masterEsp = espName; originalArma = arma;
 						wxLogMessage("  Match found! Master ESP: %s. Looking for ARMO...", masterEsp);
 						auto armors = reader.GetArmors();
 						for (const auto& armo : armors) {
@@ -9896,7 +9929,7 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 				}
 			}
 		} catch (const std::exception& e) {
-			wxLogMessage("  Exception reading %s: %s", espPath, e.what());
+			wxLogMessage("  Exception reading %s: %s", espName, e.what());
 		}
 		if (!masterEsp.empty()) break;
 	}
@@ -9904,7 +9937,10 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	if (!masterEsp.empty()) {
 		wxLogMessage("Modularize: Phase 3 (ESP Patching) started.");
 		std::string patchName = masterEsp.substr(0, masterEsp.find_last_of('.')) + "_modular.esp";
-		esp::ESPWriter writer; if (wxFileName::FileExists(gameDataPath + "/" + patchName)) writer.Load(gameDataPath + "/" + patchName);
+		
+		esp::ESPWriter writer; 
+		// Foundation approach: load the entire master mod as base
+		writer.Load(gameDataPath + "/" + masterEsp);
 		
 		auto getP = [&](const std::string& f) {
 			std::string p = project->mGamePath.ToStdString() + "/" + f; std::replace(p.begin(), p.end(), '/', '\\');
@@ -9926,7 +9962,7 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		const auto* srcArmaRec = cloneSource.GetRecordByFormId(originalArma.formId);
 		const auto* srcArmoRec = cloneSource.GetRecordByFormId(originalArmo.formId);
 
-		wxLogMessage("Modularize: Starting record cloning loop...");
+		wxLogMessage("Modularize: Starting record update/cloning loop...");
 		for (auto const& g : activeGroups) {
 			uint32_t aFid = 0;
 			uint32_t slotMask = 0;
@@ -9934,14 +9970,17 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 				slotMask = (1 << (g.slot - 30));
 			}
 
+			bool isBase = (g.partName == remainingPartName);
+
 			if (srcArmaRec) {
-				esp::Record newArma = esp::ESPWriter::CloneRecord(*srcArmaRec, 0);
+				// For base part, use the original FormID to replace it. For others, create new.
+				esp::Record newArma = esp::ESPWriter::CloneRecord(*srcArmaRec, isBase ? originalArma.formId : 0);
 				for (auto& sr : newArma.subrecords) {
 					if (sr.type == "EDID") { 
 						std::string s = sanitize(g.fullName + "_AA");
 						sr.data.assign(s.begin(), s.end()); sr.data.push_back('\0'); 
 					}
-					else if (sr.type == "MOD2" || sr.type == "MODL") { 
+					else if (sr.type == "MOD2" || sr.type == "MOD3") { // worn models
 						std::string p = getP(g.nifName); 
 						sr.data.assign(p.begin(), p.end()); sr.data.push_back('\0'); 
 					}
@@ -9952,7 +9991,8 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 				aFid = writer.AddRecord(newArma);
 			}
 			if (srcArmoRec) {
-				esp::Record newArmo = esp::ESPWriter::CloneRecord(*srcArmoRec, 0);
+				// For base part, use the original FormID to replace it.
+				esp::Record newArmo = esp::ESPWriter::CloneRecord(*srcArmoRec, isBase ? originalArmo.formId : 0);
 				for (auto& sr : newArmo.subrecords) {
 					if (sr.type == "EDID") { 
 						std::string s = sanitize(g.fullName);
@@ -9963,6 +10003,10 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 					}
 					else if (sr.type == "MODL") { 
 						sr.data.clear(); sr.data.insert(sr.data.end(), (uint8_t*)&aFid, (uint8_t*)&aFid + 4); 
+					}
+					else if (sr.type == "MOD2" || sr.type == "MOD4") { // world models
+						std::string p = getP(g.nifName); 
+						sr.data.assign(p.begin(), p.end()); sr.data.push_back('\0'); 
 					}
 					else if (sr.type == "BOD2" || sr.type == "BODT") { 
 						if (sr.data.size() >= 4) memcpy(sr.data.data(), &slotMask, 4); 
