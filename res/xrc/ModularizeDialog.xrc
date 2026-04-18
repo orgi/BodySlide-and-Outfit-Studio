@@ -11,12 +11,8 @@
 				<option>0</option>
 				<flag>wxALL|wxEXPAND</flag>
 				<border>10</border>
-				<object class="wxFlexGridSizer">
-					<rows>4</rows>
-					<cols>2</cols>
-					<vgap>8</vgap>
-					<hgap>10</hgap>
-					<growablecols>1</growablecols>
+				<object class="wxBoxSizer">
+					<orient>wxHORIZONTAL</orient>
 					<object class="sizeritem">
 						<option>0</option>
 						<flag>wxALL|wxALIGN_CENTER_VERTICAL</flag>
@@ -31,75 +27,6 @@
 						<border>5</border>
 						<object class="wxTextCtrl" name="txtBasePrefix">
 							<tooltip>The common prefix for all modular parts.</tooltip>
-						</object>
-					</object>
-					<object class="sizeritem">
-						<option>0</option>
-						<flag>wxALL|wxALIGN_CENTER_VERTICAL</flag>
-						<border>5</border>
-						<object class="wxStaticText">
-							<label>Remaining Name:</label>
-						</object>
-					</object>
-					<object class="sizeritem">
-						<option>1</option>
-						<flag>wxALL|wxEXPAND</flag>
-						<border>5</border>
-						<object class="wxTextCtrl" name="txtRemainingName">
-							<value>Base</value>
-							<tooltip>The part name for all shapes NOT selected.</tooltip>
-						</object>
-					</object>
-					<object class="sizeritem">
-						<option>0</option>
-						<flag>wxALL|wxALIGN_CENTER_VERTICAL</flag>
-						<border>5</border>
-						<object class="wxStaticText">
-							<label>Remaining Slot:</label>
-						</object>
-					</object>
-					<object class="sizeritem">
-						<option>1</option>
-						<flag>wxALL|wxEXPAND</flag>
-						<border>5</border>
-						<object class="wxTextCtrl" name="txtRemainingSlot">
-							<value>32</value>
-							<tooltip>The body slot for the remaining (base) parts.</tooltip>
-						</object>
-					</object>
-				</object>
-			</object>
-			<object class="sizeritem">
-				<option>0</option>
-				<flag>wxLEFT|wxRIGHT|wxTOP|wxEXPAND</flag>
-				<border>10</border>
-				<object class="wxBoxSizer">
-					<orient>wxHORIZONTAL</orient>
-					<object class="sizeritem">
-						<option>2</option>
-						<flag>wxALL</flag>
-						<border>5</border>
-						<object class="wxStaticText">
-							<label>Shape Name</label>
-							<font><weight>bold</weight></font>
-						</object>
-					</object>
-					<object class="sizeritem">
-						<option>3</option>
-						<flag>wxALL</flag>
-						<border>5</border>
-						<object class="wxStaticText">
-							<label>Assign to Part Name</label>
-							<font><weight>bold</weight></font>
-						</object>
-					</object>
-					<object class="sizeritem">
-						<option>1</option>
-						<flag>wxALL</flag>
-						<border>5</border>
-						<object class="wxStaticText">
-							<label>Slot</label>
-							<font><weight>bold</weight></font>
 						</object>
 					</object>
 				</object>
