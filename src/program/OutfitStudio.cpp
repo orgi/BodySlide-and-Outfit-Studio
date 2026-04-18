@@ -9708,6 +9708,25 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		txtPrefix->SetValue(wxString::FromUTF8(folderPath + " Modular"));
 	}
 
+	// Detect current slot from first available shape
+	uint32_t currentProjectSlot = 32;
+	if (project && project->GetWorkNif()) {
+		std::vector<std::string> shapes = GetShapeList();
+		if (!shapes.empty()) {
+			auto* shape = project->GetWorkNif()->FindBlockByName<nifly::NiShape>(shapes[0]);
+			if (shape) {
+				nifly::NiVector<nifly::BSDismemberSkinInstance::PartitionInfo> partInfo;
+				std::vector<int> triParts;
+				if (project->GetWorkNif()->GetShapePartitions(shape, partInfo, triParts) && !partInfo.empty()) {
+					currentProjectSlot = partInfo[0].partID;
+				}
+			}
+		}
+	}
+	if (auto* txtRemSlot = XRCCTRL(dlg, "txtRemainingSlot", wxTextCtrl)) {
+		txtRemSlot->SetValue(wxString::Format("%u", currentProjectSlot));
+	}
+
 	// 2. Setup Scrolled Window
 	wxScrolledWindow* scroll = XRCCTRL(dlg, "scrollShapes", wxScrolledWindow);
 	wxBoxSizer* scrollSizer = new wxBoxSizer(wxVERTICAL);
@@ -9715,9 +9734,6 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	std::vector<ShapeCtrl> activeCtrls;
 
 	uint32_t currentSlot = 52;
-	if (auto* txtDefSlot = XRCCTRL(dlg, "txtDefaultSlot", wxTextCtrl)) {
-		try { currentSlot = std::stoul(txtDefSlot->GetValue().ToStdString()); } catch(...) {}
-	}
 
 	for (size_t i = 0; i < selections.GetCount(); ++i) {
 		ShapeItemData* data = dynamic_cast<ShapeItemData*>(outfitShapes->GetItemData(selections[i]));
@@ -9750,9 +9766,9 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	// 3. Process Input
 	std::string basePrefix = XRCCTRL(dlg, "txtBasePrefix", wxTextCtrl)->GetValue().ToStdString();
 	std::string remainingPartName = XRCCTRL(dlg, "txtRemainingName", wxTextCtrl)->GetValue().ToStdString();
-	uint32_t defaultSlot = 52;
-	if (auto* txtDefSlot = XRCCTRL(dlg, "txtDefaultSlot", wxTextCtrl)) {
-		try { defaultSlot = std::stoul(txtDefSlot->GetValue().ToStdString()); } catch(...) {}
+	uint32_t remainingSlot = 32;
+	if (auto* txtRemSlot = XRCCTRL(dlg, "txtRemainingSlot", wxTextCtrl)) {
+		try { remainingSlot = std::stoul(txtRemSlot->GetValue().ToStdString()); } catch(...) {}
 	}
 
 	struct ModularGroup { std::string partName; std::string fullName; std::string nifName; std::vector<std::string> shapes; uint32_t slot; };
@@ -9769,7 +9785,7 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		if (groupsMap.find(pName) == groupsMap.end()) {
 			ModularGroup g; g.partName = pName; g.fullName = basePrefix + " " + pName; 
 			g.nifName = sanitize(pName) + ".nif"; 
-			try { g.slot = std::stoul(ctrl.slotText->GetValue().ToStdString()); } catch(...) { g.slot = defaultSlot; }
+			try { g.slot = std::stoul(ctrl.slotText->GetValue().ToStdString()); } catch(...) { g.slot = 52; }
 			groupsMap[pName] = g;
 		}
 		groupsMap[pName].shapes.push_back(ctrl.originalName);
@@ -9786,7 +9802,7 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	std::vector<ModularGroup> activeGroups;
 	if (!unselectedShapes.empty()) {
 		ModularGroup g; g.partName = remainingPartName; g.fullName = basePrefix + " " + remainingPartName; 
-		g.nifName = sanitize(remainingPartName) + ".nif"; g.shapes = unselectedShapes; g.slot = 32;
+		g.nifName = sanitize(remainingPartName) + ".nif"; g.shapes = unselectedShapes; g.slot = remainingSlot;
 		activeGroups.push_back(g);
 	}
 	for (auto const& [name, g] : groupsMap) activeGroups.push_back(g);
