@@ -451,6 +451,15 @@
 													</object>
 													<object class="sizeritem">
 														<option>0</option>
+														<flag>wxALL|wxEXPAND</flag>
+														<border>2</border>
+														<object class="wxButton" name="btnModularize">
+															<label>Modularize...</label>
+															<tooltip>Extract selected shapes into separate modular parts.</tooltip>
+														</object>
+													</object>
+													<object class="sizeritem">
+														<option>0</option>
 														<flag>wxEXPAND</flag>
 														<border>0</border>
 														<object class="unknown" name="bonesFilter" />

@@ -53,6 +53,8 @@ set(commonsources
 	src/files/MaterialFile.cpp
 	src/files/ResourceLoader.cpp
 	src/files/TriFile.cpp
+	src/files/ESPWriter.cpp
+	src/files/ESPReader.cpp
 	src/program/GroupManager.cpp
 	src/program/PresetSaveDialog.cpp
 	src/render/GLExtensions.cpp
@@ -93,7 +95,6 @@ set(OSsources
 set(BSsources
 	${commonsources}
 	src/files/wxDDSImage.cpp
-	src/files/ESPReader.cpp
 	src/components/BuildSelection.cpp
 	src/components/LeveledListData.cpp
 	src/components/SmpSimulator.cpp
@@ -107,7 +108,6 @@ set(BSsources
 set(LLsources
 	${commonsources}
 	src/files/wxDDSImage.cpp
-	src/files/ESPReader.cpp
 	src/components/LeveledListData.cpp
 	src/components/SmpSimulator.cpp
 	src/program/LeveledListApp.cpp
@@ -157,7 +157,8 @@ target_link_libraries(OutfitStudio
 	${OPENGL_LIBRARIES}
 	${GLEW_LIBRARIES}
 	${fbxsdk}
-	xml2)
+	xml2
+	z)
 
 target_link_libraries(BodySlide
 	${wxWidgets_LIBRARIES}

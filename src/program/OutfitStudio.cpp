@@ -28,6 +28,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "PresetSaveDialog.h"
 #include "ShapeProperties.h"
 #include "SliderDataImportDialog.h"
+#include "../files/ESPWriter.h"
+#include <wx/dir.h>
+#include <wx/filename.h>
 
 #include <sstream>
 #include <wx/debugrpt.h>
@@ -1025,6 +1028,7 @@ OutfitStudioFrame::OutfitStudioFrame(const wxPoint& pos, const wxSize& size) {
 	xrc->Load(wxString::FromUTF8(Config["AppDir"]) + "/res/xrc/Slider.xrc");
 	xrc->Load(wxString::FromUTF8(Config["AppDir"]) + "/res/xrc/Skeleton.xrc");
 	xrc->Load(wxString::FromUTF8(Config["AppDir"]) + "/res/xrc/Settings.xrc");
+	xrc->Load(wxString::FromUTF8(Config["AppDir"]) + "/res/xrc/ModularizeDialog.xrc");
 
 	const std::array<int, 3> statusWidths = {-1, 400, 100};
 	statusBar = (wxStatusBar*)FindWindowByName("statusBar");
@@ -1080,6 +1084,10 @@ OutfitStudioFrame::OutfitStudioFrame(const wxPoint& pos, const wxSize& size) {
 	lightsTabButton = (wxStateButton*)FindWindowByName("lightsTabButton");
 	masksPane = dynamic_cast<wxCollapsiblePane*>(FindWindowByName("masksPane"));
 	posePane = dynamic_cast<wxCollapsiblePane*>(FindWindowByName("posePane"));
+
+	if (auto* btnMod = FindWindowByName("btnModularize")) {
+		btnMod->Bind(wxEVT_BUTTON, &OutfitStudioFrame::OnModularizeShapes, this);
+	}
 
 	if (meshTabButton) {
 		meshTabButton->SetCheck();
@@ -6906,6 +6914,7 @@ void OutfitStudioFrame::OnTabButtonClick(wxCommandEvent& event) {
 		lightsTabButton->SetCheck(false);
 
 		masksPane->Show();
+		if (auto* btn = FindWindowByName("btnModularize")) btn->Show();
 
 		SetNoSubMeshes();
 		SelectTool(glView->GetLastTool());
@@ -6914,6 +6923,7 @@ void OutfitStudioFrame::OnTabButtonClick(wxCommandEvent& event) {
 		currentTabButton = boneTabButton;
 
 		outfitShapes->Hide();
+		if (auto* btn = FindWindowByName("btnModularize")) btn->Hide();
 		colorSettings->Hide();
 		segmentTree->Hide();
 		partitionTree->Hide();
@@ -6997,6 +7007,7 @@ void OutfitStudioFrame::OnTabButtonClick(wxCommandEvent& event) {
 		currentTabButton = colorsTabButton;
 
 		outfitShapes->Hide();
+		if (auto* btn = FindWindowByName("btnModularize")) btn->Hide();
 		outfitBones->Hide();
 		segmentTree->Hide();
 		partitionTree->Hide();
@@ -7060,6 +7071,7 @@ void OutfitStudioFrame::OnTabButtonClick(wxCommandEvent& event) {
 		currentTabButton = segmentTabButton;
 
 		outfitShapes->Hide();
+		if (auto* btn = FindWindowByName("btnModularize")) btn->Hide();
 		outfitBones->Hide();
 		colorSettings->Hide();
 		partitionTree->Hide();
@@ -7137,6 +7149,7 @@ void OutfitStudioFrame::OnTabButtonClick(wxCommandEvent& event) {
 		currentTabButton = partitionTabButton;
 
 		outfitShapes->Hide();
+		if (auto* btn = FindWindowByName("btnModularize")) btn->Hide();
 		outfitBones->Hide();
 		colorSettings->Hide();
 		segmentTree->Hide();
@@ -7204,6 +7217,7 @@ void OutfitStudioFrame::OnTabButtonClick(wxCommandEvent& event) {
 		currentTabButton = lightsTabButton;
 
 		outfitShapes->Hide();
+		if (auto* btn = FindWindowByName("btnModularize")) btn->Hide();
 		outfitBones->Hide();
 		colorSettings->Hide();
 		segmentTree->Hide();
@@ -9655,6 +9669,310 @@ void OutfitStudioFrame::OnSeparateVerts(wxCommandEvent& WXUNUSED(event)) {
 
 	glView->UnstashMasks(maskStash);
 	ApplySliders();
+}
+
+void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
+	wxLogMessage("OnModularizeShapes called.");
+	if (!project || !project->GetWorkNif()) { 
+		wxMessageBox(_("No project or NIF loaded."), _("Error"), wxICON_ERROR); 
+		return; 
+	}
+	if (bEditSlider) { 
+		wxMessageBox(_("You're currently editing slider data. Please exit slider edit mode."), _("Warning")); 
+		return; 
+	}
+
+	wxArrayTreeItemIds selections;
+	outfitShapes->GetSelections(selections);
+	if (selections.GetCount() == 0) { 
+		wxMessageBox(_("No shapes selected! Please select one or more shapes in the Meshes tab to modularize."), _("Info"), wxICON_INFORMATION); 
+		return; 
+	}
+
+	wxDialog dlg;
+	if (!wxXmlResource::Get()->LoadDialog(&dlg, this, "dlgModularize")) {
+		wxLogError("Failed to load dlgModularize from XRC. Path: %s/res/xrc/ModularizeDialog.xrc", Config["AppDir"]);
+		wxMessageBox(_("Failed to load modularization dialog!"), _("Error"), wxICON_ERROR);
+		return;
+	}
+
+	// 1. Setup Prefix
+	std::string folderPath = project->mDataDir.ToStdString();
+	std::replace(folderPath.begin(), folderPath.end(), '\\', ' ');
+	std::replace(folderPath.begin(), folderPath.end(), '/', ' ');
+	while (folderPath.find("  ") != std::string::npos) folderPath.replace(folderPath.find("  "), 2, " ");
+	folderPath.erase(0, folderPath.find_first_not_of(' '));
+	folderPath.erase(folderPath.find_last_not_of(' ') + 1);
+
+	if (auto* txtPrefix = XRCCTRL(dlg, "txtBasePrefix", wxTextCtrl)) {
+		txtPrefix->SetValue(wxString::FromUTF8(folderPath + " Modular"));
+	}
+
+	// 2. Setup Scrolled Window
+	wxScrolledWindow* scroll = XRCCTRL(dlg, "scrollShapes", wxScrolledWindow);
+	wxBoxSizer* scrollSizer = new wxBoxSizer(wxVERTICAL);
+	struct ShapeCtrl { std::string originalName; wxTextCtrl* partText; wxTextCtrl* slotText; };
+	std::vector<ShapeCtrl> activeCtrls;
+
+	uint32_t currentSlot = 52;
+	if (auto* txtDefSlot = XRCCTRL(dlg, "txtDefaultSlot", wxTextCtrl)) {
+		try { currentSlot = std::stoul(txtDefSlot->GetValue().ToStdString()); } catch(...) {}
+	}
+
+	for (size_t i = 0; i < selections.GetCount(); ++i) {
+		ShapeItemData* data = dynamic_cast<ShapeItemData*>(outfitShapes->GetItemData(selections[i]));
+		if (data && data->GetShape()) {
+			std::string sName = data->GetShape()->name.get();
+			wxBoxSizer* row = new wxBoxSizer(wxHORIZONTAL);
+			
+			wxStaticText* label = new wxStaticText(scroll, wxID_ANY, wxString::FromUTF8(sName));
+			row->Add(label, 2, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+			
+			wxTextCtrl* pTxt = new wxTextCtrl(scroll, wxID_ANY, wxString::FromUTF8(sName));
+			row->Add(pTxt, 3, wxALL | wxEXPAND, 5);
+			
+			wxTextCtrl* sTxt = new wxTextCtrl(scroll, wxID_ANY, wxString::Format("%u", currentSlot++));
+			row->Add(sTxt, 1, wxALL | wxEXPAND, 5);
+			
+			scrollSizer->Add(row, 0, wxEXPAND | wxBOTTOM, 2);
+			activeCtrls.push_back({sName, pTxt, sTxt});
+		}
+	}
+	scroll->SetSizer(scrollSizer);
+	scroll->SetScrollRate(0, 20);
+	
+	dlg.SetSize(dlg.FromDIP(wxSize(900, 800)));
+	dlg.Layout();
+	scroll->FitInside();
+
+	if (dlg.ShowModal() != wxID_OK) return;
+
+	// 3. Process Input
+	std::string basePrefix = XRCCTRL(dlg, "txtBasePrefix", wxTextCtrl)->GetValue().ToStdString();
+	std::string remainingPartName = XRCCTRL(dlg, "txtRemainingName", wxTextCtrl)->GetValue().ToStdString();
+	uint32_t defaultSlot = 52;
+	if (auto* txtDefSlot = XRCCTRL(dlg, "txtDefaultSlot", wxTextCtrl)) {
+		try { defaultSlot = std::stoul(txtDefSlot->GetValue().ToStdString()); } catch(...) {}
+	}
+
+	struct ModularGroup { std::string partName; std::string fullName; std::string nifName; std::vector<std::string> shapes; uint32_t slot; };
+	std::map<std::string, ModularGroup> groupsMap;
+
+	auto sanitize = [](const std::string& s) {
+		std::string n = s; std::replace(n.begin(), n.end(), ' ', '_');
+		n.erase(std::remove_if(n.begin(), n.end(), [](char c) { return c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|'; }), n.end());
+		return n;
+	};
+
+	for (auto& ctrl : activeCtrls) {
+		std::string pName = ctrl.partText->GetValue().ToStdString();
+		if (groupsMap.find(pName) == groupsMap.end()) {
+			ModularGroup g; g.partName = pName; g.fullName = basePrefix + " " + pName; 
+			g.nifName = sanitize(pName) + ".nif"; 
+			try { g.slot = std::stoul(ctrl.slotText->GetValue().ToStdString()); } catch(...) { g.slot = defaultSlot; }
+			groupsMap[pName] = g;
+		}
+		groupsMap[pName].shapes.push_back(ctrl.originalName);
+	}
+
+	std::vector<std::string> allShapes = GetShapeList();
+	std::vector<std::string> unselectedShapes;
+	for (const auto& s : allShapes) {
+		bool isSelected = false;
+		for (auto& ctrl : activeCtrls) if (ctrl.originalName == s) { isSelected = true; break; }
+		if (!isSelected) unselectedShapes.push_back(s);
+	}
+
+	std::vector<ModularGroup> activeGroups;
+	if (!unselectedShapes.empty()) {
+		ModularGroup g; g.partName = remainingPartName; g.fullName = basePrefix + " " + remainingPartName; 
+		g.nifName = sanitize(remainingPartName) + ".nif"; g.shapes = unselectedShapes; g.slot = 32;
+		activeGroups.push_back(g);
+	}
+	for (auto const& [name, g] : groupsMap) activeGroups.push_back(g);
+
+	// --- Phase 1: NIF Extraction ---
+	std::string projectPath = GetProjectPath();
+	std::string dataDir = project->mDataDir.ToStdString();
+	std::string modularPath = projectPath + "/ShapeData/" + dataDir + "/modular";
+	wxFileName::Mkdir(wxString::FromUTF8(modularPath), wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL);
+
+	for (auto& g : activeGroups) {
+		nifly::NifFile nif(*project->GetWorkNif());
+		std::vector<nifly::NiShape*> toDelete;
+		for (auto* s : nif.GetShapes()) if (std::find(g.shapes.begin(), g.shapes.end(), s->name.get()) == g.shapes.end()) toDelete.push_back(s);
+		for (auto* s : toDelete) nif.DeleteShape(s);
+		nif.Save(modularPath + "/" + g.nifName);
+	}
+
+	// --- Phase 2: XML Generation (.osp) ---
+	std::string ospPath = projectPath + "/SliderSets/" + project->mFileName.BeforeLast('.').AfterLast('/').AfterLast('\\').ToStdString() + "_modular.osp";
+	SliderSetFile ospFile;
+	if (wxFileName::FileExists(ospPath)) ospFile.Open(ospPath); else ospFile.New(ospPath);
+
+	for (auto& g : activeGroups) {
+		SliderSet ss = project->activeSet;
+		ss.SetName(g.fullName); 
+		std::string outName = g.nifName;
+		if (outName.size() > 4 && outName.substr(outName.size() - 4) == ".nif") outName = outName.substr(0, outName.size() - 4);
+		ss.SetInputFile(g.nifName); ss.SetOutputFile(outName); ss.SetDataFolder(dataDir + "/modular"); ss.Clear();
+		
+		std::set<std::string> filesToCopy;
+		for (const auto& sName : g.shapes) ss.AddShapeTarget(sName, sName);
+		for (size_t i = 0; i < project->activeSet.size(); ++i) {
+			SliderData& srcSlider = project->activeSet[i]; bool affectsIncluded = false;
+			for (const auto& sName : g.shapes) if (!srcSlider.TargetDataName(sName).empty()) { affectsIncluded = true; break; }
+			if (affectsIncluded) {
+				ss.CopySlider(&srcSlider);
+				for (auto& df : srcSlider.dataFiles) if (std::find(g.shapes.begin(), g.shapes.end(), df.targetName) != g.shapes.end()) {
+					std::string actualFile = df.fileName; size_t pos = actualFile.find(".osd/"); if (pos != std::string::npos) actualFile = actualFile.substr(0, pos + 4);
+					else { pos = actualFile.find(".bsd/"); if (pos != std::string::npos) actualFile = actualFile.substr(0, pos + 4); }
+					filesToCopy.insert(actualFile);
+				}
+			}
+		}
+		ospFile.UpdateSet(ss);
+		std::string srcDataPath = projectPath + "/ShapeData/" + dataDir + "/";
+		std::string dstDataPath = projectPath + "/ShapeData/" + dataDir + "/modular/";
+		for (const auto& fName : filesToCopy) if (wxFileName::FileExists(srcDataPath + fName)) {
+			wxFileName::Mkdir(wxFileName(dstDataPath + fName).GetPath(), wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL);
+			wxCopyFile(wxString::FromUTF8(srcDataPath + fName), wxString::FromUTF8(dstDataPath + fName), true);
+		}
+	}
+	ospFile.Save();
+
+	// Update SliderGroups
+	std::string groupsDir = projectPath + "/SliderGroups/";
+	if (wxFileName::DirExists(groupsDir)) {
+		wxArrayString gFiles; wxDir::GetAllFiles(wxString::FromUTF8(groupsDir), &gFiles, "*.xml", wxDIR_FILES);
+		for (const auto& gf : gFiles) {
+			SliderSetGroupFile sgFile(gf.ToStdString()); std::vector<SliderSetGroup> groups; sgFile.GetAllGroups(groups); bool modified = false;
+			for (auto& g : groups) {
+				std::vector<std::string> members; g.GetMembers(members); bool found = false;
+				for (const auto& m : members) if (std::equal(m.begin(), m.end(), project->mOutfitName.ToStdString().begin(), project->mOutfitName.ToStdString().end(), [](char c1, char c2) { return std::tolower(c1) == std::tolower(c2); })) { found = true; break; }
+				if (found) { for (auto const& ag : activeGroups) g.AddMembers({ag.fullName}); sgFile.UpdateGroup(g); modified = true; }
+			}
+			if (modified) sgFile.Save();
+		}
+	}
+
+	// --- Phase 3: Standalone ESP Generation ---
+	std::string gameDataPath = Config["GameDataPath"];
+	if (gameDataPath.empty()) { wxMessageBox(_("Game data path not set. Skipping ESP patch.")); return; }
+	wxArrayString espFiles; wxDir::GetAllFiles(wxString::FromUTF8(gameDataPath), &espFiles, "*.es*", wxDIR_FILES);
+
+	auto norm = [](const std::string& p) {
+		std::string n = p; std::replace(n.begin(), n.end(), '\\', '/'); while (n.find("//") != std::string::npos) n.replace(n.find("//"), 2, "/"); std::transform(n.begin(), n.end(), n.begin(), ::tolower);
+		if (n.size() > 7 && n.substr(0, 7) == "meshes/") n = n.substr(7); if (!n.empty() && n[0] == '/') n = n.substr(1);
+		if (n.size() < 4 || n.substr(n.size() - 4) != ".nif") n += ".nif"; return n;
+	};
+
+	std::string masterEsp; esp::ArmorAddonRecord originalArma; esp::ArmorRecord originalArmo;
+	std::string t1 = norm(project->mGamePath.ToStdString() + "/" + project->mGameFile.ToStdString());
+	std::string t1_0 = t1.substr(0, t1.size() - 4) + "_0.nif", t1_1 = t1.substr(0, t1.size() - 4) + "_1.nif";
+	std::string t2 = norm(project->mBaseFile.ToStdString());
+	
+	for (const auto& espFile : espFiles) {
+		std::string espPath = espFile.ToStdString();
+		wxLogMessage("Scanning for master in: %s", espPath);
+		esp::ESPReader reader; 
+		try {
+			if (reader.Load(espPath, {"ARMO", "ARMA"})) {
+				auto addons = reader.GetArmorAddons();
+				for (const auto& arma : addons) {
+					std::string mF = norm(arma.modelFemale), mM = norm(arma.modelMale);
+					if (mF == t1 || mM == t1 || mF == t1_0 || mM == t1_0 || mF == t1_1 || mM == t1_1 || mF == t2 || mM == t2) {
+						masterEsp = wxFileName(espFile).GetFullName().ToStdString(); originalArma = arma;
+						wxLogMessage("  Match found! Master ESP: %s. Looking for ARMO...", masterEsp);
+						auto armors = reader.GetArmors();
+						for (const auto& armo : armors) {
+							if (std::find(armo.armatureIds.begin(), armo.armatureIds.end(), arma.formId) != armo.armatureIds.end()) { 
+								originalArmo = armo; 
+								break; 
+							}
+						}
+						break;
+					}
+				}
+			}
+		} catch (const std::exception& e) {
+			wxLogMessage("  Exception reading %s: %s", espPath, e.what());
+		}
+		if (!masterEsp.empty()) break;
+	}
+
+	if (!masterEsp.empty()) {
+		wxLogMessage("Modularize: Phase 3 (ESP Patching) started.");
+		std::string patchName = masterEsp.substr(0, masterEsp.find_last_of('.')) + "_modular.esp";
+		esp::ESPWriter writer; if (wxFileName::FileExists(gameDataPath + "/" + patchName)) writer.Load(gameDataPath + "/" + patchName);
+		
+		auto getP = [&](const std::string& f) {
+			std::string p = project->mGamePath.ToStdString() + "/" + f; std::replace(p.begin(), p.end(), '/', '\\');
+			while (p.find("\\\\") != std::string::npos) p.replace(p.find("\\\\"), 2, "\\"); if (p.size() > 7 && p.substr(0, 7) == "meshes\\") p = p.substr(7);
+			if (!p.empty() && p[0] == '\\') p = p.substr(1);
+			if (p.size() > 4 && p.substr(p.size() - 4) == ".nif") p = p.substr(0, p.size() - 4) + "_1.nif"; return p;
+		};
+
+		wxLogMessage("Modularize: Loading clone source %s...", masterEsp);
+		esp::ESPReader cloneSource; 
+		try {
+			cloneSource.Load(gameDataPath + "/" + masterEsp, {"ARMO", "ARMA"});
+		} catch (const std::exception& e) {
+			wxLogMessage("  Exception loading clone source %s: %s", masterEsp, e.what());
+			wxMessageBox(_("Failed to load records from master plugin for cloning. Check Log_OS.txt."));
+			return;
+		}
+
+		const auto* srcArmaRec = cloneSource.GetRecordByFormId(originalArma.formId);
+		const auto* srcArmoRec = cloneSource.GetRecordByFormId(originalArmo.formId);
+
+		wxLogMessage("Modularize: Starting record cloning loop...");
+		for (auto const& g : activeGroups) {
+			uint32_t aFid = 0;
+			uint32_t slotMask = 0;
+			if (g.slot >= 30 && g.slot <= 61) {
+				slotMask = (1 << (g.slot - 30));
+			}
+
+			if (srcArmaRec) {
+				esp::Record newArma = esp::ESPWriter::CloneRecord(*srcArmaRec, 0);
+				for (auto& sr : newArma.subrecords) {
+					if (sr.type == "EDID") { 
+						std::string s = sanitize(g.fullName + "_AA");
+						sr.data.assign(s.begin(), s.end()); sr.data.push_back('\0'); 
+					}
+					else if (sr.type == "MOD2" || sr.type == "MODL") { 
+						std::string p = getP(g.nifName); 
+						sr.data.assign(p.begin(), p.end()); sr.data.push_back('\0'); 
+					}
+					else if (sr.type == "BOD2" || sr.type == "BODT") { 
+						if (sr.data.size() >= 4) memcpy(sr.data.data(), &slotMask, 4); 
+					}
+				}
+				aFid = writer.AddRecord(newArma);
+			}
+			if (srcArmoRec) {
+				esp::Record newArmo = esp::ESPWriter::CloneRecord(*srcArmoRec, 0);
+				for (auto& sr : newArmo.subrecords) {
+					if (sr.type == "EDID") { 
+						std::string s = sanitize(g.fullName);
+						sr.data.assign(s.begin(), s.end()); sr.data.push_back('\0'); 
+					}
+					else if (sr.type == "FULL") { 
+						sr.data.assign(g.fullName.begin(), g.fullName.end()); sr.data.push_back('\0'); 
+					}
+					else if (sr.type == "MODL") { 
+						sr.data.clear(); sr.data.insert(sr.data.end(), (uint8_t*)&aFid, (uint8_t*)&aFid + 4); 
+					}
+					else if (sr.type == "BOD2" || sr.type == "BODT") { 
+						if (sr.data.size() >= 4) memcpy(sr.data.data(), &slotMask, 4); 
+					}
+				}
+				writer.AddRecord(newArmo);
+			}
+		}
+		if (writer.Save(gameDataPath + "/" + patchName)) wxMessageBox(wxString::Format(_("Modularization complete!\nCreated standalone: %s"), patchName));
+	} else wxMessageBox(_("Modularization complete, but could not auto-detect original ESP."));
 }
 
 void OutfitStudioFrame::CheckCopyGeo(wxDialog& dlg) {

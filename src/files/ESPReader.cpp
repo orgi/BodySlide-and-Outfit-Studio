@@ -10,9 +10,16 @@
 #include "ESPReader.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <fstream>
 #include <stdexcept>
+
+#ifdef _WIN32
+#	include <windows.h>
+#else
+#	include <dirent.h>
+#endif
 
 #include <zlib.h>
 
@@ -43,7 +50,12 @@ static bool ReadExact(std::ifstream& f, uint8_t* buf, size_t n) {
 }
 
 static bool ReadExact(std::ifstream& f, std::vector<uint8_t>& buf, size_t n) {
-	buf.resize(n);
+	if (n > 200 * 1024 * 1024) return false; // Hard 200MB limit
+	try {
+		buf.resize(n);
+	} catch (const std::exception&) {
+		return false;
+	}
 	return ReadExact(f, buf.data(), n);
 }
 
@@ -74,15 +86,18 @@ static std::vector<Subrecord> ParseSubrecords(const uint8_t* data, size_t len) {
 				break;
 			srType = std::string(reinterpret_cast<const char*>(data + pos), 4);
 			pos += 6;	// skip next subrecord's type+size header
-			srSize = 0; // unused — actualSize replaces it
-			(void)srSize;
 
-			if (pos + actualSize > len)
+			// Sanity check for huge sizes (100MB)
+			if (actualSize > 100 * 1024 * 1024 || pos + actualSize > len)
 				break;
 
 			Subrecord sr;
 			sr.type = srType;
-			sr.data.assign(data + pos, data + pos + actualSize);
+			try {
+				sr.data.assign(data + pos, data + pos + actualSize);
+			} catch (const std::exception&) {
+				break;
+			}
 			pos += actualSize;
 			result.push_back(std::move(sr));
 			continue;
@@ -93,7 +108,11 @@ static std::vector<Subrecord> ParseSubrecords(const uint8_t* data, size_t len) {
 
 		Subrecord sr;
 		sr.type = srType;
-		sr.data.assign(data + pos, data + pos + srSize);
+		try {
+			sr.data.assign(data + pos, data + pos + srSize);
+		} catch (const std::exception&) {
+			break;
+		}
 		pos += srSize;
 		result.push_back(std::move(sr));
 	}
@@ -116,7 +135,9 @@ std::string Record::FullName() const {
 	auto* sr = GetSubrecord("FULL");
 	if (!sr)
 		return {};
-	// LSTRING: if exactly 4 bytes, it's a string table index
+	// LSTRING: if exactly 4 bytes, it's a string table index. Without the string
+	// table we can only return a placeholder — callers that have an ESPReader should
+	// use ESPReader::ResolveFullName() instead.
 	if (sr->data.size() == 4) {
 		uint32_t idx = ReadLE<uint32_t>(sr->data.data());
 		char buf[20];
@@ -210,6 +231,12 @@ static ReadOutput ReadRecord(std::ifstream& f) {
 	out.record.versionControl = ReadLE<uint16_t>(rest + 14);
 	out.record.internalVersion = ReadLE<uint16_t>(rest + 16);
 
+	// Sanity check for huge records (100MB)
+	if (out.record.dataSize > 100 * 1024 * 1024) {
+		out.result = ReadResult::Error;
+		return out;
+	}
+
 	// Read record data
 	std::vector<uint8_t> rawData;
 	if (!ReadExact(f, rawData, out.record.dataSize)) {
@@ -220,7 +247,20 @@ static ReadOutput ReadRecord(std::ifstream& f) {
 	// Handle compressed records
 	if (out.record.IsCompressed() && rawData.size() >= 4) {
 		uint32_t decompSize = ReadLE<uint32_t>(rawData.data());
-		std::vector<uint8_t> decompressed(decompSize);
+		
+		// Sanity check for huge decompressed size (100MB)
+		if (decompSize > 100 * 1024 * 1024) {
+			out.result = ReadResult::Error;
+			return out;
+		}
+
+		std::vector<uint8_t> decompressed;
+		try {
+			decompressed.resize(decompSize);
+		} catch (const std::exception&) {
+			out.result = ReadResult::Error;
+			return out;
+		}
 
 		uLongf destLen = decompSize;
 		int ret = uncompress(decompressed.data(), &destLen, rawData.data() + 4, static_cast<uLong>(rawData.size() - 4));
@@ -337,7 +377,9 @@ static std::vector<AlternateTexture> ParseAlternateTextures(const Subrecord& sr)
 			break;
 		uint32_t nameLen = ReadLE<uint32_t>(sr.data.data() + off);
 		off += 4;
-		if (off + nameLen + 8 > sr.data.size())
+		
+		// Sanity check for string length
+		if (nameLen > 1024 || off + nameLen + 8 > sr.data.size())
 			break;
 
 		AlternateTexture at;
@@ -469,7 +511,200 @@ static NPCRecord ParseNPC(const Record& rec) {
 			npc.wnamFormId = ReadLE<uint32_t>(wnam->data.data());
 	}
 
+	// RNAM: race FormID
+	if (auto* rnam = rec.GetSubrecord("RNAM")) {
+		if (rnam->data.size() >= 4)
+			npc.raceFormId = ReadLE<uint32_t>(rnam->data.data());
+	}
+
+	// QNAM: 3 floats (R, G, B) — texture lighting / face tint color
+	if (auto* qnam = rec.GetSubrecord("QNAM")) {
+		if (qnam->data.size() >= 12) {
+			npc.qnamR = ReadLE<float>(qnam->data.data() + 0);
+			npc.qnamG = ReadLE<float>(qnam->data.data() + 4);
+			npc.qnamB = ReadLE<float>(qnam->data.data() + 8);
+			npc.hasQnam = true;
+		}
+	}
+
 	return npc;
+}
+
+static RaceRecord ParseRace(const Record& rec) {
+	RaceRecord r;
+	r.formId = rec.formId;
+	r.editorId = rec.EditorId();
+
+	// WNAM: default skin ARMO for this race
+	if (auto* wnam = rec.GetSubrecord("WNAM")) {
+		if (wnam->data.size() >= 4)
+			r.skinFormId = ReadLE<uint32_t>(wnam->data.data());
+	}
+
+	return r;
+}
+
+// ---------------------------------------------------------------------------
+// STRINGS file loader
+//
+// Localized Skyrim plugins store FULL/DESC/shortname strings in external files
+// under Data/Strings/{PluginBaseName}_{Language}.STRINGS (names),
+// .DLSTRINGS (long dialog) and .ILSTRINGS (item/mid). FULL for NPC_ and ARMO
+// is always in .STRINGS.
+//
+// Format (little-endian):
+//   uint32 count
+//   uint32 dataSize (bytes of the string data block)
+//   directory: count * { uint32 stringId; uint32 offset; }
+//   data block: dataSize bytes
+//     .STRINGS: null-terminated UTF-8
+//     .DLSTRINGS/.ILSTRINGS: uint32 length + data (length includes NUL)
+// ---------------------------------------------------------------------------
+
+static bool FileExistsCI(const std::string& path) {
+	std::ifstream f(path, std::ios::binary);
+	return f.is_open();
+}
+
+// Resolve a case-insensitive file in a given directory. Returns empty string on failure.
+// Linux needs this because Skyrim data is case-sensitive on ext4 but shipped mixed-case.
+static std::string ResolveCIFileInDir(const std::string& dir, const std::string& fileName) {
+	// Try exact path first
+	std::string exact = dir + "/" + fileName;
+	if (FileExistsCI(exact))
+		return exact;
+
+	// Walk the directory looking for a case-insensitive match
+	std::string lowerTarget = fileName;
+	for (auto& c : lowerTarget) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+#ifdef _WIN32
+	return exact; // Windows is case-insensitive — if exact failed, it doesn't exist
+#else
+	DIR* d = opendir(dir.c_str());
+	if (!d) return {};
+	std::string found;
+	while (auto* e = readdir(d)) {
+		std::string name = e->d_name;
+		std::string lower = name;
+		for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		if (lower == lowerTarget) {
+			found = dir + "/" + name;
+			break;
+		}
+	}
+	closedir(d);
+	return found;
+#endif
+}
+
+std::unordered_map<uint32_t, std::string> ESPReader::ParseStringsBuffer(const uint8_t* buf, size_t fileSize, bool lengthPrefixed) {
+	std::unordered_map<uint32_t, std::string> out;
+	if (!buf || fileSize < 8)
+		return out;
+
+	uint32_t count = ReadLE<uint32_t>(buf + 0);
+	uint32_t dataSize = ReadLE<uint32_t>(buf + 4);
+
+	size_t dirSize = size_t(count) * 8;
+	if (8 + dirSize + dataSize > fileSize)
+		return out;
+
+	const uint8_t* dir = buf + 8;
+	const uint8_t* dataBlock = buf + 8 + dirSize;
+
+	for (uint32_t i = 0; i < count; ++i) {
+		uint32_t stringId = ReadLE<uint32_t>(dir + i * 8);
+		uint32_t offset = ReadLE<uint32_t>(dir + i * 8 + 4);
+		if (offset >= dataSize)
+			continue;
+		const uint8_t* p = dataBlock + offset;
+		size_t remaining = dataSize - offset;
+
+		if (lengthPrefixed) {
+			if (remaining < 4) continue;
+			uint32_t len = ReadLE<uint32_t>(p);
+			p += 4;
+			remaining -= 4;
+			if (len > remaining) continue;
+			size_t textLen = (len > 0 && p[len - 1] == 0) ? len - 1 : len;
+			out[stringId] = std::string(reinterpret_cast<const char*>(p), textLen);
+		} else {
+			size_t textLen = 0;
+			while (textLen < remaining && p[textLen] != 0) ++textLen;
+			out[stringId] = std::string(reinterpret_cast<const char*>(p), textLen);
+		}
+	}
+	return out;
+}
+
+static std::unordered_map<uint32_t, std::string> LoadStringsFile(const std::string& path, bool lengthPrefixed) {
+	std::ifstream f(path, std::ios::binary);
+	if (!f.is_open())
+		return {};
+	f.seekg(0, std::ios::end);
+	auto pos = f.tellg();
+	if (pos <= 0 || pos > 100 * 1024 * 1024) // 100MB limit for strings
+		return {};
+
+	size_t fileSize = static_cast<size_t>(pos);
+	f.seekg(0, std::ios::beg);
+	std::vector<uint8_t> buf;
+	try {
+		buf.resize(fileSize);
+	} catch (const std::exception&) {
+		return {};
+	}
+
+	if (!ReadExact(f, buf.data(), fileSize))
+		return {};
+	return ESPReader::ParseStringsBuffer(buf.data(), buf.size(), lengthPrefixed);
+}
+
+// Try to load the .STRINGS file matching a plugin. Tries English (the de-facto
+// default) and, if that fails, any _*.STRINGS file that exists.
+static std::unordered_map<uint32_t, std::string> LoadPluginStrings(const std::string& espFilepath) {
+	std::unordered_map<uint32_t, std::string> table;
+
+	auto slashPos = espFilepath.find_last_of("/\\");
+	std::string dir = (slashPos != std::string::npos) ? espFilepath.substr(0, slashPos) : ".";
+	std::string file = (slashPos != std::string::npos) ? espFilepath.substr(slashPos + 1) : espFilepath;
+
+	// Strip extension
+	auto dotPos = file.find_last_of('.');
+	std::string base = (dotPos != std::string::npos) ? file.substr(0, dotPos) : file;
+
+	std::string stringsDir = dir + "/Strings";
+	std::string stringsDirCI = ResolveCIFileInDir(dir, "Strings");
+	if (!stringsDirCI.empty())
+		stringsDir = stringsDirCI;
+
+	static const char* langs[] = {"English", "French", "German", "Italian", "Spanish", "Polish", "Russian", nullptr};
+
+	for (int i = 0; langs[i]; ++i) {
+		std::string target = base + "_" + langs[i] + ".STRINGS";
+		std::string full = ResolveCIFileInDir(stringsDir, target);
+		if (!full.empty()) {
+			table = LoadStringsFile(full, /*lengthPrefixed*/ false);
+			if (!table.empty())
+				return table;
+		}
+	}
+	return table;
+}
+
+std::string ESPReader::ResolveFullName(const Record& rec) const {
+	auto* sr = rec.GetSubrecord("FULL");
+	if (!sr)
+		return {};
+	if (sr->data.size() == 4) {
+		uint32_t idx = ReadLE<uint32_t>(sr->data.data());
+		auto it = stringTable.find(idx);
+		if (it != stringTable.end())
+			return it->second;
+		return {}; // Unresolved localized string — treat as no name
+	}
+	return ReadString(sr->data);
 }
 
 // ---------------------------------------------------------------------------
@@ -480,6 +715,8 @@ bool ESPReader::Load(const std::string& filepath, const std::set<std::string>& r
 	records.clear();
 	recordsByType.clear();
 	masters.clear();
+	stringTable.clear();
+	localized = false;
 
 	// Extract filename
 	auto slashPos = filepath.find_last_of("/\\");
@@ -503,6 +740,12 @@ bool ESPReader::Load(const std::string& filepath, const std::set<std::string>& r
 	for (auto* mast : headerOut.record.GetSubrecords("MAST")) {
 		masters.push_back(ReadString(mast->data));
 	}
+
+	// Detect Localized flag (TES4 record flag 0x80). When set, FULL/DESC use
+	// 4-byte lstring indices into the companion .STRINGS file.
+	localized = (headerOut.record.flags & 0x00000080) != 0;
+	if (localized)
+		stringTable = LoadPluginStrings(filepath);
 
 	// Read all records
 	while (f.tellg() < fileSize && f.good()) {
@@ -604,8 +847,25 @@ std::vector<NPCRecord> ESPReader::GetNPCs() const {
 		return result;
 	for (uint32_t fid : it->second) {
 		auto rit = records.find(fid);
+		if (rit != records.end()) {
+			auto npc = ParseNPC(rit->second);
+			// Override with lstring-resolved name when this ESP is localized.
+			npc.fullName = ResolveFullName(rit->second);
+			result.push_back(std::move(npc));
+		}
+	}
+	return result;
+}
+
+std::vector<RaceRecord> ESPReader::GetRaces() const {
+	std::vector<RaceRecord> result;
+	auto it = recordsByType.find("RACE");
+	if (it == recordsByType.end())
+		return result;
+	for (uint32_t fid : it->second) {
+		auto rit = records.find(fid);
 		if (rit != records.end())
-			result.push_back(ParseNPC(rit->second));
+			result.push_back(ParseRace(rit->second));
 	}
 	return result;
 }

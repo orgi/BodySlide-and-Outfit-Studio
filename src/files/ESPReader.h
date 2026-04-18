@@ -127,7 +127,19 @@ struct NPCRecord {
 	uint32_t formId = 0;
 	std::string editorId;
 	std::string fullName;
-	uint32_t wnamFormId = 0; // WNAM: skin/worn armor FormID
+	uint32_t wnamFormId = 0; // WNAM: skin/worn armor FormID (0 = use race default)
+	uint32_t raceFormId = 0; // RNAM: race FormID
+	// QNAM — 3 floats (R,G,B) texture lighting / face tint color
+	bool hasQnam = false;
+	float qnamR = 1.0f;
+	float qnamG = 1.0f;
+	float qnamB = 1.0f;
+};
+
+struct RaceRecord {
+	uint32_t formId = 0;
+	std::string editorId;
+	uint32_t skinFormId = 0; // WNAM: default skin ARMO for this race
 };
 
 // ---------------------------------------------------------------------------
@@ -144,6 +156,9 @@ public:
 	std::vector<LeveledItemRecord> GetLeveledItems() const;
 	std::vector<OutfitRecord> GetOutfits() const;
 	std::vector<NPCRecord> GetNPCs() const;
+	std::vector<RaceRecord> GetRaces() const;
+
+	const std::unordered_map<uint32_t, Record>& GetRecords() const { return records; }
 
 	const Record* GetRecordByFormId(uint32_t formId) const;
 	std::pair<std::string, uint32_t> ResolveFormId(uint32_t localFormId) const;
@@ -151,11 +166,31 @@ public:
 	const std::vector<std::string>& GetMasters() const { return masters; }
 	const std::string& GetFilename() const { return filename; }
 
+	// Localization. If the ESP's TES4 header has the Localized flag set, FULL and similar
+	// subrecords are 4-byte lstring indices resolved through the matching .STRINGS file.
+	bool IsLocalized() const { return localized; }
+	const std::unordered_map<uint32_t, std::string>& GetStringTable() const { return stringTable; }
+
+	// Override the string table (e.g., loaded from a BSA archive when no loose
+	// .STRINGS file exists next to the ESP).
+	void SetStringTable(std::unordered_map<uint32_t, std::string> table) { stringTable = std::move(table); }
+
+	// Parse a raw .STRINGS / .DLSTRINGS / .ILSTRINGS buffer into an id→text map.
+	// lengthPrefixed=false for .STRINGS (NUL-terminated), true for .DL/ILSTRINGS (length-prefixed).
+	static std::unordered_map<uint32_t, std::string> ParseStringsBuffer(const uint8_t* data, size_t len, bool lengthPrefixed);
+
+	// Resolve a possibly-localized FULL subrecord to its human-readable string.
+	// Handles both 4-byte lstring indices (localized ESPs) and inline strings.
+	std::string ResolveFullName(const Record& rec) const;
+
 private:
 	std::unordered_map<uint32_t, Record> records;
 	std::unordered_map<std::string, std::vector<uint32_t>> recordsByType; // type -> formId list
 	std::vector<std::string> masters;
 	std::string filename;
+
+	bool localized = false;
+	std::unordered_map<uint32_t, std::string> stringTable; // lstring id → UTF-8 text
 };
 
 } // namespace esp

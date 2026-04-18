@@ -1365,6 +1365,7 @@ private:
 	void CheckCopyGeo(wxDialog& dlg);
 	void OnCopyGeo(wxCommandEvent& event);
 	void OnDupeShape(wxCommandEvent& event);
+	void OnModularizeShapes(wxCommandEvent& event);
 	void OnDeleteShape(wxCommandEvent& event);
 	void OnRefineMesh(wxCommandEvent& event);
 	void OnSetBoneSkin(wxCommandEvent& event);
