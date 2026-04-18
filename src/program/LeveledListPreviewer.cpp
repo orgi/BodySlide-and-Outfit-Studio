@@ -191,8 +191,18 @@ LeveledListPreviewer::LeveledListPreviewer(wxEvtHandler* handler)
 	currentHeadEditorId = Config["LLPreviewer/HeadEditorId"];
 	currentPresetName = Config["LLPreviewer/PresetName"];
 	useHighWeight = (Config["LLPreviewer/HighWeight"] != "false");
-	if (headCtrl && !currentHeadEditorId.empty())
-		headCtrl->SetValue(wxString::FromUTF8(currentHeadEditorId));
+	if (headCtrl && !currentHeadEditorId.empty()) {
+		// Prefer the in-game display name over the editor ID.
+		std::string display = currentHeadEditorId;
+		for (auto& n : data.GetNPCs()) {
+			if (n.editorId == currentHeadEditorId) {
+				if (!n.displayName.empty())
+					display = n.displayName;
+				break;
+			}
+		}
+		headCtrl->SetValue(wxString::FromUTF8(display));
+	}
 	if (highWeightCheck)
 		highWeightCheck->SetValue(useHighWeight);
 
@@ -317,6 +327,18 @@ void LeveledListPreviewer::LoadESPFile(const std::string& filepath) {
 		}
 		if (headCtrl)
 			headCtrl->AutoComplete(npcNames);
+	}
+
+	// Re-sync headCtrl's text: on startup OnShown runs before LoadNPCs, so a
+	// persisted editor id could not yet be mapped to a display name.
+	if (headCtrl && !currentHeadEditorId.empty()) {
+		for (auto& n : data.GetNPCs()) {
+			if (n.editorId == currentHeadEditorId) {
+				if (!n.displayName.empty())
+					headCtrl->ChangeValue(wxString::FromUTF8(n.displayName));
+				break;
+			}
+		}
 	}
 
 	LoadPresetList();
@@ -577,34 +599,19 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 	};
 	std::vector<SlotNif> bodyNifs;
 
-	// Try NPC-specific paths from WNAM → ARMO → ARMA
+	// Resolve NPC-specific body/hands/feet paths with per-slot fallback:
+	//   NPC's own WNAM → race's default skin ARMO → vanilla default (filled below).
 	if (!currentHeadEditorId.empty()) {
-		uint32_t wnamFormId = 0;
-		// Check override map first (mod-installed skin), then vanilla cache
-		auto& overrides = data.GetNpcSkinOverrides();
-		auto ovIt = overrides.find(currentHeadEditorId);
-		if (ovIt != overrides.end()) {
-			wnamFormId = ovIt->second.selfDefined ? ovIt->second.wnamRaw : ovIt->second.remappedWnam;
-		}
-		else {
-			auto& skinCache = data.GetNpcSkinCache();
-			auto scIt = skinCache.find(currentHeadEditorId);
-			if (scIt != skinCache.end())
-				wnamFormId = scIt->second;
-		}
+		auto paths = data.ResolveNpcBodyNifPaths(currentHeadEditorId, useHighWeight);
+		if (!paths.body.empty())
+			bodyNifs.push_back({32, paths.body});
+		if (!paths.hands.empty())
+			bodyNifs.push_back({33, paths.hands});
+		if (!paths.feet.empty())
+			bodyNifs.push_back({37, paths.feet});
 
-		if (wnamFormId != 0) {
-			auto paths = data.ResolveBodyNifPaths(wnamFormId, useHighWeight);
-			if (!paths.body.empty())
-				bodyNifs.push_back({32, paths.body});
-			if (!paths.hands.empty())
-				bodyNifs.push_back({33, paths.hands});
-			if (!paths.feet.empty())
-				bodyNifs.push_back({37, paths.feet});
-
-			if (!bodyNifs.empty())
-				wxLogMessage("LeveledListPreviewer: Using NPC '%s' body meshes (WNAM %08X)", currentHeadEditorId, wnamFormId);
-		}
+		if (!bodyNifs.empty())
+			wxLogMessage("LeveledListPreviewer: Using NPC '%s' body meshes (NPC→race chain)", currentHeadEditorId);
 	}
 
 	// Fill in default paths for any slots not provided by the NPC's WNAM
@@ -635,58 +642,78 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 	if (bodyShapeNames.empty())
 		return;
 
-	// Apply NPC skin textures if available
-	if (hasNpcSkinTextures) {
+	// Apply per-slot NPC skin textures (body / hands / feet independently) and
+	// the NPC's QNAM tint. Skin textures come from the NPC's WNAM ARMO or (fallback)
+	// the race's default skin ARMO, with ARMAs filtered by RNAM to the NPC's race.
+	if (hasNpcSkinTextures || hasNpcTint) {
 		std::string baseGamePath = Config["GameDataPath"];
 		if (!baseGamePath.empty() && baseGamePath.back() != '/' && baseGamePath.back() != '\\')
 			baseGamePath += '/';
 
-		for (auto& [name, partIds] : bodyShapePartMap) {
-			if (!partIds.count(32)) // SBP_32_BODY
-				continue;
-
-			Mesh* m = gls.GetMesh(name);
-			if (!m)
-				continue;
-
-			// Build texture file list from NPC skin textures
+		auto resolveTexFiles = [&](const std::array<std::string, 8>& src) -> std::vector<std::string> {
 			const uint8_t MAX_TEX = 10;
-			std::vector<std::string> texFiles(MAX_TEX);
+			std::vector<std::string> tf(MAX_TEX);
 			for (int i = 0; i < 8; ++i) {
-				if (npcSkinTextures[i].empty())
+				if (src[i].empty())
 					continue;
-				std::string tf = npcSkinTextures[i];
-				// Normalize path
-				std::replace(tf.begin(), tf.end(), '\\', '/');
-				if (tf.find("textures/") == std::string::npos)
-					tf = "textures/" + tf;
-				// Resolve
-				std::string fullPath = baseGamePath + tf;
+				std::string path = src[i];
+				std::replace(path.begin(), path.end(), '\\', '/');
+				if (path.find("textures/") == std::string::npos)
+					path = "textures/" + path;
+				std::string fullPath = baseGamePath + path;
 				if (wxFileName::FileExists(fullPath)) {
-					texFiles[i] = fullPath;
+					tf[i] = fullPath;
 				}
 				else {
-					std::string resolved = lldata::LeveledListData::ResolveCaseInsensitive(baseGamePath, tf);
-					texFiles[i] = resolved.empty() ? fullPath : resolved;
+					std::string resolved = lldata::LeveledListData::ResolveCaseInsensitive(baseGamePath, path);
+					tf[i] = resolved.empty() ? fullPath : resolved;
 				}
 			}
+			return tf;
+		};
 
-			if (!texFiles[0].empty()) {
-				std::string vShader = Config["AppDir"] + "/res/shaders/default.vert";
-				std::string fShader = Config["AppDir"] + "/res/shaders/default.frag";
-				TargetGame targetGame = (TargetGame)Config.GetIntValue("TargetGame");
-				if (targetGame == FO4 || targetGame == FO4VR || targetGame == FO76) {
-					vShader = Config["AppDir"] + "/res/shaders/fo4_default.vert";
-					fShader = Config["AppDir"] + "/res/shaders/fo4_default.frag";
-				}
+		std::vector<std::string> bodyTex = hasNpcSkinTextures ? resolveTexFiles(npcBodyPartTextures.body) : std::vector<std::string>{};
+		std::vector<std::string> handsTex = hasNpcSkinTextures ? resolveTexFiles(npcBodyPartTextures.hands) : std::vector<std::string>{};
+		std::vector<std::string> feetTex = hasNpcSkinTextures ? resolveTexFiles(npcBodyPartTextures.feet) : std::vector<std::string>{};
+
+		std::string vShader = Config["AppDir"] + "/res/shaders/default.vert";
+		std::string fShader = Config["AppDir"] + "/res/shaders/default.frag";
+		TargetGame targetGame = (TargetGame)Config.GetIntValue("TargetGame");
+		if (targetGame == FO4 || targetGame == FO4VR || targetGame == FO76) {
+			vShader = Config["AppDir"] + "/res/shaders/fo4_default.vert";
+			fShader = Config["AppDir"] + "/res/shaders/fo4_default.frag";
+		}
+
+		auto applyToShape = [&](const std::string& name, const std::vector<std::string>& texFiles, const char* slotLabel) {
+			Mesh* m = gls.GetMesh(name);
+			if (!m)
+				return;
+
+			// Material override (if we resolved textures for this slot)
+			if (!texFiles.empty() && !texFiles[0].empty()) {
 				GLMaterial* glMat = gls.AddMaterial(texFiles, vShader, fShader);
 				if (glMat) {
 					m->material = glMat;
 					shapeMaterials[name] = glMat;
 					gls.UpdateShaders(m);
-					wxLogMessage("LeveledListPreviewer: Applied NPC skin texture to '%s': %s", name, texFiles[0]);
+					wxLogMessage("LeveledListPreviewer: Applied NPC %s skin texture to '%s': %s", slotLabel, name, texFiles[0]);
 				}
 			}
+
+			// QNAM tint via the mesh-level subColor uniform (shader does vColor.rgb *= subColor).
+			// Unlike vertex colors this doesn't require the NIF's vertex-color flag, so it works
+			// on the vanilla femalebody.nif.
+			if (hasNpcTint)
+				m->color = nifly::Vector3(npcTintR, npcTintG, npcTintB);
+		};
+
+		for (auto& [name, partIds] : bodyShapePartMap) {
+			if (partIds.count(32))
+				applyToShape(name, bodyTex, "body");
+			else if (partIds.count(33))
+				applyToShape(name, handsTex, "hands");
+			else if (partIds.count(37))
+				applyToShape(name, feetTex, "feet");
 		}
 	}
 
@@ -753,15 +780,46 @@ void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
 		if (!m)
 			continue;
 
-		const std::vector<Color4>* vcolors = nif.GetColorsForShape(shapeName);
-		if (vcolors) {
-			for (size_t v = 0; v < vcolors->size(); v++) {
-				m->vcolors[v].x = vcolors->at(v).r;
-				m->vcolors[v].y = vcolors->at(v).g;
-				m->vcolors[v].z = vcolors->at(v).b;
-				m->valpha[v] = vcolors->at(v).a;
+		// Targeted opacity fix: only for the face shape. Hair, eyelashes and brows RELY on
+		// per-vertex alpha + alpha-blending to fade their edges; zeroing those flags turns
+		// them into solid planes (the "artifact" the user saw).
+		//
+		// The invisible-face bug is specific to FaceGen NIFs where the face shape has
+		// vertexAlpha=true but the vertex data includes zero-alpha verts (used in-engine as
+		// a tint-layer blend mask, not opacity). Our shader treats that alpha as opacity and
+		// discards via alphaThreshold → invisible face.
+		//
+		// Heuristic for "this is the face shape": name contains "head", "face" or "basehead"
+		// (nifly shape naming convention for FaceGen), case-insensitive.
+		auto toLower = [](std::string s) { for (auto& c : s) c = std::tolower(static_cast<unsigned char>(c)); return s; };
+		std::string lowerShape = toLower(shapeName);
+		bool isFaceShape = lowerShape.find("head") != std::string::npos
+						   || lowerShape.find("face") != std::string::npos
+						   || lowerShape.find("basehead") != std::string::npos;
+
+		if (isFaceShape) {
+			// Force valpha buffer to 1.0 and disable the shape's vertex-alpha flag so the
+			// vertex shader's default vColor.a = 1.0 wins. Leaves alphaFlags untouched so
+			// other shape flags (e.g. model-space normals) stay correct.
+			if (m->valpha) {
+				for (int v = 0; v < m->nVerts; v++)
+					m->valpha[v] = 1.0f;
 			}
+			m->vertexAlpha = false;
 		}
+
+		wxLogMessage("LoadHeadMesh: shape='%s' face=%s nVerts=%d vcolorFlag=%s valphaFlag=%s alphaFlags=%u alphaThr=%u",
+					 shapeName,
+					 isFaceShape ? "yes" : "no",
+					 m->nVerts,
+					 m->vertexColors ? "on" : "off",
+					 m->vertexAlpha ? "on" : "off",
+					 (unsigned)m->alphaFlags,
+					 (unsigned)m->alphaThreshold);
+
+		// QNAM tint via mesh subColor uniform (shader: vColor.rgb *= subColor).
+		if (hasNpcTint)
+			m->color = nifly::Vector3(npcTintR, npcTintG, npcTintB);
 
 		m->CreateBuffers();
 		AddNifShapeTextures(&nif, shapeName, nullptr, meshName);
@@ -809,7 +867,9 @@ void LeveledListPreviewer::OnHeadEntered(wxCommandEvent& WXUNUSED(event)) {
 		ClearHeadMeshes();
 		currentHeadEditorId.clear();
 		hasNpcSkinTextures = false;
-		npcSkinTextures = {};
+		npcBodyPartTextures = {};
+		hasNpcTint = false;
+		npcTintR = npcTintG = npcTintB = 1.0f;
 		// Reload default body meshes
 		if (showBody) {
 			if (canvas && context)
@@ -847,20 +907,34 @@ void LeveledListPreviewer::OnHeadEntered(wxCommandEvent& WXUNUSED(event)) {
 	currentHeadEditorId = npc.editorId;
 	LoadHeadMesh(npc);
 
-	// Resolve NPC skin textures for body display
-	hasNpcSkinTextures = false;
-	npcSkinTextures = {};
+	// Show the display name (full in-game name) in the text box, not the editor ID.
+	if (headCtrl && !npc.displayName.empty() && headCtrl->GetValue().ToStdString() != npc.displayName)
+		headCtrl->ChangeValue(wxString::FromUTF8(npc.displayName));
 
-	// Use the all-plugins scanner to find the definitive WNAM for this NPC
-	npcSkinTextures = data.ResolveSkinTexturesForNPC(npc.editorId);
+	const std::string& logName = !npc.fullName.empty() ? npc.fullName : npc.editorId;
 
-	// Fallback: try the vanilla NPC's own WNAM via the master cache
-	if (npcSkinTextures[0].empty() && npc.wnamFormId != 0)
-		npcSkinTextures = data.ResolveSkinTextures(npc.wnamFormId);
+	// Resolve per-slot NPC skin textures (body / hands / feet independently).
+	npcBodyPartTextures = data.ResolveNpcBodyPartTextures(npc.editorId);
+	hasNpcSkinTextures = !npcBodyPartTextures.body[0].empty()
+						 || !npcBodyPartTextures.hands[0].empty()
+						 || !npcBodyPartTextures.feet[0].empty();
 
-	if (!npcSkinTextures[0].empty()) {
-		hasNpcSkinTextures = true;
-		wxLogMessage("LeveledListPreviewer: NPC '%s' skin texture resolved: %s", npc.editorId, npcSkinTextures[0]);
+	if (hasNpcSkinTextures)
+		wxLogMessage("LeveledListPreviewer: NPC '%s' skin resolved — body='%s' hands='%s' feet='%s'",
+					 logName,
+					 npcBodyPartTextures.body[0],
+					 npcBodyPartTextures.hands[0],
+					 npcBodyPartTextures.feet[0]);
+	else
+		wxLogMessage("LeveledListPreviewer: NPC '%s' no skin texture overrides resolved (using NIF defaults)", logName);
+
+	// QNAM face tint (skin complexion).
+	hasNpcTint = npc.hasTint;
+	if (hasNpcTint) {
+		npcTintR = npc.tintR / 255.0f;
+		npcTintG = npc.tintG / 255.0f;
+		npcTintB = npc.tintB / 255.0f;
+		wxLogMessage("LeveledListPreviewer: NPC '%s' tint RGB=(%u,%u,%u)", logName, npc.tintR, npc.tintG, npc.tintB);
 	}
 
 	// Always reload body meshes when NPC changes — the body mesh paths themselves
@@ -1537,15 +1611,25 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 			if (npc.editorId == currentHeadEditorId) {
 				LoadHeadMesh(npc);
 
-				// Resolve NPC skin textures if not yet done
-				if (!hasNpcSkinTextures) {
-					npcSkinTextures = data.ResolveSkinTexturesForNPC(npc.editorId);
-					if (npcSkinTextures[0].empty() && npc.wnamFormId != 0)
-						npcSkinTextures = data.ResolveSkinTextures(npc.wnamFormId);
-					if (!npcSkinTextures[0].empty()) {
-						hasNpcSkinTextures = true;
-						wxLogMessage("LeveledListPreviewer: NPC '%s' skin texture resolved (deferred): %s", npc.editorId, npcSkinTextures[0]);
-						// Body meshes already loaded above — need to reload with skin textures
+				// Resolve per-slot NPC skin + QNAM tint if not yet done
+				if (!hasNpcSkinTextures && !hasNpcTint) {
+					npcBodyPartTextures = data.ResolveNpcBodyPartTextures(npc.editorId);
+					hasNpcSkinTextures = !npcBodyPartTextures.body[0].empty()
+										 || !npcBodyPartTextures.hands[0].empty()
+										 || !npcBodyPartTextures.feet[0].empty();
+					hasNpcTint = npc.hasTint;
+					if (hasNpcTint) {
+						npcTintR = npc.tintR / 255.0f;
+						npcTintG = npc.tintG / 255.0f;
+						npcTintB = npc.tintB / 255.0f;
+					}
+					if (hasNpcSkinTextures || hasNpcTint) {
+						wxLogMessage("LeveledListPreviewer: NPC '%s' skin resolved deferred — body='%s' hands='%s' feet='%s' tint=%s",
+									 !npc.fullName.empty() ? npc.fullName : npc.editorId,
+									 npcBodyPartTextures.body[0],
+									 npcBodyPartTextures.hands[0],
+									 npcBodyPartTextures.feet[0],
+									 hasNpcTint ? "yes" : "no");
 						for (auto& name : bodyShapeNames) {
 							gls.DeleteMesh(name);
 							shapeNifSource.erase(name);

@@ -158,6 +158,35 @@ std::string LeveledListData::ResolveCaseInsensitive(const std::string& baseDir, 
 }
 
 // ---------------------------------------------------------------------------
+// Load a plugin's .STRINGS file from BSA archives. Used when the game ships
+// strings only in Skyrim - Interface.bsa / Patch.bsa (the default on English
+// installs — there are no loose .STRINGS files on disk).
+// Returns an empty map on failure.
+// ---------------------------------------------------------------------------
+static std::unordered_map<uint32_t, std::string> LoadStringsFromBSA(const std::string& pluginFilename) {
+	// pluginFilename like "Skyrim.esm" → base "Skyrim"
+	std::string base = pluginFilename;
+	auto dot = base.find_last_of('.');
+	if (dot != std::string::npos) base = base.substr(0, dot);
+
+	static const char* langs[] = {"English", "French", "German", "Italian", "Spanish", "Polish", "Russian", nullptr};
+	for (int i = 0; langs[i]; ++i) {
+		std::string relPath = "strings/" + base + "_" + langs[i] + ".strings";
+		for (FSArchiveFile* archive : FSManager::archiveList()) {
+			if (!archive) continue;
+			if (!archive->hasFile(relPath)) continue;
+			wxMemoryBuffer buf;
+			if (!archive->fileContents(relPath, buf)) continue;
+			return esp::ESPReader::ParseStringsBuffer(
+				reinterpret_cast<const uint8_t*>(buf.GetData()),
+				buf.GetDataLen(),
+				/*lengthPrefixed*/ false);
+		}
+	}
+	return {};
+}
+
+// ---------------------------------------------------------------------------
 // LoadNPCs — load NPC_ records from vanilla ESMs
 // ---------------------------------------------------------------------------
 
@@ -168,6 +197,21 @@ void LeveledListData::LoadNPCs() {
 
 	static const char* vanillaESMs[] = {"Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm", nullptr};
 
+	// Pass 1: read NPC_ + RACE from each vanilla ESM, remember enough context to
+	// resolve cross-ESM race references in Pass 2.
+	struct PendingNPC {
+		NPCEntry entry;
+		uint32_t rawRaceFormId = 0;		  // RNAM FormID in the source ESM's own space
+		const char* sourceEsm = nullptr;  // ESM that defined this NPC
+	};
+	struct EsmRaces {
+		std::vector<std::string> masters;						   // source ESM's master list
+		std::unordered_map<uint32_t, std::string> raceEdidByBase;  // base FormID (no top byte) → editor id
+	};
+
+	std::vector<PendingNPC> pending;
+	std::unordered_map<std::string, EsmRaces> esmRacesByName; // ESM name → races defined there
+
 	for (int i = 0; vanillaESMs[i]; ++i) {
 		std::string esmPath = baseDataPath + vanillaESMs[i];
 		if (!wxFileName::FileExists(wxString::FromUTF8(esmPath))) {
@@ -177,31 +221,110 @@ void LeveledListData::LoadNPCs() {
 		}
 
 		esp::ESPReader reader;
-		if (!reader.Load(esmPath, {"NPC_"})) {
+		if (!reader.Load(esmPath, {"NPC_", "RACE"})) {
 			wxLogWarning("LeveledListData::LoadNPCs: failed to load %s", esmPath);
 			continue;
 		}
 
-		size_t countBefore = npcs.size();
+		// For localized vanilla ESMs the FULL names live in Data/Strings/*.STRINGS.
+		// Those files are usually not loose on English installs — they're packed
+		// inside the vanilla BSAs. If the reader couldn't find a loose file, pull
+		// the strings out of the BSA archives that FSManager has already indexed.
+		if (reader.IsLocalized() && reader.GetStringTable().empty()) {
+			auto table = LoadStringsFromBSA(vanillaESMs[i]);
+			if (!table.empty()) {
+				wxLogMessage("LeveledListData::LoadNPCs: loaded %zu strings for %s from BSA", table.size(), vanillaESMs[i]);
+				reader.SetStringTable(std::move(table));
+			} else {
+				wxLogWarning("LeveledListData::LoadNPCs: %s is localized but no .STRINGS file found (loose or BSA) — NPC names will be empty", vanillaESMs[i]);
+			}
+		}
+
+		EsmRaces er;
+		er.masters = reader.GetMasters();
+		for (auto& r : reader.GetRaces()) {
+			if (!r.editorId.empty())
+				er.raceEdidByBase[r.formId & 0x00FFFFFF] = r.editorId;
+		}
+		esmRacesByName[vanillaESMs[i]] = std::move(er);
+
+		size_t countBefore = npcs.size() + pending.size();
 		for (auto& npc : reader.GetNPCs()) {
 			if (npc.editorId.empty())
 				continue;
 
-			NPCEntry entry;
-			entry.editorId = npc.editorId;
-			entry.formId = npc.formId;
-			entry.plugin = vanillaESMs[i];
-			entry.wnamFormId = npc.wnamFormId;
+			PendingNPC pn;
+			pn.entry.editorId = npc.editorId;
+			pn.entry.formId = npc.formId;
+			pn.entry.plugin = vanillaESMs[i];
+			pn.entry.wnamFormId = npc.wnamFormId;
+			pn.rawRaceFormId = npc.raceFormId;
+			pn.sourceEsm = vanillaESMs[i];
 
-			// FULL is LSTRING for most vanilla NPCs; show inline name when available
+			// Full in-game name (may be empty, or an unresolved lstring marker like "[1234]")
 			if (!npc.fullName.empty() && npc.fullName[0] != '[')
-				entry.displayName = npc.fullName + " [" + npc.editorId + "]";
-			else
-				entry.displayName = npc.editorId;
+				pn.entry.fullName = npc.fullName;
 
-			npcs.push_back(std::move(entry));
+			// Display: "In-game Name (plugin.esm, EditorID)" — fall back to editor id only
+			// when the NPC has no readable FULL name. Autocomplete still matches on editor id
+			// via the fallback branch in OnHeadEntered.
+			const std::string& shownName = !pn.entry.fullName.empty() ? pn.entry.fullName : npc.editorId;
+			pn.entry.displayName = shownName + " (" + vanillaESMs[i] + ", " + npc.editorId + ")";
+
+			// QNAM face tint — quantize floats to 0-255 for shader use.
+			if (npc.hasQnam) {
+				auto clamp8 = [](float v) -> uint8_t {
+					if (v < 0.0f) v = 0.0f;
+					if (v > 1.0f) v = 1.0f;
+					return static_cast<uint8_t>(v * 255.0f + 0.5f);
+				};
+				pn.entry.tintR = clamp8(npc.qnamR);
+				pn.entry.tintG = clamp8(npc.qnamG);
+				pn.entry.tintB = clamp8(npc.qnamB);
+				pn.entry.hasTint = true;
+			}
+
+			pending.push_back(std::move(pn));
 		}
-		wxLogMessage("LeveledListData::LoadNPCs: %zu NPCs from %s", npcs.size() - countBefore, vanillaESMs[i]);
+		wxLogMessage("LeveledListData::LoadNPCs: %zu NPCs from %s", (npcs.size() + pending.size()) - countBefore, vanillaESMs[i]);
+	}
+
+	// Pass 2: resolve each NPC's RNAM → race editor id.
+	// The top byte of rawRaceFormId indexes the source ESM's own masters list; the base
+	// FormID lives either in one of those masters (self-defined races in that ESM), or
+	// in the NPC's own ESM if top == len(masters).
+	for (auto& pn : pending) {
+		if (pn.rawRaceFormId != 0 && pn.sourceEsm) {
+			auto esmIt = esmRacesByName.find(pn.sourceEsm);
+			if (esmIt != esmRacesByName.end()) {
+				auto& er = esmIt->second;
+				uint8_t topByte = (pn.rawRaceFormId >> 24) & 0xFF;
+				uint32_t baseId = pn.rawRaceFormId & 0x00FFFFFF;
+
+				const std::string* raceSourceEsm = nullptr;
+				if (topByte < er.masters.size())
+					raceSourceEsm = &er.masters[topByte];
+				else if (topByte == er.masters.size())
+					raceSourceEsm = nullptr; // self-defined in pn.sourceEsm
+
+				const EsmRaces* targetEr = nullptr;
+				if (raceSourceEsm) {
+					auto it2 = esmRacesByName.find(*raceSourceEsm);
+					if (it2 != esmRacesByName.end())
+						targetEr = &it2->second;
+				}
+				else {
+					targetEr = &er;
+				}
+
+				if (targetEr) {
+					auto rIt = targetEr->raceEdidByBase.find(baseId);
+					if (rIt != targetEr->raceEdidByBase.end())
+						pn.entry.raceEditorId = rIt->second;
+				}
+			}
+		}
+		npcs.push_back(std::move(pn.entry));
 	}
 
 	std::sort(npcs.begin(), npcs.end(), [](const NPCEntry& a, const NPCEntry& b) { return a.displayName < b.displayName; });
@@ -289,6 +412,7 @@ void LeveledListData::LoadRecordsFromESP(const std::string& filepath, const std:
 		cam.modelMale = aa.modelMale;
 		cam.modelFemale = aa.modelFemale;
 		cam.bodySlotFlags = aa.bodySlotFlags;
+		cam.raceFormId = aa.raceId != 0 ? remapFid(aa.raceId) : 0;
 		for (auto& at : aa.altTexFemale) {
 			CachedAlternateTexture cat;
 			cat.shapeName = at.shapeName;
@@ -324,6 +448,19 @@ void LeveledListData::LoadRecordsFromESP(const std::string& filepath, const std:
 			continue;
 		// Always overwrite: later masters/plugins take priority
 		npcSkinCache[npc.editorId] = remapFid(npc.wnamFormId);
+	}
+
+	// Cache RACE records (remapped FormID → race info). Also populate raceByEditorId.
+	for (auto& r : reader.GetRaces()) {
+		uint32_t remappedId = remapFid(r.formId);
+		if (raceCache.find(remappedId) != raceCache.end())
+			continue;
+		CachedRACE cr;
+		cr.editorId = r.editorId;
+		cr.skinFormId = r.skinFormId != 0 ? remapFid(r.skinFormId) : 0;
+		raceCache.emplace(remappedId, std::move(cr));
+		if (!r.editorId.empty())
+			raceByEditorId.emplace(r.editorId, remappedId);
 	}
 }
 
@@ -462,6 +599,8 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 	txstCache.clear();
 	lvliCache.clear();
 	otftCache.clear();
+	raceCache.clear();
+	raceByEditorId.clear();
 	npcSkinCache.clear();
 	npcSkinOverrides.clear();
 	npcSkinsScanned = false;
@@ -491,7 +630,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 		// Try same directory as the ESP
 		std::string masterPath = espDirectory + masterName;
 		if (wxFileName::FileExists(masterPath)) {
-			LoadRecordsFromESP(masterPath, {"ARMO", "ARMA", "TXST", "NPC_"}, masterIdx, masters);
+			LoadRecordsFromESP(masterPath, {"ARMO", "ARMA", "TXST", "NPC_", "RACE"}, masterIdx, masters);
 			++mastersLoaded;
 			continue;
 		}
@@ -500,7 +639,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 		if (!baseDataPath.empty()) {
 			masterPath = baseDataPath + masterName;
 			if (wxFileName::FileExists(masterPath)) {
-				LoadRecordsFromESP(masterPath, {"ARMO", "ARMA", "TXST", "NPC_"}, masterIdx, masters);
+				LoadRecordsFromESP(masterPath, {"ARMO", "ARMA", "TXST", "NPC_", "RACE"}, masterIdx, masters);
 				++mastersLoaded;
 				continue;
 			}
@@ -533,6 +672,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 		cam.modelMale = aa.modelMale;
 		cam.modelFemale = aa.modelFemale;
 		cam.bodySlotFlags = aa.bodySlotFlags;
+		cam.raceFormId = aa.raceId; // main-ESP FormIDs need no remap
 		for (auto& at : aa.altTexFemale) {
 			CachedAlternateTexture cat;
 			cat.shapeName = at.shapeName;
@@ -843,7 +983,7 @@ std::string LeveledListData::ResolveNifPath(const std::string& relativePath) con
 // Skin texture resolution for NPC body display
 // ---------------------------------------------------------------------------
 
-std::array<std::string, 8> LeveledListData::ResolveSkinTextures(uint32_t wnamFormId) const {
+std::array<std::string, 8> LeveledListData::ResolveSkinTextures(uint32_t wnamFormId, uint32_t npcRaceFormId) const {
 	std::array<std::string, 8> textures{};
 	if (wnamFormId == 0)
 		return textures;
@@ -856,45 +996,55 @@ std::array<std::string, 8> LeveledListData::ResolveSkinTextures(uint32_t wnamFor
 
 	auto& armo = armoIt->second;
 
-	// Find an ARMA covering body slot 32 (bit 2)
-	for (uint32_t armaId : armo.armatureIds) {
-		auto armaIt = armaCache.find(armaId);
-		if (armaIt == armaCache.end())
-			continue;
-
-		auto& arma = armaIt->second;
-		if (!(arma.bodySlotFlags & (1u << 2))) // bit 2 = slot 32 = Body
-			continue;
-
-		// Use female alternate textures (fallback to male)
-		auto& altTexList = arma.altTexFemale.empty() ? arma.altTexMale : arma.altTexFemale;
-		if (altTexList.empty()) {
-			// No alternate textures — try the ARMA's own model NIF textures
-			// This is the common case for vanilla skin ARMAs
-			wxLogMessage("ResolveSkinTextures: ARMA %08X has body slot but no alt textures", armaId);
-			continue;
-		}
-
-		for (auto& at : altTexList) {
-			auto txstIt = txstCache.find(at.txstFormId);
-			if (txstIt == txstCache.end())
+	// Try race-matching ARMAs first, then any. Game semantics: SkinNaked holds one ARMA
+	// per race; the engine picks the one whose RNAM matches the NPC's race.
+	auto tryArmas = [&](bool requireRaceMatch) -> bool {
+		for (uint32_t armaId : armo.armatureIds) {
+			auto armaIt = armaCache.find(armaId);
+			if (armaIt == armaCache.end())
 				continue;
 
-			for (int i = 0; i < 8; ++i) {
-				if (!txstIt->second.textures[i].empty())
-					textures[i] = txstIt->second.textures[i];
-			}
-			wxLogMessage("ResolveSkinTextures: Found body textures from ARMA %08X (%s), TXST %08X (%s): diffuse='%s'",
-						 armaId,
-						 arma.editorId,
-						 at.txstFormId,
-						 txstIt->second.editorId,
-						 textures[0]);
-			return textures;
-		}
-	}
+			auto& arma = armaIt->second;
+			if (!(arma.bodySlotFlags & (1u << 2))) // bit 2 = slot 32 = Body
+				continue;
+			if (requireRaceMatch && npcRaceFormId != 0 && arma.raceFormId != npcRaceFormId)
+				continue;
 
-	wxLogMessage("ResolveSkinTextures: No body ARMA with textures found for WNAM %08X", wnamFormId);
+			// Use female alternate textures (fallback to male)
+			auto& altTexList = arma.altTexFemale.empty() ? arma.altTexMale : arma.altTexFemale;
+			if (altTexList.empty()) {
+				wxLogMessage("ResolveSkinTextures: ARMA %08X has body slot but no alt textures", armaId);
+				continue;
+			}
+
+			for (auto& at : altTexList) {
+				auto txstIt = txstCache.find(at.txstFormId);
+				if (txstIt == txstCache.end())
+					continue;
+
+				for (int i = 0; i < 8; ++i) {
+					if (!txstIt->second.textures[i].empty())
+						textures[i] = txstIt->second.textures[i];
+				}
+				wxLogMessage("ResolveSkinTextures: Found body textures from ARMA %08X (%s, race %08X), TXST %08X (%s): diffuse='%s'",
+							 armaId,
+							 arma.editorId,
+							 arma.raceFormId,
+							 at.txstFormId,
+							 txstIt->second.editorId,
+							 textures[0]);
+				return true;
+			}
+		}
+		return false;
+	};
+
+	if (npcRaceFormId != 0 && tryArmas(true))
+		return textures;
+	if (tryArmas(false))
+		return textures;
+
+	wxLogMessage("ResolveSkinTextures: No body ARMA with textures found for WNAM %08X (race hint %08X)", wnamFormId, npcRaceFormId);
 	return textures;
 }
 
@@ -902,7 +1052,7 @@ std::array<std::string, 8> LeveledListData::ResolveSkinTextures(uint32_t wnamFor
 // ResolveBodyNifPaths — get body/hands/feet NIF paths from NPC skin ARMO
 // ---------------------------------------------------------------------------
 
-LeveledListData::BodyNifPaths LeveledListData::ResolveBodyNifPaths(uint32_t wnamFormId, bool highWeight) const {
+LeveledListData::BodyNifPaths LeveledListData::ResolveBodyNifPaths(uint32_t wnamFormId, bool highWeight, uint32_t npcRaceFormId) const {
 	BodyNifPaths result;
 	if (wnamFormId == 0)
 		return result;
@@ -915,43 +1065,237 @@ LeveledListData::BodyNifPaths LeveledListData::ResolveBodyNifPaths(uint32_t wnam
 
 	const std::string suffix = highWeight ? "_1.nif" : "_0.nif";
 
-	for (uint32_t armaId : armoIt->second.armatureIds) {
-		auto armaIt = armaCache.find(armaId);
-		if (armaIt == armaCache.end())
-			continue;
+	// Fill one pass worth of ARMAs with optional race-match requirement. Returns true
+	// if all three slots are filled after this pass.
+	auto pass = [&](bool requireRaceMatch) -> bool {
+		for (uint32_t armaId : armoIt->second.armatureIds) {
+			auto armaIt = armaCache.find(armaId);
+			if (armaIt == armaCache.end())
+				continue;
 
-		auto& arma = armaIt->second;
-		const std::string& model = arma.modelFemale.empty() ? arma.modelMale : arma.modelFemale;
-		if (model.empty())
-			continue;
+			auto& arma = armaIt->second;
+			if (requireRaceMatch && npcRaceFormId != 0 && arma.raceFormId != npcRaceFormId)
+				continue;
 
-		// Normalise model path: backslash → slash, ensure meshes/ prefix
-		std::string path = NormalizeMeshPath(model);
+			const std::string& model = arma.modelFemale.empty() ? arma.modelMale : arma.modelFemale;
+			if (model.empty())
+				continue;
 
-		// Replace _1.nif / _0.nif suffix according to requested weight.
-		// Models are usually stored as _1.nif in the ESP; swap if needed.
-		if (path.size() >= 6) {
-			if (path.substr(path.size() - 6) == "_1.nif" || path.substr(path.size() - 6) == "_0.nif")
-				path = path.substr(0, path.size() - 6) + suffix;
-		}
+			std::string path = NormalizeMeshPath(model);
+			if (path.size() >= 6) {
+				if (path.substr(path.size() - 6) == "_1.nif" || path.substr(path.size() - 6) == "_0.nif")
+					path = path.substr(0, path.size() - 6) + suffix;
+			}
 
-		// Assign to the right slot by body slot flags
-		// bit 2 = slot 32 (body), bit 3 = slot 33 (hands), bit 7 = slot 37 (feet)
-		if ((arma.bodySlotFlags & (1u << 2)) && result.body.empty()) {
-			result.body = path;
-			wxLogMessage("ResolveBodyNifPaths: body  → %s", path);
+			if ((arma.bodySlotFlags & (1u << 2)) && result.body.empty()) {
+				result.body = path;
+				wxLogMessage("ResolveBodyNifPaths: body  → %s (ARMA %08X race %08X)", path, armaId, arma.raceFormId);
+			}
+			if ((arma.bodySlotFlags & (1u << 3)) && result.hands.empty()) {
+				result.hands = path;
+				wxLogMessage("ResolveBodyNifPaths: hands → %s (ARMA %08X race %08X)", path, armaId, arma.raceFormId);
+			}
+			if ((arma.bodySlotFlags & (1u << 7)) && result.feet.empty()) {
+				result.feet = path;
+				wxLogMessage("ResolveBodyNifPaths: feet  → %s (ARMA %08X race %08X)", path, armaId, arma.raceFormId);
+			}
 		}
-		if ((arma.bodySlotFlags & (1u << 3)) && result.hands.empty()) {
-			result.hands = path;
-			wxLogMessage("ResolveBodyNifPaths: hands → %s", path);
+		return !result.body.empty() && !result.hands.empty() && !result.feet.empty();
+	};
+
+	// Pass 1: race-matching ARMAs only (matches in-game behavior).
+	// Pass 2: any ARMA to fill remaining slots.
+	if (npcRaceFormId != 0)
+		pass(true);
+	pass(false);
+
+	return result;
+}
+
+// ---------------------------------------------------------------------------
+// Race skin ARMO + NPC body NIF resolution (with race fallback)
+// ---------------------------------------------------------------------------
+
+uint32_t LeveledListData::GetRaceSkinArmo(const std::string& raceEditorId) const {
+	if (raceEditorId.empty())
+		return 0;
+	auto it = raceByEditorId.find(raceEditorId);
+	if (it == raceByEditorId.end())
+		return 0;
+	auto rit = raceCache.find(it->second);
+	if (rit == raceCache.end())
+		return 0;
+	return rit->second.skinFormId;
+}
+
+LeveledListData::BodyNifPaths LeveledListData::ResolveNpcBodyNifPaths(const std::string& npcEditorId, bool highWeight) {
+	BodyNifPaths result;
+	if (npcEditorId.empty())
+		return result;
+
+	// Lazy scan so the all-plugins overrides are available (mirrors ResolveSkinTexturesForNPC).
+	if (!npcSkinsScanned)
+		ScanAllPluginsForNpcSkins();
+
+	// Look up NPC's race FormID (in main-ESP space) so ARMA race filtering works.
+	std::string raceEdid;
+	for (auto& n : npcs) {
+		if (n.editorId == npcEditorId) {
+			raceEdid = n.raceEditorId;
+			break;
 		}
-		if ((arma.bodySlotFlags & (1u << 7)) && result.feet.empty()) {
-			result.feet = path;
-			wxLogMessage("ResolveBodyNifPaths: feet  → %s", path);
-		}
+	}
+	uint32_t npcRaceFid = 0;
+	if (!raceEdid.empty()) {
+		auto it = raceByEditorId.find(raceEdid);
+		if (it != raceByEditorId.end())
+			npcRaceFid = it->second;
+	}
+
+	// Primary: NPC's own WNAM (prefer all-plugins override, fall back to master cache).
+	uint32_t npcWnam = 0;
+	auto ovIt = npcSkinOverrides.find(npcEditorId);
+	if (ovIt != npcSkinOverrides.end() && !ovIt->second.selfDefined)
+		npcWnam = ovIt->second.remappedWnam;
+	if (npcWnam == 0) {
+		auto scIt = npcSkinCache.find(npcEditorId);
+		if (scIt != npcSkinCache.end())
+			npcWnam = scIt->second;
+	}
+	if (npcWnam != 0)
+		result = ResolveBodyNifPaths(npcWnam, highWeight, npcRaceFid);
+
+	if (!result.body.empty() && !result.hands.empty() && !result.feet.empty())
+		return result;
+
+	// Fallback: race's default skin ARMO.
+	uint32_t raceWnam = GetRaceSkinArmo(raceEdid);
+	if (raceWnam != 0) {
+		BodyNifPaths rp = ResolveBodyNifPaths(raceWnam, highWeight, npcRaceFid);
+		if (result.body.empty())
+			result.body = rp.body;
+		if (result.hands.empty())
+			result.hands = rp.hands;
+		if (result.feet.empty())
+			result.feet = rp.feet;
+		if (rp.body.size() || rp.hands.size() || rp.feet.size())
+			wxLogMessage("ResolveNpcBodyNifPaths: NPC '%s' race '%s' (%08X) skin ARMO %08X filled missing slots", npcEditorId, raceEdid, npcRaceFid, raceWnam);
 	}
 
 	return result;
+}
+
+// ---------------------------------------------------------------------------
+// Per-slot skin texture resolution (body / hands / feet)
+// ---------------------------------------------------------------------------
+
+namespace {
+// Fill `dst` from the first TXST in ARMA's female alt-texture list (fallback male).
+bool FillFromArmaTextures(const CachedARMA& arma,
+						  const std::unordered_map<uint32_t, CachedTXST>& txstCache,
+						  std::array<std::string, 8>& dst) {
+	auto& altTex = arma.altTexFemale.empty() ? arma.altTexMale : arma.altTexFemale;
+	for (auto& at : altTex) {
+		auto it = txstCache.find(at.txstFormId);
+		if (it == txstCache.end())
+			continue;
+		for (int i = 0; i < 8; ++i)
+			if (!it->second.textures[i].empty())
+				dst[i] = it->second.textures[i];
+		if (!dst[0].empty())
+			return true;
+	}
+	return false;
+}
+
+// Walk an ARMO's ARMA list filling per-slot texture arrays. Prefers race-matching ARMAs.
+void FillPartTexturesFromArmo(uint32_t armoFid,
+							  uint32_t npcRaceFid,
+							  const std::unordered_map<uint32_t, CachedArmo>& armoCache,
+							  const std::unordered_map<uint32_t, CachedARMA>& armaCache,
+							  const std::unordered_map<uint32_t, CachedTXST>& txstCache,
+							  LeveledListData::BodyPartTextures& out) {
+	if (armoFid == 0)
+		return;
+	auto armoIt = armoCache.find(armoFid);
+	if (armoIt == armoCache.end())
+		return;
+
+	auto tryFill = [&](bool requireRaceMatch) {
+		for (uint32_t armaId : armoIt->second.armatureIds) {
+			auto armaIt = armaCache.find(armaId);
+			if (armaIt == armaCache.end())
+				continue;
+			auto& arma = armaIt->second;
+			if (requireRaceMatch && npcRaceFid != 0 && arma.raceFormId != npcRaceFid)
+				continue;
+
+			if ((arma.bodySlotFlags & (1u << 2)) && out.body[0].empty())
+				FillFromArmaTextures(arma, txstCache, out.body);
+			if ((arma.bodySlotFlags & (1u << 3)) && out.hands[0].empty())
+				FillFromArmaTextures(arma, txstCache, out.hands);
+			if ((arma.bodySlotFlags & (1u << 7)) && out.feet[0].empty())
+				FillFromArmaTextures(arma, txstCache, out.feet);
+		}
+	};
+
+	if (npcRaceFid != 0)
+		tryFill(true);
+	tryFill(false);
+}
+} // namespace
+
+LeveledListData::BodyPartTextures LeveledListData::ResolveNpcBodyPartTextures(const std::string& npcEditorId) {
+	BodyPartTextures out;
+	if (npcEditorId.empty())
+		return out;
+
+	if (!npcSkinsScanned)
+		ScanAllPluginsForNpcSkins();
+
+	// Find NPC race (for ARMA filtering).
+	std::string raceEdid;
+	for (auto& n : npcs) {
+		if (n.editorId == npcEditorId) {
+			raceEdid = n.raceEditorId;
+			break;
+		}
+	}
+	uint32_t npcRaceFid = 0;
+	if (!raceEdid.empty()) {
+		auto it = raceByEditorId.find(raceEdid);
+		if (it != raceByEditorId.end())
+			npcRaceFid = it->second;
+	}
+
+	// Pass 1: NPC's own WNAM (from all-plugin scan, remapped to main cache).
+	uint32_t npcWnam = 0;
+	auto ovIt = npcSkinOverrides.find(npcEditorId);
+	if (ovIt != npcSkinOverrides.end() && !ovIt->second.selfDefined)
+		npcWnam = ovIt->second.remappedWnam;
+	if (npcWnam == 0) {
+		auto scIt = npcSkinCache.find(npcEditorId);
+		if (scIt != npcSkinCache.end())
+			npcWnam = scIt->second;
+	}
+	if (npcWnam != 0)
+		FillPartTexturesFromArmo(npcWnam, npcRaceFid, armoCache, armaCache, txstCache, out);
+
+	// Pass 2: race's default skin ARMO for any slots still empty.
+	if (out.body[0].empty() || out.hands[0].empty() || out.feet[0].empty()) {
+		uint32_t raceWnam = GetRaceSkinArmo(raceEdid);
+		if (raceWnam != 0)
+			FillPartTexturesFromArmo(raceWnam, npcRaceFid, armoCache, armaCache, txstCache, out);
+	}
+
+	wxLogMessage("ResolveNpcBodyPartTextures: NPC '%s' race '%s' (%08X) → body='%s' hands='%s' feet='%s'",
+				 npcEditorId,
+				 raceEdid,
+				 npcRaceFid,
+				 out.body[0],
+				 out.hands[0],
+				 out.feet[0]);
+	return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -1065,17 +1409,49 @@ std::array<std::string, 8> LeveledListData::ResolveSkinTexturesForNPC(const std:
 	if (!npcSkinsScanned)
 		ScanAllPluginsForNpcSkins();
 
+	// Look up NPC's race so we can prefer race-matching ARMAs (SkinNaked has one ARMA per race).
+	std::string raceEdid;
+	for (auto& n : npcs) {
+		if (n.editorId == npcEditorId) {
+			raceEdid = n.raceEditorId;
+			break;
+		}
+	}
+	uint32_t npcRaceFid = 0;
+	if (!raceEdid.empty()) {
+		auto it = raceByEditorId.find(raceEdid);
+		if (it != raceByEditorId.end())
+			npcRaceFid = it->second;
+	}
+
+	// Helper: try the race's default skin ARMO as a last resort.
+	auto tryRaceFallback = [&](std::array<std::string, 8>& tex) {
+		if (!tex[0].empty())
+			return;
+		uint32_t raceWnam = GetRaceSkinArmo(raceEdid);
+		if (raceWnam != 0) {
+			tex = ResolveSkinTextures(raceWnam, npcRaceFid);
+			if (!tex[0].empty())
+				wxLogMessage("ResolveSkinTexturesForNPC: NPC '%s' race '%s' skin ARMO %08X provided textures: %s", npcEditorId, raceEdid, raceWnam, tex[0]);
+		}
+	};
+
 	auto ovIt = npcSkinOverrides.find(npcEditorId);
-	if (ovIt == npcSkinOverrides.end())
+	if (ovIt == npcSkinOverrides.end()) {
+		// No WNAM override known for this NPC → go straight to race fallback.
+		tryRaceFallback(textures);
 		return textures;
+	}
 
 	auto& info = ovIt->second;
 
 	// If WNAM was remapped to main cache space, use the existing cache-based resolver
 	if (!info.selfDefined) {
-		textures = ResolveSkinTextures(info.remappedWnam);
+		textures = ResolveSkinTextures(info.remappedWnam, npcRaceFid);
 		if (!textures[0].empty())
-			wxLogMessage("ResolveSkinTexturesForNPC: NPC '%s' resolved from cache (WNAM %08X): %s", npcEditorId, info.remappedWnam, textures[0]);
+			wxLogMessage("ResolveSkinTexturesForNPC: NPC '%s' resolved from cache (WNAM %08X, race %08X): %s", npcEditorId, info.remappedWnam, npcRaceFid, textures[0]);
+		else
+			tryRaceFallback(textures);
 		return textures;
 	}
 
@@ -1235,7 +1611,10 @@ std::array<std::string, 8> LeveledListData::ResolveSkinTexturesForNPC(const std:
 		}
 	}
 
-	wxLogMessage("ResolveSkinTexturesForNPC: no body textures found for '%s'", npcEditorId);
+	// Self-defined chain yielded nothing — try race fallback.
+	tryRaceFallback(textures);
+	if (textures[0].empty())
+		wxLogMessage("ResolveSkinTexturesForNPC: no body textures found for '%s'", npcEditorId);
 	return textures;
 }
 

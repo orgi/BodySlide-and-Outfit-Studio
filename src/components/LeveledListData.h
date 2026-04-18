@@ -19,11 +19,18 @@ namespace lldata {
 
 /// One NPC from a vanilla ESM, for the head preview selector.
 struct NPCEntry {
-	std::string displayName; // "EditorID" or "Full Name [EditorID]"
+	std::string displayName; // "Full Name (EditorID)" or "EditorID"
+	std::string fullName;	 // FULL subrecord (NPC's in-game name, possibly empty)
 	std::string editorId;
 	uint32_t formId = 0;
-	std::string plugin;		 // e.g. "Skyrim.esm"
-	uint32_t wnamFormId = 0; // WNAM: skin/worn armor FormID (0 = use race default)
+	std::string plugin;			// e.g. "Skyrim.esm"
+	uint32_t wnamFormId = 0;	// WNAM: skin/worn armor FormID (0 = use race default)
+	std::string raceEditorId;	// RACE editor id (resolved from RNAM via source plugin)
+	// QNAM — face tint color (sRGB) for skin tinting. Zero = no tint / use defaults.
+	uint8_t tintR = 0;
+	uint8_t tintG = 0;
+	uint8_t tintB = 0;
+	bool hasTint = false;
 };
 
 /// Per-shape texture override from ARMA MO3S alternate textures.
@@ -91,7 +98,9 @@ public:
 
 	/// Resolve body skin textures for an NPC's WNAM (skin armor FormID).
 	/// Returns an array of 8 texture paths (TX00-TX07), empty strings for unresolved slots.
-	std::array<std::string, 8> ResolveSkinTextures(uint32_t wnamFormId) const;
+	/// If npcRaceFormId is non-zero, ARMAs whose RNAM matches are preferred (game behavior:
+	/// SkinNaked has one ARMA per race, and the engine picks the one for the NPC's race).
+	std::array<std::string, 8> ResolveSkinTextures(uint32_t wnamFormId, uint32_t npcRaceFormId = 0) const;
 
 	/// Resolve body/hands/feet NIF paths for an NPC's WNAM (skin armor FormID).
 	/// Returns relative paths (e.g. "meshes/actors/character/character assets/femalebody_1.nif")
@@ -102,10 +111,32 @@ public:
 		std::string hands; // slot 33 (bit 3)
 		std::string feet;  // slot 37 (bit 7)
 	};
-	BodyNifPaths ResolveBodyNifPaths(uint32_t wnamFormId, bool highWeight) const;
+	/// If npcRaceFormId is non-zero, ARMAs whose RNAM matches that race are preferred,
+	/// falling back to any ARMA if no race-matching one exists.
+	BodyNifPaths ResolveBodyNifPaths(uint32_t wnamFormId, bool highWeight, uint32_t npcRaceFormId = 0) const;
+
+	/// Resolve body/hands/feet NIF paths for an NPC with full fallback chain:
+	/// NPC's WNAM (per-slot) → race's WNAM (per-slot) → empty (caller fills defaults).
+	/// Returns paths in main-ESP FormID space (i.e. looked up in raceCache / armoCache).
+	BodyNifPaths ResolveNpcBodyNifPaths(const std::string& npcEditorId, bool highWeight);
+
+	/// Per-slot skin textures for an NPC (body / hands / feet).
+	/// Each sub-array is TX00-TX07 (diffuse, normal, glow, parallax, env, envMask, multilayer, specular).
+	/// Empty entries mean "no override resolved — use NIF default".
+	/// Uses the same NPC→race fallback chain as ResolveNpcBodyNifPaths, plus ARMA race filtering.
+	struct BodyPartTextures {
+		std::array<std::string, 8> body{};
+		std::array<std::string, 8> hands{};
+		std::array<std::string, 8> feet{};
+	};
+	BodyPartTextures ResolveNpcBodyPartTextures(const std::string& npcEditorId);
 
 	/// Get NPC skin cache (editorId -> remapped WNAM FormID from ESP masters).
 	const std::unordered_map<std::string, uint32_t>& GetNpcSkinCache() const { return npcSkinCache; }
+
+	/// Resolve a race's default skin ARMO FormID (in main-ESP space) from its editor id.
+	/// Returns 0 if the race is unknown or has no WNAM.
+	uint32_t GetRaceSkinArmo(const std::string& raceEditorId) const;
 
 	/// Info about an NPC's skin override found by scanning all plugins.
 	struct NpcSkinInfo {
@@ -162,6 +193,8 @@ private:
 	std::unordered_map<uint32_t, struct CachedTXST> txstCache;
 	std::unordered_map<uint32_t, struct CachedLVLI> lvliCache;
 	std::unordered_map<uint32_t, struct CachedOTFT> otftCache;
+	std::unordered_map<uint32_t, struct CachedRACE> raceCache;	   // remapped RACE FormID → race info
+	std::unordered_map<std::string, uint32_t> raceByEditorId;	   // editorId → remapped RACE FormID
 	std::unordered_map<std::string, uint32_t> npcSkinCache;		   // editorId → remapped WNAM FormID
 	std::unordered_map<std::string, NpcSkinInfo> npcSkinOverrides; // editorId → skin info from all plugins
 	std::vector<std::string> espMasters;						   // Master list of the loaded generated ESP
@@ -191,6 +224,7 @@ struct CachedARMA {
 	std::string modelMale;	 // MOD2 — male 3rd person worn mesh
 	std::string modelFemale; // MOD3 — female 3rd person worn mesh
 	uint32_t bodySlotFlags = 0;
+	uint32_t raceFormId = 0; // RNAM — primary race this ARMA applies to (remapped to main-ESP space)
 	std::vector<CachedAlternateTexture> altTexFemale; // MO3S
 	std::vector<CachedAlternateTexture> altTexMale;	  // MO2S
 };
@@ -209,6 +243,11 @@ struct CachedLVLI {
 struct CachedOTFT {
 	std::string editorId;
 	std::vector<uint32_t> items;
+};
+
+struct CachedRACE {
+	std::string editorId;
+	uint32_t skinFormId = 0; // WNAM — default skin ARMO for this race (remapped to main-ESP space)
 };
 
 } // namespace lldata

@@ -106,9 +106,17 @@ class LeveledListPreviewer : public wxFrame {
 	// .tri file cache: NIF relative path → loaded TriFile
 	std::unordered_map<std::string, TriFile> triFileCache_;
 
-	// NPC skin texture overrides (resolved from WNAM → ARMO → ARMA → TXST)
-	std::array<std::string, 8> npcSkinTextures{};
+	// Per-slot NPC skin textures (body / hands / feet), resolved via NPC→race chain
+	// with ARMA-race filtering. Empty entries mean "no override — use NIF default".
+	lldata::LeveledListData::BodyPartTextures npcBodyPartTextures{};
 	bool hasNpcSkinTextures = false;
+
+	// QNAM face tint (sRGB). Applied as a per-vertex color multiplier on skin shapes
+	// so the body/hands/feet/head get the NPC's complexion without touching shaders.
+	bool hasNpcTint = false;
+	float npcTintR = 1.0f;
+	float npcTintG = 1.0f;
+	float npcTintB = 1.0f;
 
 	// Outfit piece preset morphing via .tri files
 	std::unordered_map<std::string, std::vector<nifly::Vector3>> outfitGameVerts; // displayName → game verts

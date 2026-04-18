@@ -1039,6 +1039,7 @@ void BodySlideApp::LaunchOutfitStudio(const wxString& args) {
 #endif
 
 	wxString osExecCmd = wxString::Format("\"%s/%s\" %s", wxString::FromUTF8(Config["AppDir"]), osExec, args);
+	wxLogMessage("Launching Outfit Studio via command: %s", osExecCmd);
 
 	if (!wxExecute(osExecCmd, wxEXEC_ASYNC)) {
 		wxLogError("Failed to execute '%s' process.", osExecCmd);
