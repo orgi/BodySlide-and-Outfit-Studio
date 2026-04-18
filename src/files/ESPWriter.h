@@ -37,7 +37,7 @@ public:
 private:
 	std::vector<std::string> masters;
 	std::map<uint32_t, Record> recordMap;
-	uint32_t nextFormId = 0x010000;
+	uint32_t nextFormId = 0x800;
 
 	void WriteRecord(std::ofstream& f, const Record& rec);
 	void WriteSubrecord(std::ofstream& f, const Subrecord& sr);

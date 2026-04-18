@@ -23,7 +23,7 @@ bool ESPWriter::Load(const std::string& filepath, const std::set<std::string>& r
 	uint32_t localIndex = (uint32_t)masters.size();
 	
 	// Find true max ID to avoid collisions
-	uint32_t maxId = 0x010000;
+	uint32_t maxId = 0x7FF;
 	for (auto const& [fid, rec] : recordMap) {
 		if ((fid >> 24) == localIndex) {
 			uint32_t id = fid & 0x00FFFFFF;
