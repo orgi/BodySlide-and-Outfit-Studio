@@ -758,19 +758,91 @@ void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
 	ClearHeadMeshes();
 
 	// FaceGen NIF path: meshes/actors/character/FaceGenData/FaceGeom/{plugin}/{formid:08X}.nif
+	// The top byte of a FormID is the plugin's load-order index and is NOT part of
+	// the on-disk name — FaceGen files (especially in BSAs) use the FormID with top
+	// byte == 0x00 regardless of where the plugin sits in load order. Strip it.
 	char formIdBuf[16];
-	std::snprintf(formIdBuf, sizeof(formIdBuf), "%08X", npc.formId);
+	std::snprintf(formIdBuf, sizeof(formIdBuf), "%08X", npc.formId & 0x00FFFFFFu);
 	std::string relativePath = "meshes/actors/character/FaceGenData/FaceGeom/" + npc.plugin + "/" + formIdBuf + ".nif";
 
-	std::string resolvedPath = data.ResolveNifPath(relativePath);
-	if (resolvedPath.empty()) {
-		wxLogWarning("LeveledListPreviewer: FaceGen NIF not found: %s", relativePath);
-		return;
-	}
+	// Load NIF via the same three-way chain LoadNifFromPath uses: loose exact →
+	// loose case-insensitive → BSA via FSManager. The BSA path is what matters
+	// here — vanilla DLC FaceGen NIFs (Dawnguard / HearthFires / Dragonborn)
+	// ship packed inside the DLC BSAs, never as loose files, so the previous
+	// nif.Load(resolvedPath) failed silently on them.
+	std::string baseGamePath = Config["GameDataPath"];
+	if (!baseGamePath.empty() && baseGamePath.back() != '/' && baseGamePath.back() != '\\')
+		baseGamePath += '/';
 
 	NifFile nif;
-	if (nif.Load(resolvedPath) != 0) {
-		wxLogWarning("LeveledListPreviewer: Failed to load FaceGen NIF: %s", resolvedPath);
+	bool loaded = false;
+
+	std::string fullPath = baseGamePath + relativePath;
+	if (wxFileName::FileExists(fullPath))
+		loaded = (nif.Load(fullPath) == 0);
+	if (!loaded) {
+		std::string resolved = lldata::LeveledListData::ResolveCaseInsensitive(baseGamePath, relativePath);
+		if (!resolved.empty())
+			loaded = (nif.Load(resolved) == 0);
+	}
+	if (!loaded) {
+		for (FSArchiveFile* archive : FSManager::archiveList()) {
+			if (!archive || !archive->hasFile(relativePath)) continue;
+			wxMemoryBuffer outData;
+			archive->fileContents(relativePath, outData);
+			if (outData.IsEmpty()) continue;
+			std::string content(static_cast<char*>(outData.GetData()), outData.GetDataLen());
+			std::istringstream stream(content, std::istringstream::binary);
+			loaded = (nif.Load(stream) == 0);
+			break;
+		}
+	}
+
+	// If the primary (native) path didn't resolve, walk the override chain —
+	// every plugin that has an NPC_ record for this NPC is a candidate, and the
+	// CK writes FaceGen under the plugin that last modified the face. Iterate
+	// in REVERSE scan order (latest first) to approximate "highest priority
+	// plugin wins" behavior.
+	if (!loaded) {
+		for (auto it = npc.overrides.rbegin(); it != npc.overrides.rend() && !loaded; ++it) {
+			const std::string& ovPlugin = it->first;
+			uint32_t ovFormId = it->second;
+			if (ovPlugin == npc.plugin && ovFormId == npc.formId)
+				continue; // already tried above
+			char ovBuf[16];
+			std::snprintf(ovBuf, sizeof(ovBuf), "%08X", ovFormId & 0x00FFFFFFu);
+			std::string ovRelPath = "meshes/actors/character/FaceGenData/FaceGeom/" + ovPlugin + "/" + ovBuf + ".nif";
+
+			std::string ovFull = baseGamePath + ovRelPath;
+			if (wxFileName::FileExists(ovFull) && nif.Load(ovFull) == 0) {
+				loaded = true;
+				wxLogMessage("LeveledListPreviewer: FaceGen via override (loose): %s", ovRelPath);
+				break;
+			}
+			std::string ovResolved = lldata::LeveledListData::ResolveCaseInsensitive(baseGamePath, ovRelPath);
+			if (!ovResolved.empty() && nif.Load(ovResolved) == 0) {
+				loaded = true;
+				wxLogMessage("LeveledListPreviewer: FaceGen via override (loose CI): %s", ovRelPath);
+				break;
+			}
+			for (FSArchiveFile* archive : FSManager::archiveList()) {
+				if (!archive || !archive->hasFile(ovRelPath)) continue;
+				wxMemoryBuffer outData;
+				archive->fileContents(ovRelPath, outData);
+				if (outData.IsEmpty()) continue;
+				std::string content(static_cast<char*>(outData.GetData()), outData.GetDataLen());
+				std::istringstream stream(content, std::istringstream::binary);
+				if (nif.Load(stream) == 0) {
+					loaded = true;
+					wxLogMessage("LeveledListPreviewer: FaceGen via override (BSA): %s", ovRelPath);
+					break;
+				}
+			}
+		}
+	}
+
+	if (!loaded) {
+		wxLogWarning("LeveledListPreviewer: FaceGen NIF not found (native path + %zu overrides): %s", npc.overrides.size(), relativePath);
 		return;
 	}
 
