@@ -9709,7 +9709,9 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		if (n.size() < 4 || n.substr(n.size() - 4) != ".nif") n += ".nif"; return n;
 	};
 
-	std::string masterEsp; esp::ArmorAddonRecord originalArma; esp::ArmorRecord originalArmo;
+	struct MatchingSet { esp::ArmorAddonRecord arma; std::vector<esp::ArmorRecord> armors; };
+	std::string masterEsp; 
+	std::vector<MatchingSet> matchingSets;
 	std::map<int, std::string> usedSlots;
 
 	std::string t1 = norm(project->mGamePath.ToStdString() + "/" + project->mGameFile.ToStdString());
@@ -9718,50 +9720,53 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 
 	for (const auto& espFile : espFiles) {
 		std::string espName = wxFileName(espFile).GetFullName().ToStdString();
+		
+		// Skip already modularized plugins
+		if (espName.size() > 12 && espName.substr(espName.size() - 12) == "_modular.esp")
+			continue;
+
 		esp::ESPReader reader;
 		try {
 			if (reader.Load(espFile.ToStdString(), { "ARMO", "ARMA" })) {
 				auto addons = reader.GetArmorAddons();
+				auto armors = reader.GetArmors();
+				bool foundInThisEsp = false;
 				for (const auto& arma : addons) {
 					std::string mF = norm(arma.modelFemale), mM = norm(arma.modelMale);
 					if (mF == t1 || mM == t1 || mF == t1_0 || mM == t1_0 || mF == t1_1 || mM == t1_1 || mF == t2 || mM == t2) {
-						masterEsp = espName; originalArma = arma;
-						wxLogMessage("Modularize: Match found! Master ESP: %s. Loading all used slots...", masterEsp);
-						auto armors = reader.GetArmors();
+						if (masterEsp.empty()) masterEsp = espName;
+						else if (masterEsp != espName) continue; // Stay within one master for now
+
+						MatchingSet ms; ms.arma = arma;
 						for (const auto& armo : armors) {
-							if (originalArmo.formId == 0 && std::find(armo.armatureIds.begin(), armo.armatureIds.end(), arma.formId) != armo.armatureIds.end()) {
-								originalArmo = armo;
-							}
-							std::string name = armo.fullName;
-							if (name.empty()) name = armo.editorId;
-							for (int slot : armo.BodySlots()) {
-								if (usedSlots.find(slot) == usedSlots.end()) usedSlots[slot] = name;
-								else usedSlots[slot] += ", " + name;
+							if (std::find(armo.armatureIds.begin(), armo.armatureIds.end(), arma.formId) != armo.armatureIds.end()) {
+								ms.armors.push_back(armo);
 							}
 						}
-						break;
+						matchingSets.push_back(ms);
+						foundInThisEsp = true;
 					}
+				}
+				if (foundInThisEsp) {
+					wxLogMessage("Modularize: Found %zu matching ARMAs in %s.", matchingSets.size(), masterEsp);
+					for (const auto& armo : armors) {
+						std::string name = armo.fullName;
+						if (name.empty()) name = armo.editorId;
+						for (int slot : armo.BodySlots()) {
+							if (usedSlots.find(slot) == usedSlots.end()) usedSlots[slot] = name;
+							else usedSlots[slot] += ", " + name;
+						}
+					}
+					break; 
 				}
 			}
 		}
 		catch (const std::exception& e) {
 			wxLogMessage("  Exception reading %s: %s", espName, e.what());
 		}
-		if (!masterEsp.empty()) break;
 	}
 
-	// 2. Setup Prefix
-	std::string folderPath = project->mDataDir.ToStdString();
-	std::replace(folderPath.begin(), folderPath.end(), '\\', ' ');
-	std::replace(folderPath.begin(), folderPath.end(), '/', ' ');
-	while (folderPath.find("  ") != std::string::npos) folderPath.replace(folderPath.find("  "), 2, " ");
-	folderPath.erase(0, folderPath.find_first_not_of(' '));
-	folderPath.erase(folderPath.find_last_not_of(' ') + 1);
-
-	if (auto* txtPrefix = XRCCTRL(dlg, "txtBasePrefix", wxTextCtrl)) {
-		txtPrefix->SetValue(wxString::FromUTF8(folderPath + " Modular"));
-	}
-
+	// 2. Setup Scrolled Window
 	auto updateWarn = [&](wxTextCtrl* t, wxStaticText* w) {
 		std::string val = t->GetValue().ToStdString();
 		int slot = -1;
@@ -9790,7 +9795,7 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 			scrollGrid->Add(h, 0, wxALL, 5);
 		};
 		addHeader(_("Old / Shape Name"));
-		addHeader(_("New Name"));
+		addHeader(_("Part Suffix"));
 		addHeader(_("New Slot"));
 		addHeader(_("Comment"));
 	}
@@ -9872,14 +9877,13 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	if (dlg.ShowModal() != wxID_OK) return;
 
 	// 4. Process Input
-	std::string basePrefix = XRCCTRL(dlg, "txtBasePrefix", wxTextCtrl)->GetValue().ToStdString();
 	std::string remainingPartName = txtRemainingName ? txtRemainingName->GetValue().ToStdString() : "";
 	uint32_t remainingSlot = 32;
 	if (txtRemainingSlot) {
 		try { remainingSlot = std::stoul(txtRemainingSlot->GetValue().ToStdString()); } catch(...) {}
 	}
 
-	struct ModularGroup { std::string partName; std::string fullName; std::string nifName; std::vector<std::string> shapes; uint32_t slot; };
+	struct ModularGroup { std::string partName; std::string nifName; std::vector<std::string> shapes; uint32_t slot; };
 	std::map<std::string, ModularGroup> groupsMap;
 
 	auto sanitize = [](const std::string& s) {
@@ -9891,7 +9895,7 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	for (auto& ctrl : activeCtrls) {
 		std::string pName = ctrl.partText->GetValue().ToStdString();
 		if (groupsMap.find(pName) == groupsMap.end()) {
-			ModularGroup g; g.partName = pName; g.fullName = basePrefix + " " + pName; 
+			ModularGroup g; g.partName = pName; 
 			g.nifName = sanitize(pName) + ".nif"; 
 			try { g.slot = std::stoul(ctrl.slotText->GetValue().ToStdString()); } catch(...) { g.slot = 52; }
 			groupsMap[pName] = g;
@@ -9901,7 +9905,7 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 
 	std::vector<ModularGroup> activeGroups;
 	if (!unselectedShapes.empty()) {
-		ModularGroup g; g.partName = remainingPartName; g.fullName = basePrefix + " " + remainingPartName; 
+		ModularGroup g; g.partName = remainingPartName; 
 		g.nifName = sanitize(remainingPartName) + ".nif"; g.shapes = unselectedShapes; g.slot = remainingSlot;
 		activeGroups.push_back(g);
 	}
@@ -9945,7 +9949,8 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 
 	for (auto& g : activeGroups) {
 		SliderSet ss = project->activeSet;
-		ss.SetName(g.fullName); 
+		// Use project outfit name + part name as the full name for the slider set
+		ss.SetName(project->mOutfitName.ToStdString() + " " + g.partName); 
 		std::string outName = g.nifName;
 		if (outName.size() > 4 && outName.substr(outName.size() - 4) == ".nif") outName = outName.substr(0, outName.size() - 4);
 		ss.SetInputFile(g.nifName); ss.SetOutputFile(outName); ss.SetDataFolder(dataDir + "/modular"); ss.Clear();
@@ -9983,7 +9988,7 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 			for (auto& g : groups) {
 				std::vector<std::string> members; g.GetMembers(members); bool found = false;
 				for (const auto& m : members) if (std::equal(m.begin(), m.end(), project->mOutfitName.ToStdString().begin(), project->mOutfitName.ToStdString().end(), [](char c1, char c2) { return std::tolower(c1) == std::tolower(c2); })) { found = true; break; }
-				if (found) { for (auto const& ag : activeGroups) g.AddMembers({ag.fullName}); sgFile.UpdateGroup(g); modified = true; }
+				if (found) { for (auto const& ag : activeGroups) g.AddMembers({project->mOutfitName.ToStdString() + " " + ag.partName}); sgFile.UpdateGroup(g); modified = true; }
 			}
 			if (modified) sgFile.Save();
 		}
@@ -9992,12 +9997,11 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	// --- Phase 3: Standalone ESP Generation ---
 	if (gameDataPath.empty()) {
 		wxLogMessage("Modularize: Game data path not set. Skipping ESP patch.");
-	} else if (!masterEsp.empty()) {
+	} else if (!matchingSets.empty()) {
 		wxLogMessage("Modularize: Phase 3 (ESP Patching) started.");
 		std::string patchName = masterEsp.substr(0, masterEsp.find_last_of('.')) + "_modular.esp";
 		
 		esp::ESPWriter writer; 
-		// Foundation approach: load the entire master mod as base
 		writer.Load(gameDataPath + "/" + masterEsp);
 		
 		auto getP = [&](const std::string& f) {
@@ -10017,25 +10021,25 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 			return;
 		}
 
-		const auto* srcArmaRec = cloneSource.GetRecordByFormId(originalArma.formId);
-		const auto* srcArmoRec = cloneSource.GetRecordByFormId(originalArmo.formId);
+		wxLogMessage("Modularize: Starting record update/cloning loop for %zu matching sets...", matchingSets.size());
+		for (const auto& ms : matchingSets) {
+			const auto* srcArmaRec = cloneSource.GetRecordByFormId(ms.arma.formId);
+			if (!srcArmaRec) continue;
 
-		wxLogMessage("Modularize: Starting record update/cloning loop...");
-		for (auto const& g : activeGroups) {
-			uint32_t aFid = 0;
-			uint32_t slotMask = 0;
-			if (g.slot >= 30 && g.slot <= 61) {
-				slotMask = (1 << (g.slot - 30));
-			}
+			for (auto const& g : activeGroups) {
+				uint32_t aFid = 0;
+				uint32_t slotMask = 0;
+				if (g.slot >= 30 && g.slot <= 61) {
+					slotMask = (1 << (g.slot - 30));
+				}
 
-			bool isBase = (g.partName == remainingPartName);
+				bool isBase = (g.partName == remainingPartName);
 
-			if (srcArmaRec) {
-				// For base part, use the original FormID to replace it. For others, create new.
-				esp::Record newArma = esp::ESPWriter::CloneRecord(*srcArmaRec, isBase ? originalArma.formId : 0);
+				// Clone the ARMA for each part
+				esp::Record newArma = esp::ESPWriter::CloneRecord(*srcArmaRec, isBase ? ms.arma.formId : 0);
 				for (auto& sr : newArma.subrecords) {
 					if (sr.type == "EDID") { 
-						std::string s = sanitize(g.fullName + "_AA");
+						std::string s = sanitize(ms.arma.editorId + "_" + g.partName);
 						sr.data.assign(s.begin(), s.end()); sr.data.push_back('\0'); 
 					}
 					else if (sr.type == "MOD2" || sr.type == "MOD3") { // worn models
@@ -10047,29 +10051,33 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 					}
 				}
 				aFid = writer.AddRecord(newArma);
-			}
-			if (srcArmoRec) {
-				// For base part, use the original FormID to replace it.
-				esp::Record newArmo = esp::ESPWriter::CloneRecord(*srcArmoRec, isBase ? originalArmo.formId : 0);
-				for (auto& sr : newArmo.subrecords) {
-					if (sr.type == "EDID") { 
-						std::string s = sanitize(g.fullName);
-						sr.data.assign(s.begin(), s.end()); sr.data.push_back('\0'); 
-					}
-					else if (sr.type == "FULL") { 
-						std::string s = g.fullName;
-						sr.data.assign(s.begin(), s.end()); sr.data.push_back('\0'); 
-					}
-					else if (sr.type == "MODL") { // arma list
-						if (sr.data.size() >= 4) {
-							sr.data.assign((uint8_t*)&aFid, (uint8_t*)&aFid + 4);
+
+				// Now clone all ARMOs that were using this ARMA
+				for (const auto& armo : ms.armors) {
+					const auto* srcArmoRec = cloneSource.GetRecordByFormId(armo.formId);
+					if (!srcArmoRec) continue;
+
+					esp::Record newArmo = esp::ESPWriter::CloneRecord(*srcArmoRec, isBase ? armo.formId : 0);
+					for (auto& sr : newArmo.subrecords) {
+						if (sr.type == "EDID") { 
+							std::string s = sanitize(armo.editorId + "_" + g.partName);
+							sr.data.assign(s.begin(), s.end()); sr.data.push_back('\0'); 
+						}
+						else if (sr.type == "FULL") { 
+							std::string s = armo.fullName + " " + g.partName;
+							sr.data.assign(s.begin(), s.end()); sr.data.push_back('\0'); 
+						}
+						else if (sr.type == "MODL") { // arma list
+							if (sr.data.size() >= 4) {
+								sr.data.assign((uint8_t*)&aFid, (uint8_t*)&aFid + 4);
+							}
+						}
+						else if (sr.type == "BOD2" || sr.type == "BODT") { 
+							if (sr.data.size() >= 4) memcpy(sr.data.data(), &slotMask, 4); 
 						}
 					}
-					else if (sr.type == "BOD2" || sr.type == "BODT") { 
-						if (sr.data.size() >= 4) memcpy(sr.data.data(), &slotMask, 4); 
-					}
+					writer.AddRecord(newArmo);
 				}
-				writer.AddRecord(newArmo);
 			}
 		}
 
