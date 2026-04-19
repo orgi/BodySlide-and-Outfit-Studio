@@ -29,6 +29,15 @@
 							<tooltip>The word to remove from the original armor names before suffixing.</tooltip>
 						</object>
 					</object>
+					<object class="sizeritem">
+						<option>0</option>
+						<flag>wxALL|wxALIGN_CENTER_VERTICAL</flag>
+						<border>5</border>
+						<object class="wxStaticText" name="lblFolder">
+							<label>Folder: ShapeData/.../modular</label>
+							<font><weight>bold</weight></font>
+						</object>
+					</object>
 				</object>
 			</object>
 			<object class="sizeritem">

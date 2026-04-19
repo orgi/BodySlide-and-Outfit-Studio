@@ -9707,9 +9707,11 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 
 	struct ShapeCtrl { 
 		std::string originalName; 
-		wxStaticText* finalPreview; 
 		wxTextCtrl* partText; 
 		wxTextCtrl* slotText; 
+		wxStaticText* bsPreview; 
+		wxStaticText* gamePreview; 
+		wxStaticText* nifPreview; 
 	};
 
 	struct MatchingSet { 
@@ -9724,12 +9726,17 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	};
 
 	auto norm = [](const std::string& p) {
-		std::string n = p; std::replace(n.begin(), n.end(), '\\', '/'); while (n.find("//") != std::string::npos) n.replace(n.find("//"), 2, "/"); std::transform(n.begin(), n.end(), n.begin(), ::tolower);
-		if (n.size() > 7 && n.substr(0, 7) == "meshes/") n = n.substr(7); if (!n.empty() && n[0] == '/') n = n.substr(1);
-		if (n.size() < 4 || n.substr(n.size() - 4) != ".nif") n += ".nif"; return n;
+		std::string n = p; 
+		std::replace(n.begin(), n.end(), '\\', '/'); 
+		while (n.find("//") != std::string::npos) n.replace(n.find("//"), 2, "/"); 
+		std::transform(n.begin(), n.end(), n.begin(), ::tolower);
+		if (n.size() > 7 && n.substr(0, 7) == "meshes/") n = n.substr(7); 
+		if (!n.empty() && n[0] == '/') n = n.substr(1);
+		if (n.size() < 4 || n.substr(n.size() - 4) != ".nif") n += ".nif"; 
+		return n;
 	};
 
-	// 2. Scan for master ESP and used slots
+	// 1. Scan for master ESP and used slots
 	std::string gameDataPath = Config["GameDataPath"];
 	std::vector<std::string> espFiles;
 	if (!gameDataPath.empty() && std::filesystem::exists(gameDataPath)) {
@@ -9791,23 +9798,30 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		} catch (const std::exception& e) { wxLogMessage("Modularize Error: Exception reading %s: %s", espName, e.what()); }
 	}
 
-	// 3. Setup Dialog and Preview
 	auto updateWarn = [&](wxTextCtrl* t, wxStaticText* w) {
 		std::string val = t->GetValue().ToStdString();
 		int slot = -1; try { slot = std::stoi(val); } catch (...) {}
 		if (usedSlots.count(slot)) { w->SetLabel(wxString::Format(_("In use by: %s"), wxString::FromUTF8(usedSlots[slot]))); w->SetForegroundColour(*wxYELLOW); } else w->SetLabel("");
 	};
 
+	wxStaticText* lblFolder = XRCCTRL(dlg, "lblFolder", wxStaticText);
+	std::string dataDir = project->mDataDir.ToStdString();
+	if (lblFolder) lblFolder->SetLabel(wxString::Format(_("Folder: ShapeData/%s/modular"), wxString::FromUTF8(dataDir)));
+
 	wxScrolledWindow* scroll = XRCCTRL(dlg, "scrollShapes", wxScrolledWindow);
-	wxFlexGridSizer* scrollGrid = new wxFlexGridSizer(0, 5, 2, 0);
-	scrollGrid->AddGrowableCol(0, 2); scrollGrid->AddGrowableCol(1, 3); scrollGrid->AddGrowableCol(2, 3); scrollGrid->AddGrowableCol(3, 1); scrollGrid->AddGrowableCol(4, 3);
+	wxFlexGridSizer* scrollGrid = new wxFlexGridSizer(0, 7, 2, 0);
+	scrollGrid->AddGrowableCol(0, 2); scrollGrid->AddGrowableCol(1, 2); scrollGrid->AddGrowableCol(2, 1); 
+	scrollGrid->AddGrowableCol(3, 3); scrollGrid->AddGrowableCol(4, 3); scrollGrid->AddGrowableCol(5, 2); 
+	scrollGrid->AddGrowableCol(6, 3);
 
 	{
 		auto addHeader = [&](const wxString& label) { wxStaticText* h = new wxStaticText(scroll, wxID_ANY, label); h->SetFont(h->GetFont().Bold()); scrollGrid->Add(h, 0, wxALL, 5); };
-		addHeader(_("Old / Shape Name"));
-		addHeader(_("Final Name Preview"));
+		addHeader(_("Shape Name"));
 		addHeader(_("Part Suffix"));
 		addHeader(_("New Slot"));
+		addHeader(_("Name in BodySlide"));
+		addHeader(_("Name in Game"));
+		addHeader(_("Nif File Name"));
 		addHeader(_("Comment"));
 	}
 
@@ -9815,24 +9829,44 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	wxCheckBox* chkReplace = XRCCTRL(dlg, "chkReplace", wxCheckBox);
 	wxTextCtrl* txtReplace = XRCCTRL(dlg, "txtReplace", wxTextCtrl);
 
-	auto updateFinalNames = [&]() {
-		bool doR = chkReplace->GetValue(); std::string toR = txtReplace->GetValue().ToStdString(); std::string bP = project->mOutfitName.ToStdString();
-		auto getF = [&](const std::string& sfx) {
-			std::string res = bP;
+	std::string gameBasePrefix = project->mOutfitName.ToStdString();
+	if (!matchingSets.empty() && !matchingSets[0].armors.empty()) {
+		gameBasePrefix = matchingSets[0].armors[0].fullName;
+		if (gameBasePrefix.empty()) gameBasePrefix = matchingSets[0].armors[0].editorId;
+	}
+
+	auto getFinalNames = [&](const std::string& original, const std::string& suffix, std::string& outBS, std::string& outGame, std::string& outNif) {
+		bool doR = chkReplace->GetValue(); std::string toR = txtReplace->GetValue().ToStdString();
+		
+		auto applyReplace = [&](const std::string& b) {
+			std::string res = b;
 			if (doR && !toR.empty()) {
 				size_t pos = res.find(toR);
 				while (pos != std::string::npos) { res.erase(pos, toR.length()); pos = res.find(toR, pos); }
 				while (res.find("  ") != std::string::npos) res.replace(res.find("  "), 2, " ");
 				if (!res.empty() && res[0] == ' ') res.erase(0, 1); if (!res.empty() && res.back() == ' ') res.pop_back();
 			}
-			return res + (sfx.empty() ? "" : " " + sfx);
+			return res + (suffix.empty() ? "" : " " + suffix);
 		};
-		for (auto& ctrl : activeCtrls) ctrl.finalPreview->SetLabel(wxString::FromUTF8(getF(ctrl.partText->GetValue().ToStdString())));
+
+		outBS = "[Modularizer] " + applyReplace(project->mOutfitName.ToStdString());
+		outGame = applyReplace(original);
+		outNif = sanitize(suffix.empty() ? project->mOutfitName.ToStdString() : suffix) + ".nif";
+	};
+
+	auto updatePreviews = [&]() {
+		for (auto& ctrl : activeCtrls) {
+			std::string bs, gm, nif;
+			getFinalNames(gameBasePrefix, ctrl.partText->GetValue().ToStdString(), bs, gm, nif);
+			ctrl.bsPreview->SetLabel(wxString::FromUTF8(bs));
+			ctrl.gamePreview->SetLabel(wxString::FromUTF8(gm));
+			ctrl.nifPreview->SetLabel(wxString::FromUTF8(nif));
+		}
 		dlg.Layout();
 	};
 
-	chkReplace->Bind(wxEVT_CHECKBOX, [=](wxCommandEvent&) { updateFinalNames(); });
-	txtReplace->Bind(wxEVT_TEXT, [=](wxCommandEvent&) { updateFinalNames(); });
+	chkReplace->Bind(wxEVT_CHECKBOX, [=](wxCommandEvent&) { updatePreviews(); });
+	txtReplace->Bind(wxEVT_TEXT, [=](wxCommandEvent&) { updatePreviews(); });
 
 	std::vector<std::string> allShapes = GetShapeList();
 	std::vector<std::string> unselectedShapes;
@@ -9845,11 +9879,13 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		if (!isS) unselectedShapes.push_back(s);
 	}
 
-	wxTextCtrl* txtRemainingName = nullptr; wxTextCtrl* txtRemainingSlot = nullptr; wxStaticText* lblRemainingFinal = nullptr;
+	wxTextCtrl* txtRemainingName = nullptr; wxTextCtrl* txtRemainingSlot = nullptr; 
+	wxStaticText* lblRemBS = nullptr; wxStaticText* lblRemGame = nullptr; wxStaticText* lblRemNif = nullptr;
+
 	if (!unselectedShapes.empty()) {
 		scrollGrid->Add(new wxStaticText(scroll, wxID_ANY, _("[Remaining Shapes]")), 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
-		lblRemainingFinal = new wxStaticText(scroll, wxID_ANY, ""); scrollGrid->Add(lblRemainingFinal, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
 		txtRemainingName = new wxTextCtrl(scroll, wxID_ANY, _("Base")); scrollGrid->Add(txtRemainingName, 0, wxALL | wxEXPAND, 5);
+		
 		uint32_t remSNum = 32;
 		if (project && project->GetWorkNif()) {
 			auto* sh = project->GetWorkNif()->FindBlockByName<nifly::NiShape>(unselectedShapes[0]);
@@ -9859,11 +9895,16 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 			}
 		}
 		txtRemainingSlot = new wxTextCtrl(scroll, wxID_ANY, wxString::Format("%u", remSNum)); scrollGrid->Add(txtRemainingSlot, 0, wxALL | wxEXPAND, 5);
+
+		lblRemBS = new wxStaticText(scroll, wxID_ANY, ""); scrollGrid->Add(lblRemBS, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+		lblRemGame = new wxStaticText(scroll, wxID_ANY, ""); scrollGrid->Add(lblRemGame, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+		lblRemNif = new wxStaticText(scroll, wxID_ANY, ""); scrollGrid->Add(lblRemNif, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+
 		wxStaticText* w = new wxStaticText(scroll, wxID_ANY, ""); scrollGrid->Add(w, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
 		updateWarn(txtRemainingSlot, w);
 		txtRemainingSlot->Bind(wxEVT_TEXT, [=, &dlg](wxCommandEvent&) { updateWarn(txtRemainingSlot, w); dlg.Layout(); });
-		txtRemainingName->Bind(wxEVT_TEXT, [=](wxCommandEvent&) { updateFinalNames(); });
-		activeCtrls.push_back({"[Remaining Shapes]", lblRemainingFinal, txtRemainingName, txtRemainingSlot});
+		txtRemainingName->Bind(wxEVT_TEXT, [=](wxCommandEvent&) { updatePreviews(); });
+		activeCtrls.push_back({"[Remaining Shapes]", txtRemainingName, txtRemainingSlot, lblRemBS, lblRemGame, lblRemNif});
 	}
 
 	uint32_t currentSlotNum = 52;
@@ -9872,36 +9913,27 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		if (data && data->GetShape()) {
 			std::string sName = data->GetShape()->name.get();
 			scrollGrid->Add(new wxStaticText(scroll, wxID_ANY, wxString::FromUTF8(sName)), 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
-			wxStaticText* fp = new wxStaticText(scroll, wxID_ANY, ""); scrollGrid->Add(fp, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
 			wxTextCtrl* pt = new wxTextCtrl(scroll, wxID_ANY, wxString::FromUTF8(sName)); scrollGrid->Add(pt, 0, wxALL | wxEXPAND, 5);
 			wxTextCtrl* st = new wxTextCtrl(scroll, wxID_ANY, wxString::Format("%u", currentSlotNum++)); scrollGrid->Add(st, 0, wxALL | wxEXPAND, 5);
+			
+			wxStaticText* bsP = new wxStaticText(scroll, wxID_ANY, ""); scrollGrid->Add(bsP, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+			wxStaticText* gmP = new wxStaticText(scroll, wxID_ANY, ""); scrollGrid->Add(gmP, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+			wxStaticText* nifP = new wxStaticText(scroll, wxID_ANY, ""); scrollGrid->Add(nifP, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+			
 			wxStaticText* w = new wxStaticText(scroll, wxID_ANY, ""); scrollGrid->Add(w, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
 			updateWarn(st, w);
 			st->Bind(wxEVT_TEXT, [=, &dlg](wxCommandEvent&) { updateWarn(st, w); dlg.Layout(); });
-			pt->Bind(wxEVT_TEXT, [=](wxCommandEvent&) { updateFinalNames(); });
-			activeCtrls.push_back({sName, fp, pt, st});
+			pt->Bind(wxEVT_TEXT, [=](wxCommandEvent&) { updatePreviews(); });
+			activeCtrls.push_back({sName, pt, st, bsP, gmP, nifP});
 		}
 	}
-	scroll->SetSizer(scrollGrid); scroll->SetScrollRate(0, 20); updateFinalNames();
-	dlg.SetSize(dlg.FromDIP(wxSize(1400, 800))); dlg.Layout(); scroll->FitInside();
+	scroll->SetSizer(scrollGrid); scroll->SetScrollRate(0, 20); updatePreviews();
+	dlg.SetSize(dlg.FromDIP(wxSize(1600, 800))); dlg.Layout(); scroll->FitInside();
 
 	if (dlg.ShowModal() != wxID_OK) return;
 
 	// 4. Process Final Input
-	bool doReplaceFinal = chkReplace->GetValue();
-	std::string toRemoveFinal = txtReplace->GetValue().ToStdString();
-	auto getFinalNameFinal = [&](const std::string& original, const std::string& suffix) {
-		std::string res = original;
-		if (doReplaceFinal && !toRemoveFinal.empty()) {
-			size_t pos = res.find(toRemoveFinal);
-			while (pos != std::string::npos) { res.erase(pos, toRemoveFinal.length()); pos = res.find(toRemoveFinal, pos); }
-			while (res.find("  ") != std::string::npos) res.replace(res.find("  "), 2, " ");
-			if (!res.empty() && res[0] == ' ') res.erase(0, 1); if (!res.empty() && res.back() == ' ') res.pop_back();
-		}
-		return res + (suffix.empty() ? "" : " " + suffix);
-	};
-
-	std::string remainingPartName = txtRemainingName ? txtRemainingName->GetValue().ToStdString() : "";
+	std::string remainingPartNameFinal = txtRemainingName ? txtRemainingName->GetValue().ToStdString() : "";
 	uint32_t remainingSlotNumFinal = 32;
 	if (txtRemainingSlot) try { remainingSlotNumFinal = std::stoul(txtRemainingSlot->GetValue().ToStdString()); } catch(...) {}
 
@@ -9910,7 +9942,8 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		if (ctrl.originalName == "[Remaining Shapes]") continue;
 		std::string pN = ctrl.partText->GetValue().ToStdString();
 		if (groupsMap.find(pN) == groupsMap.end()) {
-			ModularGroup g; g.partName = pN; g.nifName = sanitize(pN) + ".nif"; 
+			std::string bs, gm, nif; getFinalNames(gameBasePrefix, pN, bs, gm, nif);
+			ModularGroup g; g.partName = pN; g.nifName = nif; 
 			try { g.slot = std::stoul(ctrl.slotText->GetValue().ToStdString()); } catch(...) { g.slot = 52; }
 			groupsMap[pN] = g;
 		}
@@ -9919,14 +9952,14 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 
 	std::vector<ModularGroup> activeGroups;
 	if (!unselectedShapes.empty()) {
-		ModularGroup g; g.partName = remainingPartName; g.nifName = sanitize(remainingPartName) + ".nif"; g.shapes = unselectedShapes; g.slot = remainingSlotNumFinal;
+		std::string bs, gm, nif; getFinalNames(gameBasePrefix, remainingPartNameFinal, bs, gm, nif);
+		ModularGroup g; g.partName = remainingPartNameFinal; g.nifName = nif; g.shapes = unselectedShapes; g.slot = remainingSlotNumFinal;
 		activeGroups.push_back(g);
 	}
 	for (auto const& [name, g] : groupsMap) activeGroups.push_back(g);
 
 	// --- Phase 1: NIF Extraction ---
 	std::string projectPath = GetProjectPath();
-	std::string dataDir = project->mDataDir.ToStdString();
 	std::string modularPath = projectPath + "/ShapeData/" + dataDir + "/modular";
 	try { std::filesystem::create_directories(modularPath); } catch (const std::exception& e) { wxLogMessage("Modularize Error: Failed to create modular path %s: %s", modularPath, e.what()); return; }
 
@@ -9937,7 +9970,7 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		for (auto* s : nif.GetShapes()) {
 			bool inP = std::find(g.shapes.begin(), g.shapes.end(), s->name.get()) != g.shapes.end();
 			bool inU = std::find(uiShapesList.begin(), uiShapesList.end(), s->name.get()) != uiShapesList.end();
-			if (!inP && (inU || g.partName != remainingPartName)) toD.push_back(s);
+			if (!inP && (inU || g.partName != remainingPartNameFinal)) toD.push_back(s);
 			else if (s->HasSkinInstance()) {
 				bool hasT = false; auto tr = nif.GetTexturePathRefs(s);
 				for (const auto& r : tr) if (!r.get().empty()) { hasT = true; break; }
@@ -9955,9 +9988,15 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	// --- Phase 2: XML Generation (.osp) ---
 	std::string ospPath = projectPath + "/SliderSets/" + project->mFileName.BeforeLast('.').AfterLast('/').AfterLast('\\').ToStdString() + "_modular.osp";
 	SliderSetFile ospFile; if (std::filesystem::exists(ospPath)) ospFile.Open(ospPath); else ospFile.New(ospPath);
+
+	auto getBSName = [&](const std::string& suffix) {
+		std::string bs, gm, nif; getFinalNames(gameBasePrefix, suffix, bs, gm, nif);
+		return bs;
+	};
+
 	for (auto& g : activeGroups) {
 		SliderSet ss = project->activeSet;
-		ss.SetName(getFinalNameFinal(project->mOutfitName.ToStdString(), g.partName)); 
+		ss.SetName(getBSName(g.partName)); 
 		std::string outN = g.nifName; if (outN.size() > 4 && outN.substr(outN.size() - 4) == ".nif") outN = outN.substr(0, outN.size() - 4);
 		ss.SetInputFile(g.nifName); ss.SetOutputFile(outN); ss.SetDataFolder(dataDir + "/modular"); ss.Clear();
 		std::set<std::string> filesToC;
@@ -9997,7 +10036,7 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 					for (const auto& m : members) if (std::equal(m.begin(), m.end(), project->mOutfitName.ToStdString().begin(), project->mOutfitName.ToStdString().end(), [](char c1, char c2) { return std::tolower(c1) == std::tolower(c2); })) { found = true; break; }
 					if (found) { 
 						for (auto const& ag : activeGroups) {
-							std::vector<std::string> nMem = { getFinalNameFinal(project->mOutfitName.ToStdString(), ag.partName) };
+							std::vector<std::string> nMem = { getBSName(ag.partName) };
 							gr.AddMembers(nMem); 
 						}
 						sgFile.UpdateGroup(gr); modified = true; 
@@ -10021,7 +10060,7 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		writer.AddMaster(masterEsp);
 		
 		auto getP = [&](const std::string& f) {
-			std::string p = project->mGamePath.ToStdString() + "/" + f; std::replace(p.begin(), p.end(), '/', '\\');
+			std::string p = project->mGamePath.ToStdString() + "/" + f; std::replace(p.begin(), p.end(), '\\', '/');
 			while (p.find("\\\\") != std::string::npos) p.replace(p.find("\\\\"), 2, "\\"); if (p.size() > 7 && p.substr(0, 7) == "meshes\\") p = p.substr(7);
 			if (!p.empty() && p[0] == '\\') p = p.substr(1); if (p.size() > 4 && p.substr(p.size() - 4) == ".nif") p = p.substr(0, p.size() - 4) + "_1.nif"; return p;
 		};
@@ -10034,7 +10073,7 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 			const auto* srcArmaRec = cloneSource.GetRecordByFormId(ms.arma.formId); if (!srcArmaRec) continue;
 			for (auto const& g : activeGroups) {
 				uint32_t aFid = 0; uint32_t slotMask = 0; if (g.slot >= 30 && g.slot <= 61) slotMask = (1 << (g.slot - 30));
-				bool isBase = (g.partName == remainingPartName);
+				bool isBase = (g.partName == remainingPartNameFinal);
 				esp::Record newArma = esp::ESPWriter::CloneRecord(*srcArmaRec, isBase ? ms.arma.formId : 0);
 				for (auto& sr : newArma.subrecords) {
 					if (sr.type == "EDID") { std::string s = sanitize(ms.arma.editorId + "_" + g.partName); sr.data.assign(s.begin(), s.end()); sr.data.push_back('\0'); }
@@ -10047,7 +10086,18 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 					esp::Record newArmo = esp::ESPWriter::CloneRecord(*srcArmoRec, isBase ? armo.formId : 0);
 					for (auto& sr : newArmo.subrecords) {
 						if (sr.type == "EDID") { std::string s = sanitize(armo.editorId + "_" + g.partName); sr.data.assign(s.begin(), s.end()); sr.data.push_back('\0'); }
-						else if (sr.type == "FULL") { std::string s = getFinalNameFinal(armo.fullName, g.partName); sr.data.assign(s.begin(), s.end()); sr.data.push_back('\0'); }
+						else if (sr.type == "FULL") { 
+							bool doR = chkReplace->GetValue(); std::string toR = txtReplace->GetValue().ToStdString();
+							std::string res = armo.fullName;
+							if (doR && !toR.empty()) {
+								size_t pos = res.find(toR);
+								while (pos != std::string::npos) { res.erase(pos, toR.length()); pos = res.find(toR, pos); }
+								while (res.find("  ") != std::string::npos) res.replace(res.find("  "), 2, " ");
+								if (!res.empty() && res[0] == ' ') res.erase(0, 1); if (!res.empty() && res.back() == ' ') res.pop_back();
+							}
+							std::string s = res + (g.partName.empty() ? "" : " " + g.partName);
+							sr.data.assign(s.begin(), s.end()); sr.data.push_back('\0'); 
+						}
 						else if (sr.type == "MODL") { if (sr.data.size() >= 4) sr.data.assign((uint8_t*)&aFid, (uint8_t*)&aFid + 4); }
 						else if (sr.type == "BOD2" || sr.type == "BODT") { if (sr.data.size() >= 4) memcpy(sr.data.data(), &slotMask, 4); }
 					}
@@ -10060,9 +10110,7 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 			wxMessageBox(wxString::Format(_("Modularization complete!\n%s: %s"), exists ? _("Updated patch") : _("Created patch"), patchName));
 		}
 	} else wxLogMessage("Modularize: No master ESP found to patch.");
-}
-
-void OutfitStudioFrame::CheckCopyGeo(wxDialog& dlg) {
+}void OutfitStudioFrame::CheckCopyGeo(wxDialog& dlg) {
 	wxStaticText* errors = XRCCTRL(dlg, "copyGeometryErrors", wxStaticText);
 	wxChoice* sourceChoice = XRCCTRL(dlg, "sourceChoice", wxChoice);
 	wxChoice* targetChoice = XRCCTRL(dlg, "targetChoice", wxChoice);
