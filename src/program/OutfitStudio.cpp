@@ -9943,20 +9943,36 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		return;
 	}
 
+	std::vector<std::string> uiShapes = GetShapeList();
 	for (auto& g : activeGroups) {
 		// Use a temporary clone of the project's NIF to perform the extraction.
 		// We use the project's own save logic to ensure the output matches OS's standard "Export NIF" quality.
 		nifly::NifFile nif(*project->GetWorkNif());
 		std::vector<nifly::NiShape*> toDelete;
 		for (auto* s : nif.GetShapes()) {
-			if (std::find(g.shapes.begin(), g.shapes.end(), s->name.get()) == g.shapes.end()) {
+			bool inPart = std::find(g.shapes.begin(), g.shapes.end(), s->name.get()) != g.shapes.end();
+			bool inUI = std::find(uiShapes.begin(), uiShapes.end(), s->name.get()) != uiShapes.end();
+
+			if (!inPart && (inUI || g.partName != remainingPartName)) {
 				toDelete.push_back(s);
 			} else if (s->HasSkinInstance()) {
-				// Update partitions to match the selected body slot for ALL shapes in this part.
-				auto* skinInst = nif.GetHeader().GetBlock<nifly::NiSkinInstance>(*s->SkinInstanceRef());
-				if (auto* disSkin = dynamic_cast<nifly::BSDismemberSkinInstance*>(skinInst)) {
-					for (auto& p : disSkin->partitions) {
-						p.partID = (uint16_t)g.slot;
+				// Only update slot if the shape has at least one non-empty texture path.
+				// Collision meshes usually have no textures and should stay in their original slot (usually 32).
+				bool hasTexture = false;
+				auto texRefs = nif.GetTexturePathRefs(s);
+				for (const auto& r : texRefs) {
+					if (!r.get().empty()) {
+						hasTexture = true;
+						break;
+					}
+				}
+
+				if (hasTexture) {
+					auto* skinInst = nif.GetHeader().GetBlock<nifly::NiSkinInstance>(*s->SkinInstanceRef());
+					if (auto* disSkin = dynamic_cast<nifly::BSDismemberSkinInstance*>(skinInst)) {
+						for (auto& p : disSkin->partitions) {
+							p.partID = (uint16_t)g.slot;
+						}
 					}
 				}
 			}
