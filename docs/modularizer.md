@@ -3,11 +3,14 @@
 The modularizer will support you to quickly create (more) modular versions of an existing outfit. It will:
 1. Create the reference nifs for the extracted shapes in BodySlide/ShapeData (making sure that all the sliders still work)
 2. Add the new reference nifs to the CBBE and 3BA outfit groups
-3. Create or update a new `<my plugin>_modular.esp`
-    * Create new records for the new parts created from extracting shapes
-    * Update existing records i.e. for the 'remainder' nif
+3. Create or update a `<my plugin>_modular.(esp|esl)`
+    * **Override for Base**: The 'remainder' part (base) SHOULD update the original armor/addon records via overrides in the patch.
+    * **New Records for Parts**: Every new modularized part MUST be created as a new record (clone) with a unique FormID.
+    * **Incremental Updates**: If the `_modular.(esp|esl)` already exists, it must be loaded and updated with new/updated records rather than being overwritten.
+    * **Master Inheritance**: New patches MUST inherit the master list of the source plugin to maintain reference integrity.
+    * **Improved Detection Rule**: Files ending in `_modular.(esp|esl)` SHOULD be skipped when scanning for master plugins, but ONLY if the corresponding original file (without the `_modular` suffix) is also present.
 
-## Prerequesits
+## Prerequisites
 
 Some custom clothing / armor plugins that are not modular enough but are already internally split into separate shapes.
 The modularizer does not support splitting shapes into new shapes; but it supports moving shapes into new nifs.
