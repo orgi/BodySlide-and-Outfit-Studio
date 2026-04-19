@@ -4,9 +4,33 @@
 		<style>wxDEFAULT_DIALOG_STYLE|wxRESIZE_BORDER</style>
 		<title>Modularize Outfit - Configuration</title>
 		<centered>1</centered>
-		<size>800,800</size>
+		<size>1400,800</size>
 		<object class="wxBoxSizer">
 			<orient>wxVERTICAL</orient>
+			<object class="sizeritem">
+				<option>0</option>
+				<flag>wxALL|wxEXPAND</flag>
+				<border>10</border>
+				<object class="wxBoxSizer">
+					<orient>wxHORIZONTAL</orient>
+					<object class="sizeritem">
+						<option>0</option>
+						<flag>wxALL|wxALIGN_CENTER_VERTICAL</flag>
+						<border>5</border>
+						<object class="wxCheckBox" name="chkReplace">
+							<label>Replace word in original name:</label>
+						</object>
+					</object>
+					<object class="sizeritem">
+						<option>1</option>
+						<flag>wxALL|wxEXPAND</flag>
+						<border>5</border>
+						<object class="wxTextCtrl" name="txtReplace">
+							<tooltip>The word to remove from the original armor names before suffixing.</tooltip>
+						</object>
+					</object>
+				</object>
+			</object>
 			<object class="sizeritem">
 				<option>1</option>
 				<flag>wxALL|wxEXPAND</flag>

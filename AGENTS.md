@@ -7,7 +7,7 @@
 * For paths to the local Skyrim installation ALWAYS use skyrim-paths.md
 * When updating files belonging to the original BodySlide or OutfitStudio code, make sure to ALWAYS follow the coding style you find and to ALWAYS keep the changes to an absolute minimum to make it easier to integrate those changes back upstream
 * ALWAYS make sure to update a documentation of agent instruction file in case the user asks for a new feature or a change of strategy
-
+* NEVER report a task as complete or claim a build is successful without first running the project's build script (./run-bodyslide.sh) and confirming it passes. ALWAYS include the build output in your verification step.
 
 ## Documentation per Module
 * The details of the modularizer are described in [`docs/modularizer.md`](docs/modularizer.md)
