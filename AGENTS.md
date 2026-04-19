@@ -6,6 +6,7 @@
 * ALWAYS make sure that the implementation will be compatible with Linux and Windows
 * For paths to the local Skyrim installation ALWAYS use skyrim-paths.md
 * When updating files belonging to the original BodySlide or OutfitStudio code, make sure to ALWAYS follow the coding style you find and to ALWAYS keep the changes to an absolute minimum to make it easier to integrate those changes back upstream
+* ALWAYS make sure to update a documentation of agent instruction file in case the user asks for a new feature or a change of strategy
 
 
 ## Documentation per Module

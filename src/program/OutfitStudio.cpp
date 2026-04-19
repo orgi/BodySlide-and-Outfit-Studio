@@ -32,6 +32,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <wx/dir.h>
 #include <wx/filename.h>
 
+#include <filesystem>
 #include <sstream>
 #include <wx/debugrpt.h>
 #include <wx/wfstream.h>
@@ -9698,9 +9699,17 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 
 	// 1. Scan for master ESP and used slots
 	std::string gameDataPath = Config["GameDataPath"];
-	wxArrayString espFiles;
-	if (!gameDataPath.empty()) {
-		wxDir::GetAllFiles(wxString::FromUTF8(gameDataPath), &espFiles, "*.es*", wxDIR_FILES);
+	std::vector<std::string> espFiles;
+	if (!gameDataPath.empty() && std::filesystem::exists(gameDataPath)) {
+		for (const auto& entry : std::filesystem::directory_iterator(gameDataPath)) {
+			if (entry.is_regular_file()) {
+				std::string ext = entry.path().extension().string();
+				std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+				if (ext == ".esp" || ext == ".esm" || ext == ".esl") {
+					espFiles.push_back(entry.path().string());
+				}
+			}
+		}
 	}
 
 	auto norm = [](const std::string& p) {
@@ -9718,16 +9727,27 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	std::string t1_0 = t1.substr(0, t1.size() - 4) + "_0.nif", t1_1 = t1.substr(0, t1.size() - 4) + "_1.nif";
 	std::string t2 = norm(project->mBaseFile.ToStdString());
 
-	for (const auto& espFile : espFiles) {
-		std::string espName = wxFileName(espFile).GetFullName().ToStdString();
+	for (const auto& espPath : espFiles) {
+		std::filesystem::path p(espPath);
+		std::string espName = p.filename().string();
 		
-		// Skip already modularized plugins
-		if (espName.size() > 12 && espName.substr(espName.size() - 12) == "_modular.esp")
-			continue;
+		// Skip already modularized plugins only if the original exists
+		size_t modPos = espName.find("_modular.");
+		if (modPos != std::string::npos) {
+			std::string baseBase = espName.substr(0, modPos);
+			bool originalExists = false;
+			for (const auto& ext : {".esp", ".esm", ".esl"}) {
+				if (std::filesystem::exists(p.parent_path() / (baseBase + ext))) {
+					originalExists = true;
+					break;
+				}
+			}
+			if (originalExists) continue;
+		}
 
 		esp::ESPReader reader;
 		try {
-			if (reader.Load(espFile.ToStdString(), { "ARMO", "ARMA" })) {
+			if (reader.Load(espPath, { "ARMO", "ARMA" })) {
 				auto addons = reader.GetArmorAddons();
 				auto armors = reader.GetArmors();
 				bool foundInThisEsp = false;
@@ -9762,7 +9782,7 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 			}
 		}
 		catch (const std::exception& e) {
-			wxLogMessage("  Exception reading %s: %s", espName, e.what());
+			wxLogMessage("Modularize Error: Exception reading %s: %s", espName, e.what());
 		}
 	}
 
@@ -9915,7 +9935,13 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	std::string projectPath = GetProjectPath();
 	std::string dataDir = project->mDataDir.ToStdString();
 	std::string modularPath = projectPath + "/ShapeData/" + dataDir + "/modular";
-	wxFileName::Mkdir(wxString::FromUTF8(modularPath), wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL);
+	try {
+		std::filesystem::create_directories(modularPath);
+	} catch (const std::exception& e) {
+		wxLogMessage("Modularize Error: Failed to create modular path %s: %s", modularPath, e.what());
+		wxMessageBox(_("Failed to create modular output directory!"), _("Error"), wxICON_ERROR);
+		return;
+	}
 
 	for (auto& g : activeGroups) {
 		// Use a temporary clone of the project's NIF to perform the extraction.
@@ -9939,13 +9965,15 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		
 		// Final save using OS's standard normalization path
 		nif.GetHeader().SetExportInfo("Exported using Outfit Studio Modularizer.");
-		nif.Save(modularPath + "/" + g.nifName);
+		if (nif.Save(modularPath + "/" + g.nifName) != 0) {
+			wxLogMessage("Modularize Error: Failed to save NIF %s", g.nifName);
+		}
 	}
 
 	// --- Phase 2: XML Generation (.osp) ---
 	std::string ospPath = projectPath + "/SliderSets/" + project->mFileName.BeforeLast('.').AfterLast('/').AfterLast('\\').ToStdString() + "_modular.osp";
 	SliderSetFile ospFile;
-	if (wxFileName::FileExists(ospPath)) ospFile.Open(ospPath); else ospFile.New(ospPath);
+	if (std::filesystem::exists(ospPath)) ospFile.Open(ospPath); else ospFile.New(ospPath);
 
 	for (auto& g : activeGroups) {
 		SliderSet ss = project->activeSet;
@@ -9970,27 +9998,37 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 			}
 		}
 		ospFile.UpdateSet(ss);
-		std::string srcDataPath = projectPath + "/ShapeData/" + dataDir + "/";
-		std::string dstDataPath = projectPath + "/ShapeData/" + dataDir + "/modular/";
-		for (const auto& fName : filesToCopy) if (wxFileName::FileExists(srcDataPath + fName)) {
-			wxFileName::Mkdir(wxFileName(dstDataPath + fName).GetPath(), wxS_DIR_DEFAULT, wxPATH_MKDIR_FULL);
-			wxCopyFile(wxString::FromUTF8(srcDataPath + fName), wxString::FromUTF8(dstDataPath + fName), true);
+		std::filesystem::path srcDataPath = std::filesystem::path(projectPath) / "ShapeData" / dataDir;
+		std::filesystem::path dstDataPath = std::filesystem::path(projectPath) / "ShapeData" / dataDir / "modular";
+		for (const auto& fName : filesToCopy) {
+			std::filesystem::path srcFile = srcDataPath / fName;
+			std::filesystem::path dstFile = dstDataPath / fName;
+			if (std::filesystem::exists(srcFile)) {
+				try {
+					std::filesystem::create_directories(dstFile.parent_path());
+					std::filesystem::copy_file(srcFile, dstFile, std::filesystem::copy_options::overwrite_existing);
+				} catch (const std::exception& e) {
+					wxLogMessage("Modularize Error: Failed to copy data file %s: %s", fName, e.what());
+				}
+			}
 		}
 	}
 	ospFile.Save();
 
 	// Update SliderGroups
-	std::string groupsDir = projectPath + "/SliderGroups/";
-	if (wxFileName::DirExists(groupsDir)) {
-		wxArrayString gFiles; wxDir::GetAllFiles(wxString::FromUTF8(groupsDir), &gFiles, "*.xml", wxDIR_FILES);
-		for (const auto& gf : gFiles) {
-			SliderSetGroupFile sgFile(gf.ToStdString()); std::vector<SliderSetGroup> groups; sgFile.GetAllGroups(groups); bool modified = false;
-			for (auto& g : groups) {
-				std::vector<std::string> members; g.GetMembers(members); bool found = false;
-				for (const auto& m : members) if (std::equal(m.begin(), m.end(), project->mOutfitName.ToStdString().begin(), project->mOutfitName.ToStdString().end(), [](char c1, char c2) { return std::tolower(c1) == std::tolower(c2); })) { found = true; break; }
-				if (found) { for (auto const& ag : activeGroups) g.AddMembers({project->mOutfitName.ToStdString() + " " + ag.partName}); sgFile.UpdateGroup(g); modified = true; }
+	std::filesystem::path groupsDir = std::filesystem::path(projectPath) / "SliderGroups";
+	if (std::filesystem::exists(groupsDir) && std::filesystem::is_directory(groupsDir)) {
+		for (const auto& entry : std::filesystem::directory_iterator(groupsDir)) {
+			if (entry.is_regular_file() && entry.path().extension() == ".xml") {
+				std::string gf = entry.path().string();
+				SliderSetGroupFile sgFile(gf); std::vector<SliderSetGroup> groups; sgFile.GetAllGroups(groups); bool modified = false;
+				for (auto& g : groups) {
+					std::vector<std::string> members; g.GetMembers(members); bool found = false;
+					for (const auto& m : members) if (std::equal(m.begin(), m.end(), project->mOutfitName.ToStdString().begin(), project->mOutfitName.ToStdString().end(), [](char c1, char c2) { return std::tolower(c1) == std::tolower(c2); })) { found = true; break; }
+					if (found) { for (auto const& ag : activeGroups) g.AddMembers({project->mOutfitName.ToStdString() + " " + ag.partName}); sgFile.UpdateGroup(g); modified = true; }
+				}
+				if (modified) sgFile.Save();
 			}
-			if (modified) sgFile.Save();
 		}
 	}
 
@@ -10000,9 +10038,22 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	} else if (!matchingSets.empty()) {
 		wxLogMessage("Modularize: Phase 3 (ESP Patching) started.");
 		std::string patchName = masterEsp.substr(0, masterEsp.find_last_of('.')) + "_modular.esp";
-		
+		std::string patchPath = gameDataPath + "/" + patchName;
+
 		esp::ESPWriter writer; 
-		writer.Load(gameDataPath + "/" + masterEsp);
+		bool exists = std::filesystem::exists(patchPath);
+		if (exists) {
+			wxLogMessage("Modularize: Updating existing patch %s...", patchName);
+			writer.Load(patchPath);
+		} else {
+			wxLogMessage("Modularize: Creating new patch %s...", patchName);
+			// Inherit masters from the source to keep internal references (Keywords, etc.) valid
+			esp::ESPReader reader;
+			if (reader.Load(gameDataPath + "/" + masterEsp, { "TES4" })) {
+				for (const auto& m : reader.GetMasters()) writer.AddMaster(m);
+			}
+		}
+		writer.AddMaster(masterEsp);
 		
 		auto getP = [&](const std::string& f) {
 			std::string p = project->mGamePath.ToStdString() + "/" + f; std::replace(p.begin(), p.end(), '/', '\\');
@@ -10035,7 +10086,7 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 
 				bool isBase = (g.partName == remainingPartName);
 
-				// Clone the ARMA for each part
+				// For base part, create an override (pass original FormID). For others, create new record (pass 0).
 				esp::Record newArma = esp::ESPWriter::CloneRecord(*srcArmaRec, isBase ? ms.arma.formId : 0);
 				for (auto& sr : newArma.subrecords) {
 					if (sr.type == "EDID") { 
@@ -10052,11 +10103,12 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 				}
 				aFid = writer.AddRecord(newArma);
 
-				// Now clone all ARMOs that were using this ARMA
+				// Now clone/override all ARMOs that were using this ARMA
 				for (const auto& armo : ms.armors) {
 					const auto* srcArmoRec = cloneSource.GetRecordByFormId(armo.formId);
 					if (!srcArmoRec) continue;
 
+					// For base part, create an override (pass original FormID). For others, create new record (pass 0).
 					esp::Record newArmo = esp::ESPWriter::CloneRecord(*srcArmoRec, isBase ? armo.formId : 0);
 					for (auto& sr : newArmo.subrecords) {
 						if (sr.type == "EDID") { 
@@ -10081,8 +10133,10 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 			}
 		}
 
-		writer.Save(gameDataPath + "/" + patchName);
-		wxMessageBox(wxString::Format(_("Modularized ESP created: %s"), patchName));
+		if (writer.Save(patchPath)) {
+			wxLogMessage("Modularize: Successfully saved patch %s.", patchName);
+			wxMessageBox(wxString::Format(_("Modularization complete!\n%s: %s"), exists ? _("Updated patch") : _("Created patch"), patchName));
+		}
 	} else {
 		wxLogMessage("Modularize: No master ESP found to patch.");
 	}
