@@ -9726,14 +9726,11 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	};
 
 	auto norm = [](const std::string& p) {
-		std::string n = p; 
-		std::replace(n.begin(), n.end(), '\\', '/'); 
+		std::string n = p; std::replace(n.begin(), n.end(), '\\', '/'); 
 		while (n.find("//") != std::string::npos) n.replace(n.find("//"), 2, "/"); 
 		std::transform(n.begin(), n.end(), n.begin(), ::tolower);
-		if (n.size() > 7 && n.substr(0, 7) == "meshes/") n = n.substr(7); 
-		if (!n.empty() && n[0] == '/') n = n.substr(1);
-		if (n.size() < 4 || n.substr(n.size() - 4) != ".nif") n += ".nif"; 
-		return n;
+		if (n.size() > 7 && n.substr(0, 7) == "meshes/") n = n.substr(7); if (!n.empty() && n[0] == '/') n = n.substr(1);
+		if (n.size() < 4 || n.substr(n.size() - 4) != ".nif") n += ".nif"; return n;
 	};
 
 	// 1. Scan for master ESP and used slots
@@ -9800,8 +9797,8 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 
 	auto updateWarn = [&](wxTextCtrl* t, wxStaticText* w) {
 		std::string val = t->GetValue().ToStdString();
-		int slot = -1; try { slot = std::stoi(val); } catch (...) {}
-		if (usedSlots.count(slot)) { w->SetLabel(wxString::Format(_("In use by: %s"), wxString::FromUTF8(usedSlots[slot]))); w->SetForegroundColour(*wxYELLOW); } else w->SetLabel("");
+		int slotNum = -1; try { slotNum = std::stoi(val); } catch (...) {}
+		if (usedSlots.count(slotNum)) { w->SetLabel(wxString::Format(_("In use by: %s"), wxString::FromUTF8(usedSlots[slotNum]))); w->SetForegroundColour(*wxYELLOW); } else w->SetLabel("");
 	};
 
 	wxStaticText* lblFolder = XRCCTRL(dlg, "lblFolder", wxStaticText);
@@ -9837,7 +9834,6 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 
 	auto getFinalNames = [&](const std::string& original, const std::string& suffix, std::string& outBS, std::string& outGame, std::string& outNif) {
 		bool doR = chkReplace->GetValue(); std::string toR = txtReplace->GetValue().ToStdString();
-		
 		auto applyReplace = [&](const std::string& b) {
 			std::string res = b;
 			if (doR && !toR.empty()) {
@@ -9848,7 +9844,6 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 			}
 			return res + (suffix.empty() ? "" : " " + suffix);
 		};
-
 		outBS = "[Modularizer] " + applyReplace(project->mOutfitName.ToStdString());
 		outGame = applyReplace(original);
 		outNif = sanitize(suffix.empty() ? project->mOutfitName.ToStdString() : suffix) + ".nif";
@@ -9868,9 +9863,9 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	chkReplace->Bind(wxEVT_CHECKBOX, [=](wxCommandEvent&) { updatePreviews(); });
 	txtReplace->Bind(wxEVT_TEXT, [=](wxCommandEvent&) { updatePreviews(); });
 
-	std::vector<std::string> allShapes = GetShapeList();
+	std::vector<std::string> allShapesList = GetShapeList();
 	std::vector<std::string> unselectedShapes;
-	for (const auto& s : allShapes) {
+	for (const auto& s : allShapesList) {
 		bool isS = false;
 		for (size_t i = 0; i < selections.GetCount(); ++i) {
 			ShapeItemData* d = dynamic_cast<ShapeItemData*>(outfitShapes->GetItemData(selections[i]));
@@ -9885,7 +9880,6 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	if (!unselectedShapes.empty()) {
 		scrollGrid->Add(new wxStaticText(scroll, wxID_ANY, _("[Remaining Shapes]")), 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
 		txtRemainingName = new wxTextCtrl(scroll, wxID_ANY, _("Base")); scrollGrid->Add(txtRemainingName, 0, wxALL | wxEXPAND, 5);
-		
 		uint32_t remSNum = 32;
 		if (project && project->GetWorkNif()) {
 			auto* sh = project->GetWorkNif()->FindBlockByName<nifly::NiShape>(unselectedShapes[0]);
@@ -9932,7 +9926,7 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 
 	if (dlg.ShowModal() != wxID_OK) return;
 
-	// 4. Process Final Input
+	// 4. Final Input Processing
 	std::string remainingPartNameFinal = txtRemainingName ? txtRemainingName->GetValue().ToStdString() : "";
 	uint32_t remainingSlotNumFinal = 32;
 	if (txtRemainingSlot) try { remainingSlotNumFinal = std::stoul(txtRemainingSlot->GetValue().ToStdString()); } catch(...) {}
@@ -9942,8 +9936,8 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		if (ctrl.originalName == "[Remaining Shapes]") continue;
 		std::string pN = ctrl.partText->GetValue().ToStdString();
 		if (groupsMap.find(pN) == groupsMap.end()) {
-			std::string bs, gm, nif; getFinalNames(gameBasePrefix, pN, bs, gm, nif);
-			ModularGroup g; g.partName = pN; g.nifName = nif; 
+			std::string bs, gm, nifName; getFinalNames(gameBasePrefix, pN, bs, gm, nifName);
+			ModularGroup g; g.partName = pN; g.nifName = nifName; 
 			try { g.slot = std::stoul(ctrl.slotText->GetValue().ToStdString()); } catch(...) { g.slot = 52; }
 			groupsMap[pN] = g;
 		}
@@ -9952,24 +9946,24 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 
 	std::vector<ModularGroup> activeGroups;
 	if (!unselectedShapes.empty()) {
-		std::string bs, gm, nif; getFinalNames(gameBasePrefix, remainingPartNameFinal, bs, gm, nif);
-		ModularGroup g; g.partName = remainingPartNameFinal; g.nifName = nif; g.shapes = unselectedShapes; g.slot = remainingSlotNumFinal;
+		std::string bs, gm, nifName; getFinalNames(gameBasePrefix, remainingPartNameFinal, bs, gm, nifName);
+		ModularGroup g; g.partName = remainingPartNameFinal; g.nifName = nifName; g.shapes = unselectedShapes; g.slot = remainingSlotNumFinal;
 		activeGroups.push_back(g);
 	}
 	for (auto const& [name, g] : groupsMap) activeGroups.push_back(g);
 
 	// --- Phase 1: NIF Extraction ---
-	std::string projectPath = GetProjectPath();
-	std::string modularPath = projectPath + "/ShapeData/" + dataDir + "/modular";
+	std::string projPath = GetProjectPath();
+	std::string modularPath = projPath + "/ShapeData/" + dataDir + "/modular";
 	try { std::filesystem::create_directories(modularPath); } catch (const std::exception& e) { wxLogMessage("Modularize Error: Failed to create modular path %s: %s", modularPath, e.what()); return; }
 
-	std::vector<std::string> uiShapesList = GetShapeList();
+	std::vector<std::string> curUiShapes = GetShapeList();
 	for (auto& g : activeGroups) {
 		nifly::NifFile nif(*project->GetWorkNif());
 		std::vector<nifly::NiShape*> toD;
 		for (auto* s : nif.GetShapes()) {
 			bool inP = std::find(g.shapes.begin(), g.shapes.end(), s->name.get()) != g.shapes.end();
-			bool inU = std::find(uiShapesList.begin(), uiShapesList.end(), s->name.get()) != uiShapesList.end();
+			bool inU = std::find(curUiShapes.begin(), curUiShapes.end(), s->name.get()) != curUiShapes.end();
 			if (!inP && (inU || g.partName != remainingPartNameFinal)) toD.push_back(s);
 			else if (s->HasSkinInstance()) {
 				bool hasT = false; auto tr = nif.GetTexturePathRefs(s);
@@ -9986,11 +9980,11 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	}
 
 	// --- Phase 2: XML Generation (.osp) ---
-	std::string ospPath = projectPath + "/SliderSets/" + project->mFileName.BeforeLast('.').AfterLast('/').AfterLast('\\').ToStdString() + "_modular.osp";
+	std::string ospPath = projPath + "/SliderSets/" + project->mFileName.BeforeLast('.').AfterLast('/').AfterLast('\\').ToStdString() + "_modular.osp";
 	SliderSetFile ospFile; if (std::filesystem::exists(ospPath)) ospFile.Open(ospPath); else ospFile.New(ospPath);
 
-	auto getBSName = [&](const std::string& suffix) {
-		std::string bs, gm, nif; getFinalNames(gameBasePrefix, suffix, bs, gm, nif);
+	auto getBSName = [&](const std::string& sfx) {
+		std::string bs, gm, nif; getFinalNames(gameBasePrefix, sfx, bs, gm, nif);
 		return bs;
 	};
 
@@ -10014,8 +10008,8 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 			}
 		}
 		ospFile.UpdateSet(ss);
-		std::filesystem::path srcDP = std::filesystem::path(projectPath) / "ShapeData" / dataDir;
-		std::filesystem::path dstDP = std::filesystem::path(projectPath) / "ShapeData" / dataDir / "modular";
+		std::filesystem::path srcDP = std::filesystem::path(projPath) / "ShapeData" / dataDir;
+		std::filesystem::path dstDP = std::filesystem::path(projPath) / "ShapeData" / dataDir / "modular";
 		for (const auto& fN : filesToC) {
 			std::filesystem::path srcF = srcDP / fN; std::filesystem::path dstF = dstDP / fN;
 			if (std::filesystem::exists(srcF)) {
@@ -10026,24 +10020,32 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	}
 	ospFile.Save();
 
-	std::filesystem::path groupsDir = std::filesystem::path(projectPath) / "SliderGroups";
+	// Dedicated SliderGroups file creation
+	std::filesystem::path groupsDir = std::filesystem::path(projPath) / "SliderGroups";
 	if (std::filesystem::exists(groupsDir) && std::filesystem::is_directory(groupsDir)) {
+		std::set<std::string> targetGroupNames;
 		for (const auto& entry : std::filesystem::directory_iterator(groupsDir)) {
 			if (entry.is_regular_file() && entry.path().extension() == ".xml") {
-				SliderSetGroupFile sgFile(entry.path().string()); std::vector<SliderSetGroup> groups; sgFile.GetAllGroups(groups); bool modified = false;
-				for (auto& gr : groups) {
-					std::vector<std::string> members; gr.GetMembers(members); bool found = false;
-					for (const auto& m : members) if (std::equal(m.begin(), m.end(), project->mOutfitName.ToStdString().begin(), project->mOutfitName.ToStdString().end(), [](char c1, char c2) { return std::tolower(c1) == std::tolower(c2); })) { found = true; break; }
-					if (found) { 
-						for (auto const& ag : activeGroups) {
-							std::vector<std::string> nMem = { getBSName(ag.partName) };
-							gr.AddMembers(nMem); 
-						}
-						sgFile.UpdateGroup(gr); modified = true; 
+				SliderSetGroupFile sgFile(entry.path().string()); std::vector<SliderSetGroup> grs; sgFile.GetAllGroups(grs);
+				for (auto& gr : grs) {
+					std::vector<std::string> members; gr.GetMembers(members);
+					for (const auto& m : members) if (std::equal(m.begin(), m.end(), project->mOutfitName.ToStdString().begin(), project->mOutfitName.ToStdString().end(), [](char c1, char c2) { return std::tolower(c1) == std::tolower(c2); })) {
+						targetGroupNames.insert(gr.GetName()); break;
 					}
 				}
-				if (modified) sgFile.Save();
 			}
+		}
+
+		if (!targetGroupNames.empty()) {
+			std::string sgFileName = "[Modularized] " + project->mOutfitName.ToStdString() + ".xml";
+			SliderSetGroupFile newSgFile; newSgFile.New((groupsDir / sgFileName).string());
+			for (const auto& gn : targetGroupNames) {
+				SliderSetGroup ng; ng.SetName(gn);
+				std::vector<std::string> mems;
+				for (const auto& ag : activeGroups) mems.push_back(getBSName(ag.partName));
+				ng.AddMembers(mems); newSgFile.UpdateGroup(ng);
+			}
+			newSgFile.Save();
 		}
 	}
 
@@ -10087,11 +10089,11 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 					for (auto& sr : newArmo.subrecords) {
 						if (sr.type == "EDID") { std::string s = sanitize(armo.editorId + "_" + g.partName); sr.data.assign(s.begin(), s.end()); sr.data.push_back('\0'); }
 						else if (sr.type == "FULL") { 
-							bool doR = chkReplace->GetValue(); std::string toR = txtReplace->GetValue().ToStdString();
+							bool doRFinal = chkReplace->GetValue(); std::string toRFinal = txtReplace->GetValue().ToStdString();
 							std::string res = armo.fullName;
-							if (doR && !toR.empty()) {
-								size_t pos = res.find(toR);
-								while (pos != std::string::npos) { res.erase(pos, toR.length()); pos = res.find(toR, pos); }
+							if (doRFinal && !toRFinal.empty()) {
+								size_t pos = res.find(toRFinal);
+								while (pos != std::string::npos) { res.erase(pos, toRFinal.length()); pos = res.find(toRFinal, pos); }
 								while (res.find("  ") != std::string::npos) res.replace(res.find("  "), 2, " ");
 								if (!res.empty() && res[0] == ' ') res.erase(0, 1); if (!res.empty() && res.back() == ' ') res.pop_back();
 							}
@@ -10110,7 +10112,8 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 			wxMessageBox(wxString::Format(_("Modularization complete!\n%s: %s"), exists ? _("Updated patch") : _("Created patch"), patchName));
 		}
 	} else wxLogMessage("Modularize: No master ESP found to patch.");
-}void OutfitStudioFrame::CheckCopyGeo(wxDialog& dlg) {
+}
+void OutfitStudioFrame::CheckCopyGeo(wxDialog& dlg) {
 	wxStaticText* errors = XRCCTRL(dlg, "copyGeometryErrors", wxStaticText);
 	wxChoice* sourceChoice = XRCCTRL(dlg, "sourceChoice", wxChoice);
 	wxChoice* targetChoice = XRCCTRL(dlg, "targetChoice", wxChoice);
