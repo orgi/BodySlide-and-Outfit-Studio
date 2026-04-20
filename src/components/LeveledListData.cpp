@@ -480,11 +480,10 @@ void LeveledListData::LoadRecordsFromESP(const std::string& filepath, const std:
 				 reader.GetArmorAddons().size(),
 				 reader.GetTextureSets().size());
 
-	// Cache ARMO records (don't overwrite — main ESP takes priority)
+	// Cache ARMO records. Overwrite: in Bethesda load order, later masters
+	// override earlier ones for the same (remapped) FormID.
 	for (auto& ar : reader.GetArmors()) {
 		uint32_t remappedId = remapFid(ar.formId);
-		if (armoCache.find(remappedId) != armoCache.end())
-			continue;
 		CachedArmo ca;
 		ca.fullName = ar.fullName;
 		ca.editorId = ar.editorId;
@@ -496,14 +495,12 @@ void LeveledListData::LoadRecordsFromESP(const std::string& filepath, const std:
 		// Remap armature IDs
 		for (uint32_t aid : ar.armatureIds)
 			ca.armatureIds.push_back(remapFid(aid));
-		armoCache.emplace(remappedId, std::move(ca));
+		armoCache[remappedId] = std::move(ca);
 	}
 
-	// Cache ARMA records
+	// Cache ARMA records. Overwrite (later master wins).
 	for (auto& aa : reader.GetArmorAddons()) {
 		uint32_t remappedId = remapFid(aa.formId);
-		if (armaCache.find(remappedId) != armaCache.end())
-			continue;
 		CachedARMA cam;
 		cam.editorId = aa.editorId;
 		cam.modelMale = aa.modelMale;
@@ -524,40 +521,37 @@ void LeveledListData::LoadRecordsFromESP(const std::string& filepath, const std:
 			cat.index3D = at.index3D;
 			cam.altTexMale.push_back(std::move(cat));
 		}
-		armaCache.emplace(remappedId, std::move(cam));
+		armaCache[remappedId] = std::move(cam);
 	}
 
-	// Cache TXST records
+	// Cache TXST records. Overwrite (later master wins).
 	for (auto& ts : reader.GetTextureSets()) {
 		uint32_t remappedId = remapFid(ts.formId);
-		if (txstCache.find(remappedId) != txstCache.end())
-			continue;
 		CachedTXST ct;
 		ct.editorId = ts.editorId;
 		for (int i = 0; i < 8; ++i)
 			ct.textures[i] = ts.textures[i];
-		txstCache.emplace(remappedId, std::move(ct));
+		txstCache[remappedId] = std::move(ct);
 	}
 
-	// Cache NPC_ WNAM references (editorId → remapped WNAM FormID)
+	// Cache NPC_ WNAM references (editorId → remapped WNAM FormID).
+	// Always overwrite: later masters/plugins take priority.
 	for (auto& npc : reader.GetNPCs()) {
 		if (npc.editorId.empty() || npc.wnamFormId == 0)
 			continue;
-		// Always overwrite: later masters/plugins take priority
 		npcSkinCache[npc.editorId] = remapFid(npc.wnamFormId);
 	}
 
-	// Cache RACE records (remapped FormID → race info). Also populate raceByEditorId.
+	// Cache RACE records (remapped FormID → race info). Overwrite (later master wins).
+	// raceByEditorId is keyed by editor id; overwrite it too so it tracks the same winner.
 	for (auto& r : reader.GetRaces()) {
 		uint32_t remappedId = remapFid(r.formId);
-		if (raceCache.find(remappedId) != raceCache.end())
-			continue;
 		CachedRACE cr;
 		cr.editorId = r.editorId;
 		cr.skinFormId = r.skinFormId != 0 ? remapFid(r.skinFormId) : 0;
-		raceCache.emplace(remappedId, std::move(cr));
+		raceCache[remappedId] = std::move(cr);
 		if (!r.editorId.empty())
-			raceByEditorId.emplace(r.editorId, remappedId);
+			raceByEditorId[r.editorId] = remappedId;
 	}
 }
 
