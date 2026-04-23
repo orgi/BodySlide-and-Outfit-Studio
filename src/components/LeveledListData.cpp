@@ -225,7 +225,7 @@ void LeveledListData::LoadNPCs() {
 		}
 
 		esp::ESPReader reader;
-		if (!reader.Load(esmPath, {"NPC_", "RACE"})) {
+		if (!reader.Load(esmPath, {"NPC_", "RACE", "HDPT"})) {
 			wxLogWarning("LeveledListData::LoadNPCs: failed to load %s", esmPath);
 			continue;
 		}
@@ -251,6 +251,20 @@ void LeveledListData::LoadNPCs() {
 				er.raceEdidByBase[r.formId & 0x00FFFFFF] = r.editorId;
 		}
 		esmRacesByName[vanillaESMs[i]] = std::move(er);
+
+		// Cache HDPT records from this ESM
+		for (auto& hp : reader.GetHeadParts()) {
+			CachedHeadPart chp;
+			chp.editorId = hp.editorId;
+			chp.model = hp.model;
+			chp.type = hp.type;
+			// Remap native formId to main-ESP master index space if possible.
+			// Vanilla ESMs are guaranteed to be in espMasters if the generated ESP is valid.
+			// For LoadNPCs (vanilla scan), we can use a temporary remapping.
+			uint32_t baseId = hp.formId & 0x00FFFFFF;
+			uint32_t remappedFid = (static_cast<uint32_t>(i) << 24) | baseId;
+			headPartCache[remappedFid] = std::move(chp);
+		}
 
 		size_t countBefore = npcs.size() + pending.size();
 		auto& readerMasters = reader.GetMasters();
@@ -289,6 +303,26 @@ void LeveledListData::LoadNPCs() {
 			pn.sourceEsm = vanillaESMs[i];
 			// Seed the override list with this plugin's native record.
 			pn.entry.overrides.emplace_back(vanillaESMs[i], npc.formId);
+
+			// Map head parts from the source ESM's local FormID space to our indexed master space.
+			auto remapLocalFid = [&](uint32_t localFid) -> uint32_t {
+				uint8_t tb = (localFid >> 24) & 0xFF;
+				uint32_t bid = localFid & 0x00FFFFFF;
+				if (tb == readerMasters.size())
+					return (static_cast<uint32_t>(i) << 24) | bid;
+				
+				std::string mName = ToLower(readerMasters[tb]);
+				for (int j = 0; vanillaESMs[j]; ++j) {
+					if (ToLower(vanillaESMs[j]) == mName)
+						return (static_cast<uint32_t>(j) << 24) | bid;
+				}
+				return 0;
+			};
+			for (uint32_t hpFid : npc.headParts) {
+				uint32_t remapped = remapLocalFid(hpFid);
+				if (remapped != 0)
+					pn.entry.headParts.push_back(remapped);
+			}
 
 			// Full in-game name (may be empty, or an unresolved lstring marker like "[1234]")
 			if (!npc.fullName.empty() && npc.fullName[0] != '[')
@@ -553,6 +587,16 @@ void LeveledListData::LoadRecordsFromESP(const std::string& filepath, const std:
 		if (!r.editorId.empty())
 			raceByEditorId[r.editorId] = remappedId;
 	}
+
+	// Cache HDPTs
+	for (auto& hp : reader.GetHeadParts()) {
+		uint32_t remappedId = remapFid(hp.formId);
+		CachedHeadPart chp;
+		chp.editorId = hp.editorId;
+		chp.model = hp.model;
+		chp.type = hp.type;
+		headPartCache[remappedId] = std::move(chp);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -693,6 +737,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 	raceCache.clear();
 	raceByEditorId.clear();
 	npcSkinCache.clear();
+	headPartCache.clear();
 	npcSkinOverrides.clear();
 	npcSkinsScanned = false;
 	espMasters.clear();
@@ -702,7 +747,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 
 	// Load the main ESP first
 	esp::ESPReader mainReader;
-	if (!mainReader.Load(filepath, {"ARMO", "ARMA", "TXST", "LVLI", "OTFT"}))
+	if (!mainReader.Load(filepath, {"ARMO", "ARMA", "TXST", "LVLI", "OTFT", "HDPT"}))
 		return false;
 
 	espFilename = mainReader.GetFilename();
@@ -721,7 +766,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 		// Try same directory as the ESP
 		std::string masterPath = espDirectory + masterName;
 		if (wxFileName::FileExists(masterPath)) {
-			LoadRecordsFromESP(masterPath, {"ARMO", "ARMA", "TXST", "NPC_", "RACE"}, masterIdx, masters);
+			LoadRecordsFromESP(masterPath, {"ARMO", "ARMA", "TXST", "NPC_", "RACE", "HDPT"}, masterIdx, masters);
 			++mastersLoaded;
 			continue;
 		}
@@ -730,7 +775,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 		if (!baseDataPath.empty()) {
 			masterPath = baseDataPath + masterName;
 			if (wxFileName::FileExists(masterPath)) {
-				LoadRecordsFromESP(masterPath, {"ARMO", "ARMA", "TXST", "NPC_", "RACE"}, masterIdx, masters);
+				LoadRecordsFromESP(masterPath, {"ARMO", "ARMA", "TXST", "NPC_", "RACE", "HDPT"}, masterIdx, masters);
 				++mastersLoaded;
 				continue;
 			}
@@ -803,6 +848,14 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 		co.editorId = ot.editorId;
 		co.items = ot.items;
 		otftCache[ot.formId] = std::move(co);
+	}
+
+	for (auto& hp : mainReader.GetHeadParts()) {
+		CachedHeadPart chp;
+		chp.editorId = hp.editorId;
+		chp.model = hp.model;
+		chp.type = hp.type;
+		headPartCache[hp.formId] = std::move(chp);
 	}
 
 	// Build outfit entries from OTFT records
@@ -1217,6 +1270,13 @@ uint32_t LeveledListData::GetRaceSkinArmo(const std::string& raceEditorId) const
 	if (rit == raceCache.end())
 		return 0;
 	return rit->second.skinFormId;
+}
+
+std::string LeveledListData::ResolveHeadPartNif(uint32_t headPartFormId) const {
+	auto it = headPartCache.find(headPartFormId);
+	if (it == headPartCache.end())
+		return {};
+	return it->second.model;
 }
 
 LeveledListData::BodyNifPaths LeveledListData::ResolveNpcBodyNifPaths(const std::string& npcEditorId, bool highWeight) {

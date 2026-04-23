@@ -4,6 +4,7 @@
 
 #include "LeveledListPreviewer.h"
 #include "BodySlideApp.h"
+#include "../components/Anim.h"
 
 #include <algorithm>
 #include <cctype>
@@ -757,6 +758,16 @@ void LeveledListPreviewer::ClearHeadMeshes() {
 void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
 	ClearHeadMeshes();
 
+	// Ensure skeleton is loaded for bone transforms
+	std::string skelPath = FindSkeletonNifPath();
+	if (!skelPath.empty()) {
+		// Initialize skeleton root name if not set
+		if (Config["Anim/SkeletonRootName"].empty()) {
+			Config.SetValue("Anim/SkeletonRootName", "NPC Root [Root]");
+		}
+		AnimSkeleton::getInstance().LoadFromNif(skelPath);
+	}
+
 	// FaceGen NIF path: meshes/actors/character/FaceGenData/FaceGeom/{plugin}/{formid:08X}.nif
 	// The top byte of a FormID is the plugin's load-order index and is NOT part of
 	// the on-disk name — FaceGen files (especially in BSAs) use the FormID with top
@@ -846,11 +857,58 @@ void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
 		return;
 	}
 
+	// Position correction for head shapes. We're not running a skinning shader,
+	// so AddMeshFromNif positions each shape using its stored xformSkinToGlobal,
+	// which is inconsistent across shapes within a FaceGen NIF: the face shape
+	// has verts pre-baked at head height with skinToGlobal=identity, while the
+	// mouth/teeth shape has verts at bone-local origin with skinToGlobal=identity
+	// too — the latter renders on the ground.
+	//
+	// The correct per-vertex position in world space is:
+	//     final = char_headBone_global * xformSkinToBone * vert_nif
+	// which in mesh-space coordinates is:
+	//     xformMeshToModel = xformNifToMesh * char_head_global * xformSkinToBone * xformMeshToNif
+	//
+	// This replaces AddMeshFromNif's positioning entirely. It uses xformSkinToBone
+	// from each shape's own skin data, so the face's translation(0,0,-120) maps
+	// face verts to bone-local origin and then char_head_global lifts them back to
+	// head height (net identity), while the mouth's identity skin-to-bone leaves
+	// verts at origin and char_head_global translates them to the head.
+	nifly::MatTransform charHeadBoneGlobal;
+	bool haveCharHeadBone = AnimSkeleton::getInstance().GetBoneTransformToGlobal("NPC Head [Head]", charHeadBoneGlobal)
+						 || AnimSkeleton::getInstance().GetBoneTransformToGlobal("NPC Head", charHeadBoneGlobal);
+	if (!haveCharHeadBone) {
+		wxLogError("LeveledListPreviewer: NPC Head bone not in skeleton; head shape positioning will be incorrect");
+	}
+
+	auto applyHeadCorrection = [&](Mesh* m, NifFile& sourceNif, const std::string& shapeName) {
+		if (!m || !haveCharHeadBone)
+			return;
+		auto* shape = sourceNif.FindBlockByName<NiShape>(shapeName);
+		if (!shape || !shape->IsSkinned())
+			return;
+
+		nifly::MatTransform skinToBone;
+		if (!sourceNif.GetShapeTransformSkinToBone(shape, "NPC Head [Head]", skinToBone))
+			if (!sourceNif.GetShapeTransformSkinToBone(shape, "NPC Head", skinToBone))
+				return;  // shape isn't weighted to NPC Head — leave AddMeshFromNif's positioning
+
+		nifly::MatTransform targetNif = charHeadBoneGlobal.ComposeTransforms(skinToBone);
+		nifly::MatTransform targetMesh = Mesh::xformNifToMesh.ComposeTransforms(targetNif.ComposeTransforms(Mesh::xformMeshToNif));
+		m->SetXformMeshToModel(targetMesh);
+		wxLogMessage("LeveledListPreviewer: head correction for '%s': skinToBone=(%.2f,%.2f,%.2f) charHead=(%.2f,%.2f,%.2f)",
+					 shapeName,
+					 skinToBone.translation.x, skinToBone.translation.y, skinToBone.translation.z,
+					 charHeadBoneGlobal.translation.x, charHeadBoneGlobal.translation.y, charHeadBoneGlobal.translation.z);
+	};
+
 	for (auto& shapeName : nif.GetShapeNames()) {
 		std::string meshName = "_head_" + shapeName;
 		Mesh* m = gls.AddMeshFromNif(&nif, shapeName, meshName, nullptr, false);
 		if (!m)
 			continue;
+
+		applyHeadCorrection(m, nif, shapeName);
 
 		// Targeted opacity fix: only for the face shape. Hair, eyelashes and brows RELY on
 		// per-vertex alpha + alpha-blending to fade their edges; zeroing those flags turns
@@ -926,7 +984,77 @@ void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
 
 	UpdateHeadVisibility();
 
-	wxLogMessage("LeveledListPreviewer: Loaded head NIF for NPC '%s' (%s): %zu shapes", npc.editorId, formIdBuf, headShapeNames.size());
+	// Load additional head parts (eyes, hair, etc.) if they have separate NIFs.
+	for (uint32_t hpFid : npc.headParts) {
+		std::string hpRelPath = data.ResolveHeadPartNif(hpFid);
+		if (hpRelPath.empty())
+			continue;
+
+		// Skip paths that are already loaded as part of the main FaceGen NIF
+		// (rare but possible if the cache is messy).
+		bool alreadyLoaded = false;
+		auto toLower = [](std::string s) { for (auto& c : s) c = std::tolower(static_cast<unsigned char>(c)); return s; };
+		for (auto const& [meshName, source] : shapeNifSource) {
+			if (toLower(source) == toLower(hpRelPath)) {
+				alreadyLoaded = true;
+				break;
+			}
+		}
+		if (alreadyLoaded)
+			continue;
+
+		NifFile hpNif;
+		std::string hpFullPath = baseGamePath + hpRelPath;
+		bool hpLoaded = false;
+		if (wxFileName::FileExists(hpFullPath))
+			hpLoaded = (hpNif.Load(hpFullPath) == 0);
+		if (!hpLoaded) {
+			std::string resolved = lldata::LeveledListData::ResolveCaseInsensitive(baseGamePath, hpRelPath);
+			if (!resolved.empty())
+				hpLoaded = (hpNif.Load(resolved) == 0);
+		}
+		if (!hpLoaded) {
+			for (FSArchiveFile* archive : FSManager::archiveList()) {
+				if (!archive || !archive->hasFile(hpRelPath)) continue;
+				wxMemoryBuffer outData;
+				archive->fileContents(hpRelPath, outData);
+				if (outData.IsEmpty()) continue;
+				std::string content(static_cast<char*>(outData.GetData()), outData.GetDataLen());
+				std::istringstream stream(content, std::istringstream::binary);
+				hpLoaded = (hpNif.Load(stream) == 0);
+				break;
+			}
+		}
+
+		if (!hpLoaded) {
+			wxLogWarning("LeveledListPreviewer: HeadPart NIF not found: %s", hpRelPath);
+			continue;
+		}
+
+		for (auto& shapeName : hpNif.GetShapeNames()) {
+			std::string meshName = "_head_" + shapeName;
+			// Avoid name collisions if multiple NIFs have the same shape name
+			int suffix = 1;
+			while (std::find(headShapeNames.begin(), headShapeNames.end(), meshName) != headShapeNames.end()) {
+				meshName = "_head_" + shapeName + "_" + std::to_string(suffix++);
+			}
+
+			Mesh* m = gls.AddMeshFromNif(&hpNif, shapeName, meshName, nullptr, false);
+			if (!m)
+				continue;
+
+			applyHeadCorrection(m, hpNif, shapeName);
+
+			m->CreateBuffers();
+			AddNifShapeTextures(&hpNif, shapeName, nullptr, meshName);
+			headShapeNames.push_back(meshName);
+			shapeNifSource[meshName] = hpRelPath;
+		}
+	}
+
+	UpdateHeadVisibility();
+
+	wxLogMessage("LeveledListPreviewer: Loaded head NIF + parts for NPC '%s' (%s): %zu shapes", npc.editorId, formIdBuf, headShapeNames.size());
 	gls.RenderOneFrame();
 }
 
@@ -2025,13 +2153,44 @@ void LeveledListPreviewer::RefreshMeshOverlay() {
 
 	std::vector<Category> categories;
 
-	auto headCat = buildCategory("Head", headShapeNames, [](const std::string& n) -> std::string { return (n.size() > 6 && n.substr(0, 6) == "_head_") ? n.substr(6) : n; });
+	auto headCat = buildCategory("Head", headShapeNames, [](const std::string& n) -> std::string {
+		if (n.size() > 6 && n.substr(0, 6) == "_head_") {
+			std::string base = n.substr(6);
+			// Clean up common head part shape names
+			if (base.find("Eye") != std::string::npos) return "Eyes (" + base + ")";
+			if (base.find("Teeth") != std::string::npos || base.find("Mouth") != std::string::npos) return "Teeth (" + base + ")";
+			if (base.find("Hair") != std::string::npos) return "Hair (" + base + ")";
+			if (base.find("Brow") != std::string::npos) return "Brows (" + base + ")";
+			return base;
+		}
+		return n;
+	});
 	if (!headCat.groups.empty())
 		categories.push_back(std::move(headCat));
 
-	auto bodyCat = buildCategory("Body", bodyShapeNames, [](const std::string& n) -> std::string { return n; });
-	if (!bodyCat.groups.empty())
-		categories.push_back(std::move(bodyCat));
+	// Separate bodyShapeNames into Body, Hands, Feet categories based on partition IDs
+	std::vector<std::string> bodyOnly, handsOnly, feetOnly;
+	for (auto& n : bodyShapeNames) {
+		auto it = bodyShapePartMap.find(n);
+		if (it != bodyShapePartMap.end()) {
+			if (it->second.count(33)) handsOnly.push_back(n);
+			else if (it->second.count(37)) feetOnly.push_back(n);
+			else bodyOnly.push_back(n);
+		}
+		else bodyOnly.push_back(n);
+	}
+
+	auto bodyOnlyCat = buildCategory("Body", bodyOnly, [](const std::string& n) -> std::string { return n; });
+	if (!bodyOnlyCat.groups.empty())
+		categories.push_back(std::move(bodyOnlyCat));
+
+	auto handsOnlyCat = buildCategory("Hands", handsOnly, [](const std::string& n) -> std::string { return n; });
+	if (!handsOnlyCat.groups.empty())
+		categories.push_back(std::move(handsOnlyCat));
+
+	auto feetOnlyCat = buildCategory("Feet", feetOnly, [](const std::string& n) -> std::string { return n; });
+	if (!feetOnlyCat.groups.empty())
+		categories.push_back(std::move(feetOnlyCat));
 
 	// For outfit shapes, include non-grouped shapes AND shapes from the active variant of each group.
 	// Non-active variant shapes are excluded from the overlay.

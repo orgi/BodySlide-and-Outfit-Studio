@@ -134,6 +134,14 @@ struct NPCRecord {
 	float qnamR = 1.0f;
 	float qnamG = 1.0f;
 	float qnamB = 1.0f;
+	std::vector<uint32_t> headParts; // PNAM entries
+};
+
+struct HeadPartRecord {
+	uint32_t formId = 0;
+	std::string editorId;
+	std::string model; // NAM1 path
+	uint32_t type = 0; // PNAM: 0=Misc, 1=Face, 2=Eyes, 3=Hair, 4=Beard, 5=Brows, 6=Scars
 };
 
 struct RaceRecord {
@@ -157,6 +165,7 @@ public:
 	std::vector<OutfitRecord> GetOutfits() const;
 	std::vector<NPCRecord> GetNPCs() const;
 	std::vector<RaceRecord> GetRaces() const;
+	std::vector<HeadPartRecord> GetHeadParts() const;
 
 	const std::unordered_map<uint32_t, Record>& GetRecords() const { return records; }
 

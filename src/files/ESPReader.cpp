@@ -16,9 +16,9 @@
 #include <stdexcept>
 
 #ifdef _WIN32
-#	include <windows.h>
+#include <windows.h>
 #else
-#	include <dirent.h>
+#include <dirent.h>
 #endif
 
 #include <zlib.h>
@@ -50,10 +50,12 @@ static bool ReadExact(std::ifstream& f, uint8_t* buf, size_t n) {
 }
 
 static bool ReadExact(std::ifstream& f, std::vector<uint8_t>& buf, size_t n) {
-	if (n > 200 * 1024 * 1024) return false; // Hard 200MB limit
+	if (n > 200 * 1024 * 1024)
+		return false; // Hard 200MB limit
 	try {
 		buf.resize(n);
-	} catch (const std::exception&) {
+	}
+	catch (const std::exception&) {
 		return false;
 	}
 	return ReadExact(f, buf.data(), n);
@@ -85,7 +87,7 @@ static std::vector<Subrecord> ParseSubrecords(const uint8_t* data, size_t len) {
 			if (pos + 6 > len)
 				break;
 			srType = std::string(reinterpret_cast<const char*>(data + pos), 4);
-			pos += 6;	// skip next subrecord's type+size header
+			pos += 6; // skip next subrecord's type+size header
 
 			// Sanity check for huge sizes (100MB)
 			if (actualSize > 100 * 1024 * 1024 || pos + actualSize > len)
@@ -95,7 +97,8 @@ static std::vector<Subrecord> ParseSubrecords(const uint8_t* data, size_t len) {
 			sr.type = srType;
 			try {
 				sr.data.assign(data + pos, data + pos + actualSize);
-			} catch (const std::exception&) {
+			}
+			catch (const std::exception&) {
 				break;
 			}
 			pos += actualSize;
@@ -110,7 +113,8 @@ static std::vector<Subrecord> ParseSubrecords(const uint8_t* data, size_t len) {
 		sr.type = srType;
 		try {
 			sr.data.assign(data + pos, data + pos + srSize);
-		} catch (const std::exception&) {
+		}
+		catch (const std::exception&) {
 			break;
 		}
 		pos += srSize;
@@ -247,7 +251,7 @@ static ReadOutput ReadRecord(std::ifstream& f) {
 	// Handle compressed records
 	if (out.record.IsCompressed() && rawData.size() >= 4) {
 		uint32_t decompSize = ReadLE<uint32_t>(rawData.data());
-		
+
 		// Sanity check for huge decompressed size (100MB)
 		if (decompSize > 100 * 1024 * 1024) {
 			out.result = ReadResult::Error;
@@ -257,7 +261,8 @@ static ReadOutput ReadRecord(std::ifstream& f) {
 		std::vector<uint8_t> decompressed;
 		try {
 			decompressed.resize(decompSize);
-		} catch (const std::exception&) {
+		}
+		catch (const std::exception&) {
 			out.result = ReadResult::Error;
 			return out;
 		}
@@ -377,7 +382,7 @@ static std::vector<AlternateTexture> ParseAlternateTextures(const Subrecord& sr)
 			break;
 		uint32_t nameLen = ReadLE<uint32_t>(sr.data.data() + off);
 		off += 4;
-		
+
 		// Sanity check for string length
 		if (nameLen > 1024 || off + nameLen + 8 > sr.data.size())
 			break;
@@ -527,7 +532,31 @@ static NPCRecord ParseNPC(const Record& rec) {
 		}
 	}
 
+	// PNAM: head parts
+	for (auto* pnam : rec.GetSubrecords("PNAM")) {
+		if (pnam->data.size() >= 4)
+			npc.headParts.push_back(ReadLE<uint32_t>(pnam->data.data()));
+	}
+
 	return npc;
+}
+
+static HeadPartRecord ParseHeadPart(const Record& rec) {
+	HeadPartRecord h;
+	h.formId = rec.formId;
+	h.editorId = rec.EditorId();
+
+	// NAM1: model path
+	if (auto* nam1 = rec.GetSubrecord("NAM1"))
+		h.model = ReadString(nam1->data);
+
+	// PNAM: part type
+	if (auto* pnam = rec.GetSubrecord("PNAM")) {
+		if (!pnam->data.empty())
+			h.type = pnam->data[0];
+	}
+
+	return h;
 }
 
 static RaceRecord ParseRace(const Record& rec) {
@@ -576,18 +605,21 @@ static std::string ResolveCIFileInDir(const std::string& dir, const std::string&
 
 	// Walk the directory looking for a case-insensitive match
 	std::string lowerTarget = fileName;
-	for (auto& c : lowerTarget) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+	for (auto& c : lowerTarget)
+		c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 
 #ifdef _WIN32
 	return exact; // Windows is case-insensitive — if exact failed, it doesn't exist
 #else
 	DIR* d = opendir(dir.c_str());
-	if (!d) return {};
+	if (!d)
+		return {};
 	std::string found;
 	while (auto* e = readdir(d)) {
 		std::string name = e->d_name;
 		std::string lower = name;
-		for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		for (auto& c : lower)
+			c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 		if (lower == lowerTarget) {
 			found = dir + "/" + name;
 			break;
@@ -622,16 +654,20 @@ std::unordered_map<uint32_t, std::string> ESPReader::ParseStringsBuffer(const ui
 		size_t remaining = dataSize - offset;
 
 		if (lengthPrefixed) {
-			if (remaining < 4) continue;
+			if (remaining < 4)
+				continue;
 			uint32_t len = ReadLE<uint32_t>(p);
 			p += 4;
 			remaining -= 4;
-			if (len > remaining) continue;
+			if (len > remaining)
+				continue;
 			size_t textLen = (len > 0 && p[len - 1] == 0) ? len - 1 : len;
 			out[stringId] = std::string(reinterpret_cast<const char*>(p), textLen);
-		} else {
+		}
+		else {
 			size_t textLen = 0;
-			while (textLen < remaining && p[textLen] != 0) ++textLen;
+			while (textLen < remaining && p[textLen] != 0)
+				++textLen;
 			out[stringId] = std::string(reinterpret_cast<const char*>(p), textLen);
 		}
 	}
@@ -652,7 +688,8 @@ static std::unordered_map<uint32_t, std::string> LoadStringsFile(const std::stri
 	std::vector<uint8_t> buf;
 	try {
 		buf.resize(fileSize);
-	} catch (const std::exception&) {
+	}
+	catch (const std::exception&) {
 		return {};
 	}
 
@@ -871,8 +908,23 @@ std::vector<RaceRecord> ESPReader::GetRaces() const {
 		return result;
 	for (uint32_t fid : it->second) {
 		auto rit = records.find(fid);
+		if (rit != records.end()) {
+			auto npc = ParseRace(rit->second);
+			result.push_back(std::move(npc));
+		}
+	}
+	return result;
+}
+
+std::vector<HeadPartRecord> ESPReader::GetHeadParts() const {
+	std::vector<HeadPartRecord> result;
+	auto it = recordsByType.find("HDPT");
+	if (it == recordsByType.end())
+		return result;
+	for (uint32_t fid : it->second) {
+		auto rit = records.find(fid);
 		if (rit != records.end())
-			result.push_back(ParseRace(rit->second));
+			result.push_back(ParseHeadPart(rit->second));
 	}
 	return result;
 }
