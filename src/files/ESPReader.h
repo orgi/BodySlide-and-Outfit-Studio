@@ -188,6 +188,11 @@ public:
 	// lengthPrefixed=false for .STRINGS (NUL-terminated), true for .DL/ILSTRINGS (length-prefixed).
 	static std::unordered_map<uint32_t, std::string> ParseStringsBuffer(const uint8_t* data, size_t len, bool lengthPrefixed);
 
+	// Read just the master list (MAST subrecords) from a plugin's TES4 header.
+	// Cheap: stops after the header, doesn't sweep the rest of the file.
+	// Returns an empty vector on I/O or format error.
+	static std::vector<std::string> ReadPluginMasters(const std::string& filepath);
+
 	// Resolve a possibly-localized FULL subrecord to its human-readable string.
 	// Handles both 4-byte lstring indices (localized ESPs) and inline strings.
 	std::string ResolveFullName(const Record& rec) const;

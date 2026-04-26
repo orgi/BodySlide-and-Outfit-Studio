@@ -748,6 +748,19 @@ std::string ESPReader::ResolveFullName(const Record& rec) const {
 // ESPReader
 // ---------------------------------------------------------------------------
 
+std::vector<std::string> ESPReader::ReadPluginMasters(const std::string& filepath) {
+	std::vector<std::string> result;
+	std::ifstream f(filepath, std::ios::binary);
+	if (!f.is_open())
+		return result;
+	auto headerOut = ReadRecord(f);
+	if (headerOut.result != ReadResult::Record || headerOut.record.type != "TES4")
+		return result;
+	for (auto* mast : headerOut.record.GetSubrecords("MAST"))
+		result.push_back(ReadString(mast->data));
+	return result;
+}
+
 bool ESPReader::Load(const std::string& filepath, const std::set<std::string>& recordTypes) {
 	records.clear();
 	recordsByType.clear();

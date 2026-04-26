@@ -752,36 +752,108 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 
 	espFilename = mainReader.GetFilename();
 
-	// Load master files (in order, so FormID indices are correct)
-	// Masters are loaded from the same directory as the main ESP,
-	// or from the game data path.
-	// Also load NPC_ records from masters for skin texture resolution.
+	// Load master files. The main ESP's TES4 master list is a flat dependency
+	// declaration; its declared *order* is not authoritative for override
+	// resolution (the game uses plugins.txt). To pick the correct override
+	// winner without reading plugins.txt, we topologically sort the master list
+	// using each master's own TES4 master list — if A is a master of B, A must
+	// load before B. Pairs with no dependency relation fall back to declared
+	// order (which is fine: neither can override the other for FormID-keyed
+	// records since they live in different cache namespaces).
+	//
+	// Crucial: `masterIdx` passed to LoadRecordsFromESP stays the *declared*
+	// index, because the main ESP's records reference masters by that index
+	// for FormID remapping. Only the iteration order changes.
 	auto masters = mainReader.GetMasters();
 	espMasters = masters; // Store for FormID remapping in skin texture resolution
-	int mastersLoaded = 0;
+
+	// Resolve each master's full path on disk (same probing as the load below).
+	auto resolveMasterPath = [&](const std::string& masterName) -> std::string {
+		std::string p = espDirectory + masterName;
+		if (wxFileName::FileExists(p))
+			return p;
+		if (!baseDataPath.empty()) {
+			p = baseDataPath + masterName;
+			if (wxFileName::FileExists(p))
+				return p;
+		}
+		return {};
+	};
+
+	std::vector<std::string> masterPaths(masters.size());
+	for (size_t mi = 0; mi < masters.size(); ++mi)
+		masterPaths[mi] = resolveMasterPath(masters[mi]);
+
+	// Index masters by lowercase name for dependency lookup.
+	std::unordered_map<std::string, size_t> indexByName;
+	indexByName.reserve(masters.size());
+	for (size_t mi = 0; mi < masters.size(); ++mi)
+		indexByName.emplace(ToLower(masters[mi]), mi);
+
+	// For each master, read its own TES4 master list and record edges
+	// (depIdx → mi) where depIdx is also part of this main ESP's master list.
+	std::vector<std::vector<size_t>> outEdges(masters.size()); // outEdges[a] = b means a must load before b
+	std::vector<int> inDegree(masters.size(), 0);
 	for (size_t mi = 0; mi < masters.size(); ++mi) {
+		if (masterPaths[mi].empty())
+			continue;
+		auto deps = esp::ESPReader::ReadPluginMasters(masterPaths[mi]);
+		for (auto& depName : deps) {
+			auto it = indexByName.find(ToLower(depName));
+			if (it == indexByName.end())
+				continue; // dep is not part of this main ESP's master list
+			size_t depIdx = it->second;
+			if (depIdx == mi)
+				continue; // self-reference, ignore
+			outEdges[depIdx].push_back(mi);
+			++inDegree[mi];
+		}
+	}
+
+	// Kahn's algorithm: pick zero-in-degree masters in declared order to make the
+	// fallback deterministic and aligned with the original list.
+	std::vector<size_t> loadOrder;
+	loadOrder.reserve(masters.size());
+	std::vector<bool> queued(masters.size(), false);
+	auto enqueueReady = [&](size_t startFrom) {
+		for (size_t i = startFrom; i < masters.size(); ++i) {
+			if (!queued[i] && inDegree[i] == 0) {
+				loadOrder.push_back(i);
+				queued[i] = true;
+			}
+		}
+	};
+	enqueueReady(0);
+	for (size_t cursor = 0; cursor < loadOrder.size(); ++cursor) {
+		size_t cur = loadOrder[cursor];
+		for (size_t next : outEdges[cur]) {
+			if (--inDegree[next] == 0 && !queued[next]) {
+				loadOrder.push_back(next);
+				queued[next] = true;
+			}
+		}
+	}
+	// Cycle / unreachable safety net: append anything we missed in declared order.
+	if (loadOrder.size() < masters.size()) {
+		wxLogWarning("LeveledListData: master dependency graph has cycles or unreachable nodes; appending remainder in declared order");
+		for (size_t i = 0; i < masters.size(); ++i)
+			if (!queued[i])
+				loadOrder.push_back(i);
+	}
+
+	int mastersLoaded = 0;
+	for (size_t mi : loadOrder) {
 		auto& masterName = masters[mi];
 		uint8_t masterIdx = static_cast<uint8_t>(mi);
+		const std::string& masterPath = masterPaths[mi];
 
-		// Try same directory as the ESP
-		std::string masterPath = espDirectory + masterName;
-		if (wxFileName::FileExists(masterPath)) {
-			LoadRecordsFromESP(masterPath, {"ARMO", "ARMA", "TXST", "NPC_", "RACE", "HDPT"}, masterIdx, masters);
-			++mastersLoaded;
+		if (masterPath.empty()) {
+			wxLogWarning("LeveledListData: Master not found: %s (index %zu)", wxString(masterName), mi);
 			continue;
 		}
 
-		// Try game data path
-		if (!baseDataPath.empty()) {
-			masterPath = baseDataPath + masterName;
-			if (wxFileName::FileExists(masterPath)) {
-				LoadRecordsFromESP(masterPath, {"ARMO", "ARMA", "TXST", "NPC_", "RACE", "HDPT"}, masterIdx, masters);
-				++mastersLoaded;
-				continue;
-			}
-		}
-
-		wxLogWarning("LeveledListData: Master not found: %s (index %zu)", wxString(masterName), mi);
+		LoadRecordsFromESP(masterPath, {"ARMO", "ARMA", "TXST", "NPC_", "RACE", "HDPT"}, masterIdx, masters);
+		++mastersLoaded;
 	}
 
 	wxLogMessage("LeveledListData: After loading %d/%zu masters: %zu ARMOs, %zu ARMAs in cache", mastersLoaded, masters.size(), armoCache.size(), armaCache.size());
