@@ -167,20 +167,23 @@ static std::unordered_map<uint32_t, std::string> LoadStringsFromBSA(const std::s
 	// pluginFilename like "Skyrim.esm" → base "Skyrim"
 	std::string base = pluginFilename;
 	auto dot = base.find_last_of('.');
-	if (dot != std::string::npos) base = base.substr(0, dot);
+	if (dot != std::string::npos)
+		base = base.substr(0, dot);
 
 	static const char* langs[] = {"English", "French", "German", "Italian", "Spanish", "Polish", "Russian", nullptr};
 	for (int i = 0; langs[i]; ++i) {
 		std::string relPath = "strings/" + base + "_" + langs[i] + ".strings";
 		for (FSArchiveFile* archive : FSManager::archiveList()) {
-			if (!archive) continue;
-			if (!archive->hasFile(relPath)) continue;
+			if (!archive)
+				continue;
+			if (!archive->hasFile(relPath))
+				continue;
 			wxMemoryBuffer buf;
-			if (!archive->fileContents(relPath, buf)) continue;
-			return esp::ESPReader::ParseStringsBuffer(
-				reinterpret_cast<const uint8_t*>(buf.GetData()),
-				buf.GetDataLen(),
-				/*lengthPrefixed*/ false);
+			if (!archive->fileContents(relPath, buf))
+				continue;
+			return esp::ESPReader::ParseStringsBuffer(reinterpret_cast<const uint8_t*>(buf.GetData()),
+													  buf.GetDataLen(),
+													  /*lengthPrefixed*/ false);
 		}
 	}
 	return {};
@@ -201,12 +204,12 @@ void LeveledListData::LoadNPCs() {
 	// resolve cross-ESM race references in Pass 2.
 	struct PendingNPC {
 		NPCEntry entry;
-		uint32_t rawRaceFormId = 0;		  // RNAM FormID in the source ESM's own space
-		const char* sourceEsm = nullptr;  // ESM that defined this NPC
+		uint32_t rawRaceFormId = 0;		 // RNAM FormID in the source ESM's own space
+		const char* sourceEsm = nullptr; // ESM that defined this NPC
 	};
 	struct EsmRaces {
-		std::vector<std::string> masters;						   // source ESM's master list
-		std::unordered_map<uint32_t, std::string> raceEdidByBase;  // base FormID (no top byte) → editor id
+		std::vector<std::string> masters;						  // source ESM's master list
+		std::unordered_map<uint32_t, std::string> raceEdidByBase; // base FormID (no top byte) → editor id
 	};
 
 	std::vector<PendingNPC> pending;
@@ -239,7 +242,8 @@ void LeveledListData::LoadNPCs() {
 			if (!table.empty()) {
 				wxLogMessage("LeveledListData::LoadNPCs: loaded %zu strings for %s from BSA", table.size(), vanillaESMs[i]);
 				reader.SetStringTable(std::move(table));
-			} else {
+			}
+			else {
 				wxLogWarning("LeveledListData::LoadNPCs: %s is localized but no .STRINGS file found (loose or BSA) — NPC names will be empty", vanillaESMs[i]);
 			}
 		}
@@ -310,7 +314,7 @@ void LeveledListData::LoadNPCs() {
 				uint32_t bid = localFid & 0x00FFFFFF;
 				if (tb == readerMasters.size())
 					return (static_cast<uint32_t>(i) << 24) | bid;
-				
+
 				std::string mName = ToLower(readerMasters[tb]);
 				for (int j = 0; vanillaESMs[j]; ++j) {
 					if (ToLower(vanillaESMs[j]) == mName)
@@ -337,8 +341,10 @@ void LeveledListData::LoadNPCs() {
 			// QNAM face tint — quantize floats to 0-255 for shader use.
 			if (npc.hasQnam) {
 				auto clamp8 = [](float v) -> uint8_t {
-					if (v < 0.0f) v = 0.0f;
-					if (v > 1.0f) v = 1.0f;
+					if (v < 0.0f)
+						v = 0.0f;
+					if (v > 1.0f)
+						v = 1.0f;
 					return static_cast<uint8_t>(v * 255.0f + 0.5f);
 				};
 				pn.entry.tintR = clamp8(npc.qnamR);
@@ -541,6 +547,10 @@ void LeveledListData::LoadRecordsFromESP(const std::string& filepath, const std:
 		cam.modelFemale = aa.modelFemale;
 		cam.bodySlotFlags = aa.bodySlotFlags;
 		cam.raceFormId = aa.raceId != 0 ? remapFid(aa.raceId) : 0;
+		for (uint32_t r : aa.additionalRaces) {
+			if (r != 0)
+				cam.additionalRaceFormIds.push_back(remapFid(r));
+		}
 		for (auto& at : aa.altTexFemale) {
 			CachedAlternateTexture cat;
 			cat.shapeName = at.shapeName;
@@ -631,8 +641,7 @@ static std::vector<std::pair<std::string, const CachedARMA*>> ResolveWornMeshes(
 				wxLogWarning("  ARMA %08X not found in cache", armaId);
 			return;
 		}
-		const std::string& model = !it->second.modelFemale.empty() ? it->second.modelFemale
-		                         : (femaleOnly ? std::string{} : it->second.modelMale);
+		const std::string& model = !it->second.modelFemale.empty() ? it->second.modelFemale : (femaleOnly ? std::string{} : it->second.modelMale);
 		if (!model.empty()) {
 			std::string normalized = NormalizeMeshPath(model);
 			if (seenNifs.insert(normalized).second)
@@ -880,7 +889,8 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 		cam.modelMale = aa.modelMale;
 		cam.modelFemale = aa.modelFemale;
 		cam.bodySlotFlags = aa.bodySlotFlags;
-		cam.raceFormId = aa.raceId; // main-ESP FormIDs need no remap
+		cam.raceFormId = aa.raceId;						// main-ESP FormIDs need no remap
+		cam.additionalRaceFormIds = aa.additionalRaces; // main-ESP FormIDs need no remap
 		for (auto& at : aa.altTexFemale) {
 			CachedAlternateTexture cat;
 			cat.shapeName = at.shapeName;
@@ -1223,8 +1233,19 @@ std::array<std::string, 8> LeveledListData::ResolveSkinTextures(uint32_t wnamFor
 			auto& arma = armaIt->second;
 			if (!(arma.bodySlotFlags & (1u << 2))) // bit 2 = slot 32 = Body
 				continue;
-			if (requireRaceMatch && npcRaceFormId != 0 && arma.raceFormId != npcRaceFormId)
-				continue;
+			if (requireRaceMatch && npcRaceFormId != 0) {
+				bool match = arma.raceFormId == npcRaceFormId;
+				if (!match) {
+					for (uint32_t r : arma.additionalRaceFormIds) {
+						if (r == npcRaceFormId) {
+							match = true;
+							break;
+						}
+					}
+				}
+				if (!match)
+					continue;
+			}
 
 			// Use female alternate textures (fallback to male)
 			auto& altTexList = arma.altTexFemale.empty() ? arma.altTexMale : arma.altTexFemale;
@@ -1290,30 +1311,48 @@ LeveledListData::BodyNifPaths LeveledListData::ResolveBodyNifPaths(uint32_t wnam
 				continue;
 
 			auto& arma = armaIt->second;
-			if (requireRaceMatch && npcRaceFormId != 0 && arma.raceFormId != npcRaceFormId)
-				continue;
+			if (requireRaceMatch && npcRaceFormId != 0) {
+				bool match = arma.raceFormId == npcRaceFormId;
+				if (!match) {
+					for (uint32_t r : arma.additionalRaceFormIds) {
+						if (r == npcRaceFormId) {
+							match = true;
+							break;
+						}
+					}
+				}
+				if (!match)
+					continue;
+			}
 
 			const std::string& model = arma.modelFemale.empty() ? arma.modelMale : arma.modelFemale;
 			if (model.empty())
 				continue;
 
 			std::string path = NormalizeMeshPath(model);
-			if (path.size() >= 6) {
-				if (path.substr(path.size() - 6) == "_1.nif" || path.substr(path.size() - 6) == "_0.nif")
-					path = path.substr(0, path.size() - 6) + suffix;
+			// ARMA model paths can come in two forms:
+			// 1. Already weighted: "...femalebody_1.nif" — swap suffix to match
+			//    the requested weight variant.
+			// 2. Suffix-less: "...femalebody.nif" — the engine appends _0/_1
+			//    automatically; do the same here.
+			if (path.size() >= 6 && (path.substr(path.size() - 6) == "_1.nif" || path.substr(path.size() - 6) == "_0.nif")) {
+				path = path.substr(0, path.size() - 6) + suffix;
+			}
+			else if (path.size() >= 4 && path.substr(path.size() - 4) == ".nif") {
+				path = path.substr(0, path.size() - 4) + suffix;
 			}
 
 			if ((arma.bodySlotFlags & (1u << 2)) && result.body.empty()) {
 				result.body = path;
-				wxLogMessage("ResolveBodyNifPaths: body  → %s (ARMA %08X race %08X)", path, armaId, arma.raceFormId);
+				wxLogMessage("ResolveBodyNifPaths: body  -> %s (ARMA %08X race %08X)", path, armaId, arma.raceFormId);
 			}
 			if ((arma.bodySlotFlags & (1u << 3)) && result.hands.empty()) {
 				result.hands = path;
-				wxLogMessage("ResolveBodyNifPaths: hands → %s (ARMA %08X race %08X)", path, armaId, arma.raceFormId);
+				wxLogMessage("ResolveBodyNifPaths: hands -> %s (ARMA %08X race %08X)", path, armaId, arma.raceFormId);
 			}
 			if ((arma.bodySlotFlags & (1u << 7)) && result.feet.empty()) {
 				result.feet = path;
-				wxLogMessage("ResolveBodyNifPaths: feet  → %s (ARMA %08X race %08X)", path, armaId, arma.raceFormId);
+				wxLogMessage("ResolveBodyNifPaths: feet  -> %s (ARMA %08X race %08X)", path, armaId, arma.raceFormId);
 			}
 		}
 		return !result.body.empty() && !result.hands.empty() && !result.feet.empty();
@@ -1344,6 +1383,49 @@ uint32_t LeveledListData::GetRaceSkinArmo(const std::string& raceEditorId) const
 	return rit->second.skinFormId;
 }
 
+LeveledListData::EffectiveRace LeveledListData::GetEffectiveNpcRace(const std::string& npcEditorId) {
+	EffectiveRace er;
+	if (npcEditorId.empty())
+		return er;
+
+	if (!npcSkinsScanned)
+		ScanAllPluginsForNpcSkins();
+
+	// Step 1: prefer the latest plugin's RNAM override if we managed to remap it
+	// into the main-ESP cache space.
+	auto ovIt = npcSkinOverrides.find(npcEditorId);
+	if (ovIt != npcSkinOverrides.end() && ovIt->second.remappedRace != 0) {
+		uint32_t fid = ovIt->second.remappedRace;
+		auto cacheIt = raceCache.find(fid);
+		if (cacheIt != raceCache.end()) {
+			er.formId = fid;
+			er.editorId = cacheIt->second.editorId;
+			er.skinArmoFormId = cacheIt->second.skinFormId;
+			wxLogMessage("GetEffectiveNpcRace: NPC '%s' override race %08X ('%s') skinArmo=%08X", npcEditorId, fid, er.editorId, er.skinArmoFormId);
+			return er;
+		}
+		wxLogMessage("GetEffectiveNpcRace: NPC '%s' override race %08X not in raceCache, falling back to vanilla", npcEditorId, fid);
+	}
+
+	// Step 2: vanilla race recorded during LoadNPCs.
+	for (auto& n : npcs) {
+		if (n.editorId == npcEditorId) {
+			er.editorId = n.raceEditorId;
+			break;
+		}
+	}
+	if (!er.editorId.empty()) {
+		auto raceIt = raceByEditorId.find(er.editorId);
+		if (raceIt != raceByEditorId.end()) {
+			er.formId = raceIt->second;
+			auto cacheIt = raceCache.find(er.formId);
+			if (cacheIt != raceCache.end())
+				er.skinArmoFormId = cacheIt->second.skinFormId;
+		}
+	}
+	return er;
+}
+
 std::string LeveledListData::ResolveHeadPartNif(uint32_t headPartFormId) const {
 	auto it = headPartCache.find(headPartFormId);
 	if (it == headPartCache.end())
@@ -1356,24 +1438,10 @@ LeveledListData::BodyNifPaths LeveledListData::ResolveNpcBodyNifPaths(const std:
 	if (npcEditorId.empty())
 		return result;
 
-	// Lazy scan so the all-plugins overrides are available (mirrors ResolveSkinTexturesForNPC).
-	if (!npcSkinsScanned)
-		ScanAllPluginsForNpcSkins();
-
-	// Look up NPC's race FormID (in main-ESP space) so ARMA race filtering works.
-	std::string raceEdid;
-	for (auto& n : npcs) {
-		if (n.editorId == npcEditorId) {
-			raceEdid = n.raceEditorId;
-			break;
-		}
-	}
-	uint32_t npcRaceFid = 0;
-	if (!raceEdid.empty()) {
-		auto it = raceByEditorId.find(raceEdid);
-		if (it != raceByEditorId.end())
-			npcRaceFid = it->second;
-	}
+	// Effective race honors RNAM overrides from any plugin, not just vanilla data.
+	EffectiveRace effRace = GetEffectiveNpcRace(npcEditorId);
+	const std::string& raceEdid = effRace.editorId;
+	uint32_t npcRaceFid = effRace.formId;
 
 	// Primary: NPC's own WNAM (prefer all-plugins override, fall back to master cache).
 	uint32_t npcWnam = 0;
@@ -1388,22 +1456,29 @@ LeveledListData::BodyNifPaths LeveledListData::ResolveNpcBodyNifPaths(const std:
 	if (npcWnam != 0)
 		result = ResolveBodyNifPaths(npcWnam, highWeight, npcRaceFid);
 
-	if (!result.body.empty() && !result.hands.empty() && !result.feet.empty())
-		return result;
-
-	// Fallback: race's default skin ARMO.
-	uint32_t raceWnam = GetRaceSkinArmo(raceEdid);
-	if (raceWnam != 0) {
-		BodyNifPaths rp = ResolveBodyNifPaths(raceWnam, highWeight, npcRaceFid);
-		if (result.body.empty())
-			result.body = rp.body;
-		if (result.hands.empty())
-			result.hands = rp.hands;
-		if (result.feet.empty())
-			result.feet = rp.feet;
-		if (rp.body.size() || rp.hands.size() || rp.feet.size())
-			wxLogMessage("ResolveNpcBodyNifPaths: NPC '%s' race '%s' (%08X) skin ARMO %08X filled missing slots", npcEditorId, raceEdid, npcRaceFid, raceWnam);
+	uint32_t raceWnam = 0;
+	if (result.body.empty() || result.hands.empty() || result.feet.empty()) {
+		raceWnam = GetRaceSkinArmo(raceEdid);
+		if (raceWnam != 0) {
+			BodyNifPaths rp = ResolveBodyNifPaths(raceWnam, highWeight, npcRaceFid);
+			if (result.body.empty())
+				result.body = rp.body;
+			if (result.hands.empty())
+				result.hands = rp.hands;
+			if (result.feet.empty())
+				result.feet = rp.feet;
+		}
 	}
+
+	wxLogMessage("ResolveNpcBodyNifPaths: NPC '%s' race='%s' raceFID=%08X npcWNAM=%08X raceWNAM=%08X -> body='%s' hands='%s' feet='%s'",
+				 npcEditorId,
+				 raceEdid,
+				 npcRaceFid,
+				 npcWnam,
+				 raceWnam,
+				 result.body,
+				 result.hands,
+				 result.feet);
 
 	return result;
 }
@@ -1414,9 +1489,7 @@ LeveledListData::BodyNifPaths LeveledListData::ResolveNpcBodyNifPaths(const std:
 
 namespace {
 // Fill `dst` from the first TXST in ARMA's female alt-texture list (fallback male).
-bool FillFromArmaTextures(const CachedARMA& arma,
-						  const std::unordered_map<uint32_t, CachedTXST>& txstCache,
-						  std::array<std::string, 8>& dst) {
+bool FillFromArmaTextures(const CachedARMA& arma, const std::unordered_map<uint32_t, CachedTXST>& txstCache, std::array<std::string, 8>& dst) {
 	auto& altTex = arma.altTexFemale.empty() ? arma.altTexMale : arma.altTexFemale;
 	for (auto& at : altTex) {
 		auto it = txstCache.find(at.txstFormId);
@@ -1450,8 +1523,19 @@ void FillPartTexturesFromArmo(uint32_t armoFid,
 			if (armaIt == armaCache.end())
 				continue;
 			auto& arma = armaIt->second;
-			if (requireRaceMatch && npcRaceFid != 0 && arma.raceFormId != npcRaceFid)
-				continue;
+			if (requireRaceMatch && npcRaceFid != 0) {
+				bool match = arma.raceFormId == npcRaceFid;
+				if (!match) {
+					for (uint32_t r : arma.additionalRaceFormIds) {
+						if (r == npcRaceFid) {
+							match = true;
+							break;
+						}
+					}
+				}
+				if (!match)
+					continue;
+			}
 
 			if ((arma.bodySlotFlags & (1u << 2)) && out.body[0].empty())
 				FillFromArmaTextures(arma, txstCache, out.body);
@@ -1473,23 +1557,11 @@ LeveledListData::BodyPartTextures LeveledListData::ResolveNpcBodyPartTextures(co
 	if (npcEditorId.empty())
 		return out;
 
-	if (!npcSkinsScanned)
-		ScanAllPluginsForNpcSkins();
-
-	// Find NPC race (for ARMA filtering).
-	std::string raceEdid;
-	for (auto& n : npcs) {
-		if (n.editorId == npcEditorId) {
-			raceEdid = n.raceEditorId;
-			break;
-		}
-	}
-	uint32_t npcRaceFid = 0;
-	if (!raceEdid.empty()) {
-		auto it = raceByEditorId.find(raceEdid);
-		if (it != raceByEditorId.end())
-			npcRaceFid = it->second;
-	}
+	// Use the effective race (RNAM override-aware) so a plugin that re-races
+	// an NPC also redirects which ARMAs the texture chain walks.
+	EffectiveRace effRace = GetEffectiveNpcRace(npcEditorId);
+	const std::string& raceEdid = effRace.editorId;
+	uint32_t npcRaceFid = effRace.formId;
 
 	// Pass 1: NPC's own WNAM (from all-plugin scan, remapped to main cache).
 	uint32_t npcWnam = 0;
@@ -1511,14 +1583,36 @@ LeveledListData::BodyPartTextures LeveledListData::ResolveNpcBodyPartTextures(co
 			FillPartTexturesFromArmo(raceWnam, npcRaceFid, armoCache, armaCache, txstCache, out);
 	}
 
-	wxLogMessage("ResolveNpcBodyPartTextures: NPC '%s' race '%s' (%08X) → body='%s' hands='%s' feet='%s'",
+	wxLogMessage("ResolveNpcBodyPartTextures: NPC '%s' race='%s' raceFID=%08X npcWNAM=%08X -> body='%s' hands='%s' feet='%s'",
 				 npcEditorId,
 				 raceEdid,
 				 npcRaceFid,
+				 npcWnam,
 				 out.body[0],
 				 out.hands[0],
 				 out.feet[0]);
 	return out;
+}
+
+// ---------------------------------------------------------------------------
+// EnsureDynamicMaster — load a non-master plugin's RACE/ARMO/ARMA/TXST records
+// its WNAM at an ARMO it also defines) can be resolved.
+// ---------------------------------------------------------------------------
+
+uint8_t LeveledListData::EnsureDynamicMaster(const std::string& pluginPath) {
+	for (size_t i = 0; i < dynamicMasters.size(); ++i) {
+		if (dynamicMasters[i] == pluginPath)
+			return static_cast<uint8_t>(0xFD - i);
+	}
+	if (dynamicMasters.size() > 0xF0 - 0x80) {
+		wxLogWarning("EnsureDynamicMaster: too many dynamic masters, refusing to load %s", pluginPath);
+		return 0;
+	}
+	uint8_t synthIdx = static_cast<uint8_t>(0xFD - dynamicMasters.size());
+	wxLogMessage("EnsureDynamicMaster: loading '%s' at synthetic master index 0x%02X", pluginPath, synthIdx);
+	dynamicMasters.push_back(pluginPath);
+	LoadRecordsFromESP(pluginPath, {"RACE", "ARMO", "ARMA", "TXST"}, synthIdx, espMasters);
+	return synthIdx;
 }
 
 // ---------------------------------------------------------------------------
@@ -1538,6 +1632,23 @@ void LeveledListData::ScanAllPluginsForNpcSkins() {
 	std::unordered_map<std::string, uint8_t> masterNameToIdx;
 	for (size_t i = 0; i < espMasters.size(); ++i)
 		masterNameToIdx[ToLower(espMasters[i])] = static_cast<uint8_t>(i);
+
+	// Vanilla-ESM names. We never let a record from one of these clobber an
+	// existing override from a non-vanilla plugin: scan order is alphabetical
+	// (NOT load order), so the engine's "last writer wins" semantics need a
+	// proxy. Real overrides live in mod ESPs/ESLs, so prefer them over reading
+	// the original NPC record back from the vanilla ESM.
+	auto isVanillaEsm = [](const std::string& pluginPath) {
+		static const std::array<const char*, 5> vanilla = {"skyrim.esm", "update.esm", "dawnguard.esm", "hearthfires.esm", "dragonborn.esm"};
+		auto sep = pluginPath.find_last_of("/\\");
+		std::string base = (sep == std::string::npos) ? pluginPath : pluginPath.substr(sep + 1);
+		std::transform(base.begin(), base.end(), base.begin(), [](unsigned char c) { return std::tolower(c); });
+		for (auto* v : vanilla) {
+			if (base == v)
+				return true;
+		}
+		return false;
+	};
 
 	// Scan all plugin files in Data directory
 	wxArrayString pluginFiles;
@@ -1576,49 +1687,176 @@ void LeveledListData::ScanAllPluginsForNpcSkins() {
 				masterRemap[static_cast<uint8_t>(i)] = it->second;
 		}
 
-		for (auto& npc : npcs) {
-			if (npc.editorId.empty() || npc.wnamFormId == 0)
-				continue;
+		// Helper: remap a FormID from this plugin's master-index space into the
+		// main ESP's master-index space (raceCache / armoCache lookup space).
+		// Returns 0 if the FormID can't be remapped (top byte unknown).
+		auto remapToMainSpace = [&](uint32_t fid) -> uint32_t {
+			if (fid == 0)
+				return 0;
+			uint8_t tb = (fid >> 24) & 0xFF;
+			uint32_t base = fid & 0x00FFFFFF;
+			if (tb == selfIdx) {
+				if (isMaster)
+					return (static_cast<uint32_t>(selfMasterIdx) << 24) | base;
+				return 0;
+			}
+			auto it = masterRemap.find(tb);
+			if (it == masterRemap.end())
+				return 0;
+			return (static_cast<uint32_t>(it->second) << 24) | base;
+		};
 
-			uint8_t topByte = (npc.wnamFormId >> 24) & 0xFF;
-			uint32_t baseId = npc.wnamFormId & 0x00FFFFFF;
+		for (auto& npc : npcs) {
+			if (npc.editorId.empty())
+				continue;
+			// Skip records that override neither WNAM nor RNAM — they have nothing to contribute.
+			if (npc.wnamFormId == 0 && npc.raceFormId == 0)
+				continue;
 
 			NpcSkinInfo info;
 			info.sourcePlugin = pluginPath;
+			info.remappedRace = remapToMainSpace(npc.raceFormId);
 
-			if (topByte == selfIdx) {
-				// Self-defined ARMO
-				if (isMaster) {
-					// This ESP is a master of the generated ESP → can remap
-					info.remappedWnam = (static_cast<uint32_t>(selfMasterIdx) << 24) | baseId;
-					info.selfDefined = false;
+			if (npc.wnamFormId != 0) {
+				uint8_t topByte = (npc.wnamFormId >> 24) & 0xFF;
+				uint32_t baseId = npc.wnamFormId & 0x00FFFFFF;
+
+				if (topByte == selfIdx) {
+					if (isMaster) {
+						info.remappedWnam = (static_cast<uint32_t>(selfMasterIdx) << 24) | baseId;
+						info.selfDefined = false;
+					}
+					else {
+						info.wnamRaw = npc.wnamFormId;
+						info.selfDefined = true;
+					}
 				}
 				else {
-					// Not a master → need on-demand loading
-					info.wnamRaw = npc.wnamFormId;
-					info.selfDefined = true;
-				}
-			}
-			else {
-				// References a master
-				auto remapIt = masterRemap.find(topByte);
-				if (remapIt != masterRemap.end()) {
-					info.remappedWnam = (static_cast<uint32_t>(remapIt->second) << 24) | baseId;
-					info.selfDefined = false;
-				}
-				else {
-					// Can't remap — store raw and resolve on demand
-					info.wnamRaw = npc.wnamFormId;
-					info.selfDefined = true;
+					auto remapIt = masterRemap.find(topByte);
+					if (remapIt != masterRemap.end()) {
+						info.remappedWnam = (static_cast<uint32_t>(remapIt->second) << 24) | baseId;
+						info.selfDefined = false;
+					}
+					else {
+						info.wnamRaw = npc.wnamFormId;
+						info.selfDefined = true;
+					}
 				}
 			}
 
-			// Last writer wins (later plugins override earlier ones)
+			// Don't let a record from a vanilla ESM (Skyrim.esm, Update.esm, ...)
+			// clobber an override we already recorded from a non-vanilla plugin.
+			// Scan order is alphabetical, so an ESM revisit AFTER a mod ESP would
+			// otherwise blow the override away — i.e. a mod's intentional
+			// override would be reset to vanilla just because the ESM happens
+			// to sort later in the directory listing.
+			bool currentIsVanilla = isVanillaEsm(pluginPath);
+			auto existing = npcSkinOverrides.find(npc.editorId);
+			if (existing != npcSkinOverrides.end() && currentIsVanilla && !isVanillaEsm(existing->second.sourcePlugin)) {
+				continue;
+			}
 			npcSkinOverrides[npc.editorId] = info;
 		}
 	}
 
 	wxLogMessage("ScanAllPluginsForNpcSkins: scanned %zu plugins (%zu with NPCs), %zu NPC skin overrides", pluginFiles.size(), pluginsWithNpcs, npcSkinOverrides.size());
+
+	// For overrides whose RNAM/WNAM target the source plugin's own FormID space
+	// (so we couldn't remap them above), load that plugin as a synthetic
+	// "dynamic master" and rewrite the NpcSkinInfo with FormIDs that resolve in
+	// our caches. This lets a mod plugin that re-races an NPC and points its
+	// WNAM at an ARMO it also defines actually drive the NIF/texture chain.
+	struct DynamicNeed {
+		std::string editorId;
+		std::string pluginPath;
+		uint32_t raceRaw;
+		uint32_t wnamRaw;
+		uint8_t srcSelfIdx;
+	};
+	std::vector<DynamicNeed> needs;
+	for (auto& [editorId, info] : npcSkinOverrides) {
+		bool needRace = (info.remappedRace == 0) && true;
+		bool needWnam = (info.selfDefined && info.wnamRaw != 0);
+		if (!needRace && !needWnam)
+			continue;
+		// Re-read the plugin to get the raw RNAM and the plugin's master count.
+		// (We didn't store raceRaw on the info struct.) This is cheap because
+		// LoadRecordsFromESP/ESPReader caches nothing — but we only do it once
+		// per plugin below, so it's fine.
+		DynamicNeed n;
+		n.editorId = editorId;
+		n.pluginPath = info.sourcePlugin;
+		n.raceRaw = 0;
+		n.wnamRaw = info.wnamRaw;
+		n.srcSelfIdx = 0;
+		needs.push_back(std::move(n));
+	}
+
+	// Group by plugin so we load each at most once (EnsureDynamicMaster also
+	// dedupes, but the per-plugin RACE re-read does not).
+	std::unordered_map<std::string, std::vector<size_t>> byPlugin;
+	for (size_t i = 0; i < needs.size(); ++i)
+		byPlugin[needs[i].pluginPath].push_back(i);
+
+	for (auto& [pluginPath, indices] : byPlugin) {
+		if (isVanillaEsm(pluginPath))
+			continue;
+		// Re-read the plugin's NPC_ records to recover each override's raw
+		// RNAM and the plugin's selfIdx (we discarded these earlier).
+		esp::ESPReader reader;
+		if (!reader.Load(pluginPath, {"NPC_"}))
+			continue;
+		uint8_t srcSelfIdx = static_cast<uint8_t>(reader.GetMasters().size());
+
+		bool anyNeedsDynamicLoad = false;
+		std::unordered_map<std::string, uint32_t> rawRaceByEditorId;
+		for (auto& npc : reader.GetNPCs()) {
+			if (npc.editorId.empty())
+				continue;
+			rawRaceByEditorId[npc.editorId] = npc.raceFormId;
+			uint8_t rTop = (npc.raceFormId >> 24) & 0xFF;
+			uint8_t wTop = (npc.wnamFormId >> 24) & 0xFF;
+			if ((npc.raceFormId != 0 && rTop == srcSelfIdx) || (npc.wnamFormId != 0 && wTop == srcSelfIdx)) {
+				anyNeedsDynamicLoad = true;
+			}
+		}
+		if (!anyNeedsDynamicLoad)
+			continue;
+
+		uint8_t synthIdx = EnsureDynamicMaster(pluginPath);
+		if (synthIdx == 0)
+			continue;
+
+		// Update each affected override's FormIDs to the synthetic-master space.
+		for (size_t i : indices) {
+			auto& need = needs[i];
+			auto ovIt = npcSkinOverrides.find(need.editorId);
+			if (ovIt == npcSkinOverrides.end())
+				continue;
+			NpcSkinInfo& info = ovIt->second;
+
+			auto rawIt = rawRaceByEditorId.find(need.editorId);
+			uint32_t raceRaw = (rawIt != rawRaceByEditorId.end()) ? rawIt->second : 0;
+			if (raceRaw != 0 && info.remappedRace == 0) {
+				uint8_t rTop = (raceRaw >> 24) & 0xFF;
+				if (rTop == srcSelfIdx) {
+					info.remappedRace = (static_cast<uint32_t>(synthIdx) << 24) | (raceRaw & 0x00FFFFFF);
+				}
+			}
+			if (info.wnamRaw != 0 && info.remappedWnam == 0) {
+				uint8_t wTop = (info.wnamRaw >> 24) & 0xFF;
+				if (wTop == srcSelfIdx) {
+					info.remappedWnam = (static_cast<uint32_t>(synthIdx) << 24) | (info.wnamRaw & 0x00FFFFFF);
+					info.selfDefined = false;
+				}
+			}
+			wxLogMessage("ScanAllPluginsForNpcSkins: '%s' override resolved via dynamic master 0x%02X — remappedRace=%08X remappedWnam=%08X",
+						 need.editorId,
+						 synthIdx,
+						 info.remappedRace,
+						 info.remappedWnam);
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------

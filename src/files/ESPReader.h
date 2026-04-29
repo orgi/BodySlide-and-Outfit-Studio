@@ -91,7 +91,8 @@ struct ArmorAddonRecord {
 	std::string modelMale;	 // MOD2 — male 3rd person worn mesh
 	std::string modelFemale; // MOD3 — female 3rd person worn mesh
 	uint32_t bodySlotFlags = 0;
-	uint32_t raceId = 0x00019;
+	uint32_t raceId = 0x00019;					   // RNAM — primary race
+	std::vector<uint32_t> additionalRaces;		   // MODL — additional RACE FormIDs this ARMA also applies to
 	std::vector<AlternateTexture> altTexFemale; // MO3S — female model alternate textures
 	std::vector<AlternateTexture> altTexMale;	// MO2S — male model alternate textures
 };

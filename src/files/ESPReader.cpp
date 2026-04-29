@@ -296,12 +296,25 @@ static ArmorRecord ParseArmor(const Record& rec) {
 			ar.armorRating = ReadLE<uint32_t>(dnam->data.data()) / 100.0f;
 	}
 
-	// BOD2: body template (first 4 bytes = body part flags, next 4 = armor type)
+	// Body template: prefer BOD2 (Skyrim SE/AE), fall back to BODT (legacy).
+	// BOD2 layout: [body part flags (4)][armor type (4)]
+	// BODT layout: [body part flags (4)][general flags (4)][armor type (4)]
+	// First 4 bytes (body part flags) and the trailing armor type word are
+	// what we care about; otherwise the layouts are compatible enough.
 	uint32_t armorTypeVal = 0;
 	if (auto* bod2 = rec.GetSubrecord("BOD2")) {
 		if (bod2->data.size() >= 8) {
 			ar.bodySlotFlags = ReadLE<uint32_t>(bod2->data.data());
 			armorTypeVal = ReadLE<uint32_t>(bod2->data.data() + 4);
+		}
+	}
+	else if (auto* bodt = rec.GetSubrecord("BODT")) {
+		if (bodt->data.size() >= 12) {
+			ar.bodySlotFlags = ReadLE<uint32_t>(bodt->data.data());
+			armorTypeVal = ReadLE<uint32_t>(bodt->data.data() + 8);
+		}
+		else if (bodt->data.size() >= 4) {
+			ar.bodySlotFlags = ReadLE<uint32_t>(bodt->data.data());
 		}
 	}
 	switch (armorTypeVal) {
@@ -407,10 +420,15 @@ static ArmorAddonRecord ParseArmorAddon(const Record& rec) {
 	aa.formId = rec.formId;
 	aa.editorId = rec.EditorId();
 
-	// BOD2: body slot flags
+	// Body slot flags: prefer BOD2 (Skyrim SE/AE), fall back to BODT (legacy).
+	// Both encode the body part bitfield in the first 4 bytes.
 	if (auto* bod2 = rec.GetSubrecord("BOD2")) {
 		if (bod2->data.size() >= 4)
 			aa.bodySlotFlags = ReadLE<uint32_t>(bod2->data.data());
+	}
+	else if (auto* bodt = rec.GetSubrecord("BODT")) {
+		if (bodt->data.size() >= 4)
+			aa.bodySlotFlags = ReadLE<uint32_t>(bodt->data.data());
 	}
 
 	// MOD2: male 3rd person model
@@ -429,10 +447,19 @@ static ArmorAddonRecord ParseArmorAddon(const Record& rec) {
 	if (auto* mo3s = rec.GetSubrecord("MO3S"))
 		aa.altTexFemale = ParseAlternateTextures(*mo3s);
 
-	// RNAM: race
+	// RNAM: primary race
 	if (auto* rnam = rec.GetSubrecord("RNAM")) {
 		if (rnam->data.size() >= 4)
 			aa.raceId = ReadLE<uint32_t>(rnam->data.data());
+	}
+
+	// MODL: additional races (each subrecord is one RACE FormID).
+	// In ARMA records this is the "Additional Races" list, not an ARMA pointer
+	// (which is what MODL means inside ARMO records). The game uses these to
+	// match an ARMA against any of the listed races, in addition to RNAM.
+	for (auto* modl : rec.GetSubrecords("MODL")) {
+		if (modl->data.size() >= 4)
+			aa.additionalRaces.push_back(ReadLE<uint32_t>(modl->data.data()));
 	}
 
 	return aa;

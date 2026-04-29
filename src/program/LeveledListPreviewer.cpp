@@ -586,8 +586,12 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 	}
 
 	// Determine which body NIF paths to load.
-	// If an NPC is selected and has a WNAM skin armor, use that NPC's body meshes.
-	// Otherwise fall back to the default character assets.
+	//
+	// Game-accurate skin resolution chain when an NPC is selected:
+	//   NIFs:     NPC's WNAM (skin ARMO) → race's WNAM ARMO. No vanilla fallback;
+	//             a slot the chain cannot resolve is an error (status bar + log).
+	//   Textures: NPC's WNAM TXST → race's WNAM TXST → NIF's embedded BSShaderTextureSet
+	//             (i.e. the textures shipped with the chosen skin NIF).
 	//
 	// Only load body parts whose slots are NOT already provided by the outfit.
 	// If the outfit declares e.g. slot 32, it supplies its own body mesh and we
@@ -600,10 +604,11 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 	};
 	std::vector<SlotNif> bodyNifs;
 
-	// Resolve NPC-specific body/hands/feet paths with per-slot fallback:
-	//   NPC's own WNAM → race's default skin ARMO → vanilla default (filled below).
 	if (!currentHeadEditorId.empty()) {
 		auto paths = data.ResolveNpcBodyNifPaths(currentHeadEditorId, useHighWeight);
+		wxLogMessage("LeveledListPreviewer: ResolveNpcBodyNifPaths('%s') -> body='%s' hands='%s' feet='%s'",
+					 currentHeadEditorId, paths.body, paths.hands, paths.feet);
+
 		if (!paths.body.empty())
 			bodyNifs.push_back({32, paths.body});
 		if (!paths.hands.empty())
@@ -611,37 +616,75 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 		if (!paths.feet.empty())
 			bodyNifs.push_back({37, paths.feet});
 
-		if (!bodyNifs.empty())
-			wxLogMessage("LeveledListPreviewer: Using NPC '%s' body meshes (NPC→race chain)", currentHeadEditorId);
+		// Report any slots the NPC/race chain failed to provide (and that the outfit
+		// doesn't already cover). No vanilla femalebody fallback under an NPC.
+		std::vector<std::string> missing;
+		if (paths.body.empty() && !outfitDeclaredSlots.count(32))
+			missing.emplace_back("body");
+		if (paths.hands.empty() && !outfitDeclaredSlots.count(33))
+			missing.emplace_back("hands");
+		if (paths.feet.empty() && !outfitDeclaredSlots.count(37))
+			missing.emplace_back("feet");
+
+		if (!missing.empty()) {
+			std::string slotList;
+			for (size_t i = 0; i < missing.size(); ++i) {
+				if (i)
+					slotList += ", ";
+				slotList += missing[i];
+			}
+			std::string err = "NPC '" + currentHeadEditorId
+							  + "': no skin NIF defined for " + slotList
+							  + " (neither NPC's WNAM nor race's WNAM resolves)";
+			wxLogError("LeveledListPreviewer: %s", err.c_str());
+			SetStatusText(wxString::FromUTF8(err));
+		}
+		else if (!bodyNifs.empty()) {
+			wxLogMessage("LeveledListPreviewer: Using NPC '%s' body meshes (NPC->race chain)", currentHeadEditorId);
+		}
+	}
+	else {
+		// No NPC selected — fall back to vanilla femalebody so the outfit can be
+		// previewed standalone. This is the only path that may use defaults.
+		bodyNifs.push_back({32, "meshes/actors/character/character assets/femalebody" + suffix});
+		bodyNifs.push_back({33, "meshes/actors/character/character assets/femalehands" + suffix});
+		bodyNifs.push_back({37, "meshes/actors/character/character assets/femalefeet" + suffix});
 	}
 
-	// Fill in default paths for any slots not provided by the NPC's WNAM
-	// (or when no NPC is selected). A WNAM may supply only the body path,
-	// leaving hands/feet uncovered — always ensure all three slots have a path.
-	auto hasSlot = [&](int slot) {
-		for (auto& s : bodyNifs)
-			if (s.slot == slot)
-				return true;
-		return false;
-	};
-	if (!hasSlot(32))
-		bodyNifs.push_back({32, "meshes/actors/character/character assets/femalebody" + suffix});
-	if (!hasSlot(33))
-		bodyNifs.push_back({33, "meshes/actors/character/character assets/femalehands" + suffix});
-	if (!hasSlot(37))
-		bodyNifs.push_back({37, "meshes/actors/character/character assets/femalefeet" + suffix});
-
 	for (auto& entry : bodyNifs) {
-		if (outfitDeclaredSlots.count(entry.slot)) {
-			wxLogMessage("  Skipping body slot %d — covered by outfit ARMO", entry.slot);
+		if (!LoadNifFromPath(entry.path)) {
+			wxLogMessage("LeveledListPreviewer: Body part not found: %s", entry.path);
 			continue;
 		}
-		if (!LoadNifFromPath(entry.path))
-			wxLogMessage("LeveledListPreviewer: Body part not found: %s", entry.path);
+		// When the outfit's ARMO already covers this slot, hide the race body
+		// shape so we don't double-render. We still loaded the NIF so its
+		// BSShaderTextureSet is captured into shapeTexFiles — that lets
+		// ReconcileBodyAndOutfitShapes retarget the race skin texture onto the
+		// outfit's bundled body shape afterwards.
+		if (outfitDeclaredSlots.count(entry.slot)) {
+			wxLogMessage("  Race body slot %d loaded but hidden — outfit ARMO declares this slot", entry.slot);
+			for (auto& raceShape : bodyShapeNames) {
+				auto pit = bodyShapePartMap.find(raceShape);
+				if (pit != bodyShapePartMap.end()
+					&& pit->second.count(static_cast<uint16_t>(entry.slot))) {
+					gls.SetMeshVisibility(raceShape, false);
+				}
+			}
+		}
 	}
 
 	if (bodyShapeNames.empty())
 		return;
+
+	// When NPC is selected but neither the NPC's WNAM nor the race's WNAM defined
+	// any TXST overrides, fall through and let the loaded NIF's embedded
+	// BSShaderTextureSet (the model author's chosen textures) remain in effect.
+	// That IS the in-game behavior and the user-requested fallback — log it so
+	// the chain is traceable.
+	if (!currentHeadEditorId.empty() && !hasNpcSkinTextures) {
+		wxLogMessage("LeveledListPreviewer: NPC '%s' has no WNAM/race TXST override - using NIF embedded textures",
+					 currentHeadEditorId);
+	}
 
 	// Apply per-slot NPC skin textures (body / hands / feet independently) and
 	// the NPC's QNAM tint. Skin textures come from the NPC's WNAM ARMO or (fallback)
@@ -737,6 +780,213 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 	// Apply current preset if one was chosen
 	if (!currentPresetName.empty() && currentPresetName != "(none)")
 		ApplyPresetToBody(currentPresetName, true);
+}
+
+// Reconcile after outfit pieces are loaded:
+// 1. Hide race-loaded body parts whose dismember slot is already represented by
+//    an outfit shape (e.g. a cloak NIF that bundles its own hands shape — the
+//    cloak ARMO declares slot 14, not 33, so we cannot tell ahead of time, and
+//    end up rendering both ChildHands AND the cloak's bundled Hands).
+// 2. Apply the resolved NPC/race skin TXST onto outfit shapes that occupy a
+//    body slot, so the outfit's "Hands"/"Body"/"Feet" use the NPC's skin tone
+//    rather than whatever the model author baked into the NIF.
+void LeveledListPreviewer::ReconcileBodyAndOutfitShapes() {
+	if (outfitShapeNames.empty())
+		return;
+
+	// Set of dismember slot IDs that any outfit shape occupies.
+	std::set<uint16_t> outfitCoveredSlots;
+	std::set<std::string> outfitShapeSet(outfitShapeNames.begin(), outfitShapeNames.end());
+	for (auto& [name, partIds] : bodyShapePartMap) {
+		if (!outfitShapeSet.count(name))
+			continue;
+		for (uint16_t p : partIds) {
+			if (p == 32 || p == 33 || p == 37)
+				outfitCoveredSlots.insert(p);
+		}
+	}
+
+	if (!outfitCoveredSlots.empty()) {
+		std::string covered;
+		for (uint16_t p : outfitCoveredSlots) {
+			if (!covered.empty())
+				covered += ",";
+			covered += std::to_string(p);
+		}
+		wxLogMessage("ReconcileBodyAndOutfitShapes: outfit covers body slots [%s]", covered);
+	}
+
+	// Hide race-loaded body shapes that duplicate outfit-bundled body parts.
+	for (auto& raceShape : bodyShapeNames) {
+		auto it = bodyShapePartMap.find(raceShape);
+		if (it == bodyShapePartMap.end())
+			continue;
+		bool overlap = false;
+		for (uint16_t p : it->second) {
+			if (outfitCoveredSlots.count(p)) {
+				overlap = true;
+				break;
+			}
+		}
+		if (overlap) {
+			wxLogMessage("  Hiding race body shape '%s' (covered by outfit)", raceShape);
+			gls.SetMeshVisibility(raceShape, false);
+		}
+	}
+
+	// Apply NPC/race skin TXST to outfit body shapes.
+	if (!hasNpcSkinTextures && !hasNpcTint)
+		return;
+
+	std::string baseGamePath = Config["GameDataPath"];
+	if (!baseGamePath.empty() && baseGamePath.back() != '/' && baseGamePath.back() != '\\')
+		baseGamePath += '/';
+
+	auto resolveTexFiles = [&](const std::array<std::string, 8>& src) -> std::vector<std::string> {
+		const uint8_t MAX_TEX = 10;
+		std::vector<std::string> tf(MAX_TEX);
+		for (int i = 0; i < 8; ++i) {
+			if (src[i].empty())
+				continue;
+			std::string path = src[i];
+			std::replace(path.begin(), path.end(), '\\', '/');
+			if (path.find("textures/") == std::string::npos)
+				path = "textures/" + path;
+			std::string fullPath = baseGamePath + path;
+			if (wxFileName::FileExists(fullPath)) {
+				tf[i] = fullPath;
+			}
+			else {
+				std::string resolved = lldata::LeveledListData::ResolveCaseInsensitive(baseGamePath, path);
+				tf[i] = resolved.empty() ? fullPath : resolved;
+			}
+		}
+		return tf;
+	};
+
+	std::vector<std::string> bodyTex = hasNpcSkinTextures ? resolveTexFiles(npcBodyPartTextures.body) : std::vector<std::string>{};
+	std::vector<std::string> handsTex = hasNpcSkinTextures ? resolveTexFiles(npcBodyPartTextures.hands) : std::vector<std::string>{};
+	std::vector<std::string> feetTex = hasNpcSkinTextures ? resolveTexFiles(npcBodyPartTextures.feet) : std::vector<std::string>{};
+
+	std::string vShader = Config["AppDir"] + "/res/shaders/default.vert";
+	std::string fShader = Config["AppDir"] + "/res/shaders/default.frag";
+	TargetGame targetGame = (TargetGame)Config.GetIntValue("TargetGame");
+	if (targetGame == FO4 || targetGame == FO4VR || targetGame == FO76) {
+		vShader = Config["AppDir"] + "/res/shaders/fo4_default.vert";
+		fShader = Config["AppDir"] + "/res/shaders/fo4_default.frag";
+	}
+
+	auto applyToShape = [&](const std::string& name, const std::vector<std::string>& texFiles, const char* slotLabel) {
+		Mesh* m = gls.GetMesh(name);
+		if (!m)
+			return;
+		if (!texFiles.empty() && !texFiles[0].empty()) {
+			GLMaterial* glMat = gls.AddMaterial(texFiles, vShader, fShader);
+			if (glMat) {
+				m->material = glMat;
+				shapeMaterials[name] = glMat;
+				gls.UpdateShaders(m);
+				wxLogMessage("ReconcileBodyAndOutfitShapes: Applied NPC %s skin texture to outfit shape '%s': %s", slotLabel, name, texFiles[0]);
+			}
+		}
+		if (hasNpcTint)
+			m->color = nifly::Vector3(npcTintR, npcTintG, npcTintB);
+	};
+
+	// Lookup the resolved texture file paths captured from a race body shape's
+	// BSShaderTextureSet during LoadNifFromPath/AddNifShapeTextures. We use this
+	// as a fallback for outfit body shapes when the ESP texture chain (WNAM
+	// ARMA → MO3S → TXST) didn't produce any textures: the race NIF's embedded
+	// texture references are the next source of truth (game behavior).
+	auto raceShapeTexFor = [&](uint16_t slot) -> const std::vector<std::string>* {
+		for (auto& raceShape : bodyShapeNames) {
+			auto pit = bodyShapePartMap.find(raceShape);
+			if (pit == bodyShapePartMap.end() || !pit->second.count(slot))
+				continue;
+			auto tit = shapeTexFiles.find(raceShape);
+			if (tit != shapeTexFiles.end() && !tit->second.empty() && !tit->second[0].empty())
+				return &tit->second;
+		}
+		return nullptr;
+	};
+
+	// Many outfit shapes carry body-slot dismember partitions (32/33/37) just
+	// because they're skinned to the body — a dress that morphs with the body
+	// will have partition 32 even though it's not a body mesh. To avoid
+	// retexturing dresses, sleeves, etc., only override an outfit shape when
+	// its current diffuse texture path looks like a vanilla body/hands/feet
+	// texture. That singles out the outfit's "reference" body shape (the
+	// femalebody substitute baked into the outfit NIF) without touching the
+	// clothing parts.
+	auto lower = [](std::string s) {
+		std::transform(s.begin(), s.end(), s.begin(),
+					   [](unsigned char c) { return std::tolower(c); });
+		return s;
+	};
+	auto isVanillaBodyTex = [&](const std::string& path) {
+		std::string p = lower(path);
+		return p.find("femalebody") != std::string::npos
+			   || p.find("malebody") != std::string::npos;
+	};
+	auto isVanillaHandsTex = [&](const std::string& path) {
+		std::string p = lower(path);
+		return p.find("femalehands") != std::string::npos
+			   || p.find("malehands") != std::string::npos;
+	};
+	auto isVanillaFeetTex = [&](const std::string& path) {
+		std::string p = lower(path);
+		return p.find("femalefeet") != std::string::npos
+			   || p.find("malefeet") != std::string::npos;
+	};
+
+	for (auto& outfitShape : outfitShapeNames) {
+		auto it = bodyShapePartMap.find(outfitShape);
+		if (it == bodyShapePartMap.end())
+			continue;
+
+		uint16_t slot = 0;
+		const std::vector<std::string>* tex = nullptr;
+		const char* slotLabel = nullptr;
+		if (it->second.count(32)) {
+			slot = 32; slotLabel = "body";
+			if (!bodyTex.empty() && !bodyTex[0].empty())
+				tex = &bodyTex;
+		}
+		else if (it->second.count(33)) {
+			slot = 33; slotLabel = "hands";
+			if (!handsTex.empty() && !handsTex[0].empty())
+				tex = &handsTex;
+		}
+		else if (it->second.count(37)) {
+			slot = 37; slotLabel = "feet";
+			if (!feetTex.empty() && !feetTex[0].empty())
+				tex = &feetTex;
+		}
+		if (slot == 0)
+			continue;
+
+		// Verify that the outfit shape is a body part (not a dress/sleeve/etc.)
+		// by inspecting its existing diffuse texture path.
+		auto curIt = shapeTexFiles.find(outfitShape);
+		if (curIt == shapeTexFiles.end() || curIt->second.empty() || curIt->second[0].empty())
+			continue;
+		const std::string& curDiffuse = curIt->second[0];
+		bool looksLikeBodyPart = false;
+		switch (slot) {
+			case 32: looksLikeBodyPart = isVanillaBodyTex(curDiffuse); break;
+			case 33: looksLikeBodyPart = isVanillaHandsTex(curDiffuse); break;
+			case 37: looksLikeBodyPart = isVanillaFeetTex(curDiffuse); break;
+		}
+		if (!looksLikeBodyPart)
+			continue;
+
+		// Fall back to the race body NIF's embedded texture set when no
+		// ESP-defined TXST was found for this slot.
+		if (!tex)
+			tex = raceShapeTexFor(slot);
+		if (tex)
+			applyToShape(outfitShape, *tex, slotLabel);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1119,14 +1369,16 @@ void LeveledListPreviewer::OnHeadEntered(wxCommandEvent& WXUNUSED(event)) {
 						 || !npcBodyPartTextures.hands[0].empty()
 						 || !npcBodyPartTextures.feet[0].empty();
 
-	if (hasNpcSkinTextures)
-		wxLogMessage("LeveledListPreviewer: NPC '%s' skin resolved — body='%s' hands='%s' feet='%s'",
-					 logName,
-					 npcBodyPartTextures.body[0],
-					 npcBodyPartTextures.hands[0],
-					 npcBodyPartTextures.feet[0]);
-	else
-		wxLogMessage("LeveledListPreviewer: NPC '%s' no skin texture overrides resolved (using NIF defaults)", logName);
+	if (hasNpcSkinTextures) {
+		std::string skinLog = "LeveledListPreviewer: NPC '" + logName
+							  + "' skin resolved — body='" + npcBodyPartTextures.body[0]
+							  + "' hands='" + npcBodyPartTextures.hands[0]
+							  + "' feet='" + npcBodyPartTextures.feet[0] + "'";
+		wxLogMessage("%s", skinLog.c_str());
+	}
+	else {
+		wxLogMessage("LeveledListPreviewer: NPC '%s' no skin texture overrides resolved (will use NIF embedded textures)", logName.c_str());
+	}
 
 	// QNAM face tint (skin complexion).
 	hasNpcTint = npc.hasTint;
@@ -1147,6 +1399,10 @@ void LeveledListPreviewer::OnHeadEntered(wxCommandEvent& WXUNUSED(event)) {
 		bodyShapeNames.clear();
 		bodyGameVerts.clear();
 		LoadBodyMeshes();
+		// If an outfit is currently displayed, reapply race skin TXST (or NIF
+		// embedded textures from the new race body NIF) onto its bundled body
+		// shapes. Otherwise the outfit keeps the previous NPC's textures.
+		ReconcileBodyAndOutfitShapes();
 	}
 
 	RefreshMeshOverlay();
@@ -1710,6 +1966,54 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 			psi.shapeNames.push_back(m->shapeName);
 			++loadedCount;
 
+			// Game-accurate filter: a NIF shape only renders if its dismember
+			// partition matches one of the slots declared by the owning ARMO.
+			// Cloak NIFs commonly bundle a copy of the body / hands / feet
+			// shapes for rigging reference even though the cloak's ARMO only
+			// declares the cloak slot — the engine skips those bundled shapes
+			// and renders only the parts whose partition the ARMO actually
+			// claims. We mirror that here: shapes whose partition isn't
+			// claimed by their piece's ARMO are hidden on load.
+			if (auto* nifShape = nif.FindBlockByName<NiShape>(shapeName)) {
+				NiVector<BSDismemberSkinInstance::PartitionInfo> partInfo;
+				std::vector<int> triParts;
+				if (nif.GetShapePartitions(nifShape, partInfo, triParts)) {
+					std::set<uint16_t> partIds;
+					std::string partList;
+					for (size_t i = 0; i < partInfo.size(); ++i) {
+						partIds.insert(partInfo[i].partID);
+						if (!partList.empty()) partList += ",";
+						partList += std::to_string(partInfo[i].partID);
+					}
+					if (!partIds.empty()) {
+						bodyShapePartMap[m->shapeName] = partIds;
+
+						bool slotCoveredByPiece = false;
+						if (!piece.bodySlots.empty()) {
+							for (int slot : piece.bodySlots) {
+								if (partIds.count(static_cast<uint16_t>(slot))) {
+									slotCoveredByPiece = true;
+									break;
+								}
+							}
+						}
+						if (!piece.bodySlots.empty() && !slotCoveredByPiece) {
+							std::string declared;
+							for (int slot : piece.bodySlots) {
+								if (!declared.empty()) declared += ",";
+								declared += std::to_string(slot);
+							}
+							wxLogMessage("  Hiding outfit shape '%s' (partitions [%s] not in piece slots [%s])",
+										 m->shapeName, partList, declared);
+							gls.SetMeshVisibility(m->shapeName, false);
+						}
+						else {
+							wxLogMessage("  Outfit shape '%s' partitions: [%s]", m->shapeName, partList);
+						}
+					}
+				}
+			}
+
 			// Cache game verts for reset and .tri morphing
 			if (pieceTri && m->nVerts > 0) {
 				std::vector<Vector3> gameVerts(m->nVerts);
@@ -1849,6 +2153,11 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 
 	wxLog::FlushActive();
 	SetStatusText(wxString::Format(_("Outfit: %s — %d meshes loaded"), outfit.name, loadedCount));
+
+	// After all outfit pieces are loaded, hide race body shapes that duplicate
+	// outfit-bundled body shapes, and apply NPC/race skin TXST to the bundled
+	// body shapes so they pick up the right skin tone (per game behavior).
+	ReconcileBodyAndOutfitShapes();
 
 	RefreshMeshOverlay();
 	gls.RenderOneFrame();
@@ -2026,6 +2335,7 @@ bool LeveledListPreviewer::AddNifShapeTextures(NifFile* fromNif, const std::stri
 	if (glMat) {
 		m->material = glMat;
 		shapeMaterials[lookupName] = glMat;
+		shapeTexFiles[lookupName] = texFiles;
 
 		if (hasMat)
 			m->UpdateFromMaterialFile(mat);

@@ -145,15 +145,27 @@ public:
 	/// Returns 0 if the race is unknown or has no WNAM.
 	uint32_t GetRaceSkinArmo(const std::string& raceEditorId) const;
 
+	/// Effective race info for an NPC, taking into account any RNAM override
+	/// found by ScanAllPluginsForNpcSkins. Falls back to the vanilla race read
+	/// during LoadNPCs when no override is present (or the override can't be
+	/// remapped into the main-ESP cache).
+	struct EffectiveRace {
+		uint32_t formId = 0;	  // race FormID in main-ESP space (raceCache key)
+		std::string editorId;	  // race editor id (raceByEditorId key)
+		uint32_t skinArmoFormId = 0; // race's WNAM (remapped); 0 if unknown
+	};
+	EffectiveRace GetEffectiveNpcRace(const std::string& npcEditorId);
+
 	/// Resolve a head part's relative NIF path from its FormID.
 	std::string ResolveHeadPartNif(uint32_t headPartFormId) const;
 
 	/// Info about an NPC's skin override found by scanning all plugins.
 	struct NpcSkinInfo {
-		uint32_t remappedWnam = 0; // WNAM remapped to espMasters index space (when !selfDefined)
-		uint32_t wnamRaw = 0;	   // WNAM raw FormID from source ESP (when selfDefined)
-		std::string sourcePlugin;  // Full path to the ESP that defines this NPC/WNAM
-		bool selfDefined = false;  // true = WNAM is self-defined in a non-master ESP
+		uint32_t remappedWnam = 0;		// WNAM remapped to espMasters index space (when !selfDefined)
+		uint32_t wnamRaw = 0;			// WNAM raw FormID from source ESP (when selfDefined)
+		uint32_t remappedRace = 0;		// RNAM remapped to espMasters index space (0 if no override or unmappable)
+		std::string sourcePlugin;		// Full path to the ESP that defines this NPC override
+		bool selfDefined = false;		// true = WNAM is self-defined in a non-master ESP
 	};
 
 	/// Scan ALL plugins in the Data directory for NPC_ WNAM overrides.
@@ -172,6 +184,14 @@ private:
 	/// masterIndex: the index of this file in the main ESP's master list.
 	/// mainMasters: the master list of the main ESP, used to remap cross-references.
 	void LoadRecordsFromESP(const std::string& filepath, const std::set<std::string>& types, uint8_t masterIndex, const std::vector<std::string>& mainMasters);
+
+	/// Load a non-master plugin's RACE/ARMO/ARMA/TXST records into our caches
+	/// so an NPC override that references a self-defined record (e.g. a mod
+	/// that re-races an NPC and points WNAM at an ARMO it also defines) can
+	/// be resolved. Uses a synthetic master index (high bytes 0xFD-0xF0);
+	/// returns that index, or 0 if loading failed. Cached by pluginPath;
+	/// subsequent calls are no-ops.
+	uint8_t EnsureDynamicMaster(const std::string& pluginPath);
 
 	/// Resolve LVLI entries recursively to collect referenced FormIDs and their levels.
 	/// Collects both resolved ARMOs and unresolved FormIDs.
@@ -209,6 +229,10 @@ private:
 	std::unordered_map<std::string, uint32_t> npcSkinCache;		   // editorId → remapped WNAM FormID
 	std::unordered_map<std::string, NpcSkinInfo> npcSkinOverrides; // editorId → skin info from all plugins
 	std::vector<std::string> espMasters;						   // Master list of the loaded generated ESP
+	// Plugins loaded as dynamic masters (synthetic top-byte index).
+	// Index 0 → top byte 0xFD, index 1 → 0xFC, etc., counting down. We avoid
+	// 0xFE/0xFF since the engine reserves them for ESL-related bookkeeping.
+	std::vector<std::string> dynamicMasters;
 	bool npcSkinsScanned = false;
 };
 
@@ -235,7 +259,8 @@ struct CachedARMA {
 	std::string modelMale;	 // MOD2 — male 3rd person worn mesh
 	std::string modelFemale; // MOD3 — female 3rd person worn mesh
 	uint32_t bodySlotFlags = 0;
-	uint32_t raceFormId = 0; // RNAM — primary race this ARMA applies to (remapped to main-ESP space)
+	uint32_t raceFormId = 0;					 // RNAM — primary race (remapped to main-ESP space)
+	std::vector<uint32_t> additionalRaceFormIds; // MODL — additional races (remapped to main-ESP space)
 	std::vector<CachedAlternateTexture> altTexFemale; // MO3S
 	std::vector<CachedAlternateTexture> altTexMale;	  // MO2S
 };

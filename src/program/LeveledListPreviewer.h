@@ -53,6 +53,13 @@ class LeveledListPreviewer : public wxFrame {
 	std::unordered_map<std::string, wxCheckBox*> meshCheckboxes; // shapeName → checkbox
 	std::unordered_map<std::string, std::string> shapeNifSource; // shapeName → source NIF path
 	std::unordered_map<std::string, std::string> shapeArmoName;	 // shapeName → ARMO display name
+	// Resolved texture file paths (slot 0 = diffuse, ..., 9 = MAX) per shape,
+	// captured from BSShaderTextureSet + BGSM/BGEM + ESP TXST overrides at the
+	// moment AddNifShapeTextures built the GLMaterial. Used by
+	// ReconcileBodyAndOutfitShapes to retarget the race-skin textures onto
+	// outfit-bundled body shapes when the outfit's NIF would otherwise use
+	// vanilla / wrong textures.
+	std::unordered_map<std::string, std::vector<std::string>> shapeTexFiles;
 	std::set<std::string> expandedNifGroups;					 // NIF paths currently expanded in overlay
 
 	// "Use Any" variant groups: only one variant per group is shown at a time
@@ -191,6 +198,10 @@ private:
 	void LoadBodyMeshes();
 	void LoadHeadMesh(const lldata::NPCEntry& npc);
 	void ClearHeadMeshes();
+	// Reconcile race-loaded body parts with outfit-bundled body shapes:
+	// - Hide race body shapes whose dismember slot is already covered by an outfit shape.
+	// - Apply the NPC's WNAM/race skin TXST to outfit body shapes that occupy body slots.
+	void ReconcileBodyAndOutfitShapes();
 	void UpdateHeadVisibility();
 	void UpdateActiveSlotsAndVisibility();
 	void LoadPresetList();
