@@ -570,17 +570,21 @@ bool LeveledListPreviewer::LoadNifFromPath(const std::string& relativePath, cons
 }
 
 void LeveledListPreviewer::LoadBodyMeshes() {
-	// Selectively clear body shape info, keeping head info
+	// Selectively clear race-body shape info while preserving entries belonging
+	// to head shapes AND outfit shapes. ReconcileBodyAndOutfitShapes relies on
+	// bodyShapePartMap entries for outfit shapes (populated during outfit load)
+	// to know which slots an outfit covers and to retarget race textures onto
+	// the outfit's reference body shape — wiping them here breaks the deferred
+	// reload path on initial load.
 	{
-		std::set<std::string> headSet(headShapeNames.begin(), headShapeNames.end());
-		auto isNotHead = [&](const std::string& name) { return headSet.find(name) == headSet.end(); };
+		std::set<std::string> raceBodySet(bodyShapeNames.begin(), bodyShapeNames.end());
 
 		for (auto it = bodyGameVerts.begin(); it != bodyGameVerts.end();) {
-			if (isNotHead(it->first)) it = bodyGameVerts.erase(it);
+			if (raceBodySet.count(it->first)) it = bodyGameVerts.erase(it);
 			else ++it;
 		}
 		for (auto it = bodyShapePartMap.begin(); it != bodyShapePartMap.end();) {
-			if (isNotHead(it->first)) it = bodyShapePartMap.erase(it);
+			if (raceBodySet.count(it->first)) it = bodyShapePartMap.erase(it);
 			else ++it;
 		}
 	}
@@ -834,10 +838,13 @@ void LeveledListPreviewer::ReconcileBodyAndOutfitShapes() {
 		}
 	}
 
-	// Apply NPC/race skin TXST to outfit body shapes.
-	if (!hasNpcSkinTextures && !hasNpcTint)
-		return;
-
+	// Apply NPC/race skin TXST (or, when no ESP TXST was found, the textures
+	// captured from the race body NIF's BSShaderTextureSet) to outfit body
+	// shapes. Note: we do NOT early-exit on `!hasNpcSkinTextures && !hasNpcTint`
+	// — the NIF-fallback path further down still needs to run so the outfit's
+	// reference body shape picks up the right race texture even when no NPC
+	// has been re-selected since the previewer launched (initial load with a
+	// previously persisted outfit, in particular).
 	std::string baseGamePath = Config["GameDataPath"];
 	if (!baseGamePath.empty() && baseGamePath.back() != '/' && baseGamePath.back() != '\\')
 		baseGamePath += '/';
@@ -2134,15 +2141,20 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 									 npcBodyPartTextures.hands[0],
 									 npcBodyPartTextures.feet[0],
 									 hasNpcTint ? "yes" : "no");
+						// Drop only the previously loaded race body shapes; leave
+						// outfit-shape entries in shapeTexFiles / bodyShapePartMap
+						// so ReconcileBodyAndOutfitShapes (called below) can still
+						// see what slots the outfit covers and retarget textures.
 						for (auto& name : bodyShapeNames) {
 							gls.DeleteMesh(name);
 							shapeNifSource.erase(name);
 							shapeMaterials.erase(name);
 							shapeArmoName.erase(name);
+							bodyShapePartMap.erase(name);
+							shapeTexFiles.erase(name);
 						}
 						bodyShapeNames.clear();
 						bodyGameVerts.clear();
-						bodyShapePartMap.clear();
 						LoadBodyMeshes();
 					}
 				}
