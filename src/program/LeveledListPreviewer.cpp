@@ -952,9 +952,16 @@ void LeveledListPreviewer::ReconcileBodyAndOutfitShapes() {
 			   || p.find("malehands") != std::string::npos;
 	};
 	auto isVanillaFeetTex = [&](const std::string& path) {
+		// Vanilla feet meshes (FemaleFeet.nif / MaleFeet.nif) point at the
+		// body diffuse — actors/character/female/femalebody_1.dds — not at a
+		// dedicated femalefeet_*.dds. Accept both the body and explicit
+		// femalefeet patterns so an outfit's reference feet shape is
+		// recognized regardless of which convention the modder used.
 		std::string p = lower(path);
 		return p.find("femalefeet") != std::string::npos
-			   || p.find("malefeet") != std::string::npos;
+			   || p.find("malefeet") != std::string::npos
+			   || p.find("femalebody") != std::string::npos
+			   || p.find("malebody") != std::string::npos;
 	};
 
 	for (auto& outfitShape : outfitShapeNames) {
