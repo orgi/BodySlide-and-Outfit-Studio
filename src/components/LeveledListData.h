@@ -263,6 +263,9 @@ struct CachedARMA {
 	std::vector<uint32_t> additionalRaceFormIds; // MODL — additional races (remapped to main-ESP space)
 	std::vector<CachedAlternateTexture> altTexFemale; // MO3S
 	std::vector<CachedAlternateTexture> altTexMale;	  // MO2S
+	// Whole-model skin texture set FormIDs (remapped). NAM0=male, NAM1=female.
+	uint32_t skinTextureMale = 0;
+	uint32_t skinTextureFemale = 0;
 };
 
 struct CachedTXST {

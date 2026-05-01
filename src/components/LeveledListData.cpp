@@ -547,6 +547,8 @@ void LeveledListData::LoadRecordsFromESP(const std::string& filepath, const std:
 		cam.modelFemale = aa.modelFemale;
 		cam.bodySlotFlags = aa.bodySlotFlags;
 		cam.raceFormId = aa.raceId != 0 ? remapFid(aa.raceId) : 0;
+		cam.skinTextureMale = aa.skinTextureMale != 0 ? remapFid(aa.skinTextureMale) : 0;
+		cam.skinTextureFemale = aa.skinTextureFemale != 0 ? remapFid(aa.skinTextureFemale) : 0;
 		for (uint32_t r : aa.additionalRaces) {
 			if (r != 0)
 				cam.additionalRaceFormIds.push_back(remapFid(r));
@@ -891,6 +893,8 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 		cam.bodySlotFlags = aa.bodySlotFlags;
 		cam.raceFormId = aa.raceId;						// main-ESP FormIDs need no remap
 		cam.additionalRaceFormIds = aa.additionalRaces; // main-ESP FormIDs need no remap
+		cam.skinTextureMale = aa.skinTextureMale;
+		cam.skinTextureFemale = aa.skinTextureFemale;
 		for (auto& at : aa.altTexFemale) {
 			CachedAlternateTexture cat;
 			cat.shapeName = at.shapeName;
@@ -1489,6 +1493,9 @@ LeveledListData::BodyNifPaths LeveledListData::ResolveNpcBodyNifPaths(const std:
 
 namespace {
 // Fill `dst` from the first TXST in ARMA's female alt-texture list (fallback male).
+// If MO3S/MO2S yield nothing, fall back to the per-gender skin TXST set via
+// NAM1 (female) / NAM0 (male) — that's the simpler ESP/ESL skin override
+// mechanism that mods commonly use to retexture an NPC's body.
 bool FillFromArmaTextures(const CachedARMA& arma, const std::unordered_map<uint32_t, CachedTXST>& txstCache, std::array<std::string, 8>& dst) {
 	auto& altTex = arma.altTexFemale.empty() ? arma.altTexMale : arma.altTexFemale;
 	for (auto& at : altTex) {
@@ -1500,6 +1507,18 @@ bool FillFromArmaTextures(const CachedARMA& arma, const std::unordered_map<uint3
 				dst[i] = it->second.textures[i];
 		if (!dst[0].empty())
 			return true;
+	}
+
+	uint32_t skinTxst = arma.skinTextureFemale != 0 ? arma.skinTextureFemale : arma.skinTextureMale;
+	if (skinTxst != 0) {
+		auto it = txstCache.find(skinTxst);
+		if (it != txstCache.end()) {
+			for (int i = 0; i < 8; ++i)
+				if (!it->second.textures[i].empty())
+					dst[i] = it->second.textures[i];
+			if (!dst[0].empty())
+				return true;
+		}
 	}
 	return false;
 }
@@ -1514,14 +1533,21 @@ void FillPartTexturesFromArmo(uint32_t armoFid,
 	if (armoFid == 0)
 		return;
 	auto armoIt = armoCache.find(armoFid);
-	if (armoIt == armoCache.end())
+	if (armoIt == armoCache.end()) {
+		wxLogMessage("FillPartTexturesFromArmo: ARMO %08X not in cache", armoFid);
 		return;
+	}
+
+	wxLogMessage("FillPartTexturesFromArmo: walking ARMO %08X (%zu ARMAs) raceHint=%08X",
+				 armoFid, armoIt->second.armatureIds.size(), npcRaceFid);
 
 	auto tryFill = [&](bool requireRaceMatch) {
 		for (uint32_t armaId : armoIt->second.armatureIds) {
 			auto armaIt = armaCache.find(armaId);
-			if (armaIt == armaCache.end())
+			if (armaIt == armaCache.end()) {
+				wxLogMessage("  ARMA %08X not in cache", armaId);
 				continue;
+			}
 			auto& arma = armaIt->second;
 			if (requireRaceMatch && npcRaceFid != 0) {
 				bool match = arma.raceFormId == npcRaceFid;
@@ -1537,12 +1563,24 @@ void FillPartTexturesFromArmo(uint32_t armoFid,
 					continue;
 			}
 
-			if ((arma.bodySlotFlags & (1u << 2)) && out.body[0].empty())
-				FillFromArmaTextures(arma, txstCache, out.body);
-			if ((arma.bodySlotFlags & (1u << 3)) && out.hands[0].empty())
-				FillFromArmaTextures(arma, txstCache, out.hands);
-			if ((arma.bodySlotFlags & (1u << 7)) && out.feet[0].empty())
-				FillFromArmaTextures(arma, txstCache, out.feet);
+			std::size_t altF = arma.altTexFemale.size();
+			std::size_t altM = arma.altTexMale.size();
+			wxLogMessage("  ARMA %08X race=%08X slotFlags=%08X altTexF=%zu altTexM=%zu skinTxstF=%08X skinTxstM=%08X",
+						 armaId, arma.raceFormId, arma.bodySlotFlags, altF, altM,
+						 arma.skinTextureFemale, arma.skinTextureMale);
+
+			if ((arma.bodySlotFlags & (1u << 2)) && out.body[0].empty()) {
+				if (FillFromArmaTextures(arma, txstCache, out.body))
+					wxLogMessage("    body texture set: %s", out.body[0]);
+			}
+			if ((arma.bodySlotFlags & (1u << 3)) && out.hands[0].empty()) {
+				if (FillFromArmaTextures(arma, txstCache, out.hands))
+					wxLogMessage("    hands texture set: %s", out.hands[0]);
+			}
+			if ((arma.bodySlotFlags & (1u << 7)) && out.feet[0].empty()) {
+				if (FillFromArmaTextures(arma, txstCache, out.feet))
+					wxLogMessage("    feet texture set: %s", out.feet[0]);
+			}
 		}
 	};
 
@@ -1761,100 +1799,118 @@ void LeveledListData::ScanAllPluginsForNpcSkins() {
 
 	wxLogMessage("ScanAllPluginsForNpcSkins: scanned %zu plugins (%zu with NPCs), %zu NPC skin overrides", pluginFiles.size(), pluginsWithNpcs, npcSkinOverrides.size());
 
-	// For overrides whose RNAM/WNAM target the source plugin's own FormID space
-	// (so we couldn't remap them above), load that plugin as a synthetic
-	// "dynamic master" and rewrite the NpcSkinInfo with FormIDs that resolve in
-	// our caches. This lets a mod plugin that re-races an NPC and points its
-	// WNAM at an ARMO it also defines actually drive the NIF/texture chain.
-	struct DynamicNeed {
-		std::string editorId;
-		std::string pluginPath;
-		uint32_t raceRaw;
-		uint32_t wnamRaw;
-		uint8_t srcSelfIdx;
-	};
-	std::vector<DynamicNeed> needs;
+	// For each unresolvable override (RNAM and/or WNAM not in our caches), find
+	// the plugin that ACTUALLY defines the referenced record — which can be the
+	// override's source plugin itself (self-defined) OR one of the source's
+	// masters that isn't one of our generated ESP's masters. Load that plugin
+	// as a synthetic "dynamic master" and rewrite the NpcSkinInfo with FormIDs
+	// that resolve in our caches. This lets both a mod that re-races an NPC
+	// and points its WNAM at an ARMO it self-defines, and a patch ESP that
+	// points an NPC override at an ARMO from a third plugin, drive the
+	// NIF/texture chain.
+	//
+	// First, gather all (sourcePlugin → editorId) pairs that still need
+	// resolution. Group by sourcePlugin so we re-read each source plugin once.
+	std::unordered_map<std::string, std::vector<std::string>> needBySource;
 	for (auto& [editorId, info] : npcSkinOverrides) {
-		bool needRace = (info.remappedRace == 0) && true;
+		bool needRace = (info.remappedRace == 0);
 		bool needWnam = (info.selfDefined && info.wnamRaw != 0);
 		if (!needRace && !needWnam)
 			continue;
-		// Re-read the plugin to get the raw RNAM and the plugin's master count.
-		// (We didn't store raceRaw on the info struct.) This is cheap because
-		// LoadRecordsFromESP/ESPReader caches nothing — but we only do it once
-		// per plugin below, so it's fine.
-		DynamicNeed n;
-		n.editorId = editorId;
-		n.pluginPath = info.sourcePlugin;
-		n.raceRaw = 0;
-		n.wnamRaw = info.wnamRaw;
-		n.srcSelfIdx = 0;
-		needs.push_back(std::move(n));
+		needBySource[info.sourcePlugin].push_back(editorId);
 	}
 
-	// Group by plugin so we load each at most once (EnsureDynamicMaster also
-	// dedupes, but the per-plugin RACE re-read does not).
-	std::unordered_map<std::string, std::vector<size_t>> byPlugin;
-	for (size_t i = 0; i < needs.size(); ++i)
-		byPlugin[needs[i].pluginPath].push_back(i);
+	// Index every plugin file in the data directory by lowercased base name —
+	// we'll need this to locate "the plugin named X" when an override points
+	// into one of the source plugin's masters that isn't one of our masters.
+	std::unordered_map<std::string, std::string> dataDirPluginByName;
+	for (auto& wxPath : pluginFiles) {
+		std::string p = wxPath.ToStdString();
+		auto sep = p.find_last_of("/\\");
+		std::string base = (sep == std::string::npos) ? p : p.substr(sep + 1);
+		dataDirPluginByName[ToLower(base)] = p;
+	}
 
-	for (auto& [pluginPath, indices] : byPlugin) {
+	// Resolve a raw FormID (in the source plugin's master-index space) to the
+	// plugin path that actually defines it. Returns empty string if the master
+	// can't be located in the data directory.
+	auto findDefiningPlugin = [&](const std::string& srcPath,
+								  const std::vector<std::string>& srcMasters,
+								  uint8_t srcSelfIdx,
+								  uint32_t rawFid) -> std::string {
+		uint8_t topByte = (rawFid >> 24) & 0xFF;
+		if (topByte == srcSelfIdx)
+			return srcPath;
+		if (topByte < srcMasters.size()) {
+			auto it = dataDirPluginByName.find(ToLower(srcMasters[topByte]));
+			if (it != dataDirPluginByName.end())
+				return it->second;
+		}
+		return {};
+	};
+
+	for (auto& [pluginPath, editorIds] : needBySource) {
 		if (isVanillaEsm(pluginPath))
 			continue;
-		// Re-read the plugin's NPC_ records to recover each override's raw
-		// RNAM and the plugin's selfIdx (we discarded these earlier).
+
+		// Re-read the source plugin's NPC_ records to recover each override's
+		// raw RNAM and the plugin's master list.
 		esp::ESPReader reader;
 		if (!reader.Load(pluginPath, {"NPC_"}))
 			continue;
-		uint8_t srcSelfIdx = static_cast<uint8_t>(reader.GetMasters().size());
+		auto& srcMasters = reader.GetMasters();
+		uint8_t srcSelfIdx = static_cast<uint8_t>(srcMasters.size());
 
-		bool anyNeedsDynamicLoad = false;
 		std::unordered_map<std::string, uint32_t> rawRaceByEditorId;
+		std::unordered_map<std::string, uint32_t> rawWnamByEditorId;
 		for (auto& npc : reader.GetNPCs()) {
 			if (npc.editorId.empty())
 				continue;
 			rawRaceByEditorId[npc.editorId] = npc.raceFormId;
-			uint8_t rTop = (npc.raceFormId >> 24) & 0xFF;
-			uint8_t wTop = (npc.wnamFormId >> 24) & 0xFF;
-			if ((npc.raceFormId != 0 && rTop == srcSelfIdx) || (npc.wnamFormId != 0 && wTop == srcSelfIdx)) {
-				anyNeedsDynamicLoad = true;
-			}
+			rawWnamByEditorId[npc.editorId] = npc.wnamFormId;
 		}
-		if (!anyNeedsDynamicLoad)
-			continue;
 
-		uint8_t synthIdx = EnsureDynamicMaster(pluginPath);
-		if (synthIdx == 0)
-			continue;
-
-		// Update each affected override's FormIDs to the synthetic-master space.
-		for (size_t i : indices) {
-			auto& need = needs[i];
-			auto ovIt = npcSkinOverrides.find(need.editorId);
+		for (auto& editorId : editorIds) {
+			auto ovIt = npcSkinOverrides.find(editorId);
 			if (ovIt == npcSkinOverrides.end())
 				continue;
 			NpcSkinInfo& info = ovIt->second;
 
-			auto rawIt = rawRaceByEditorId.find(need.editorId);
-			uint32_t raceRaw = (rawIt != rawRaceByEditorId.end()) ? rawIt->second : 0;
+			// Resolve the RNAM if still unmapped.
+			auto rIt = rawRaceByEditorId.find(editorId);
+			uint32_t raceRaw = (rIt != rawRaceByEditorId.end()) ? rIt->second : 0;
 			if (raceRaw != 0 && info.remappedRace == 0) {
-				uint8_t rTop = (raceRaw >> 24) & 0xFF;
-				if (rTop == srcSelfIdx) {
-					info.remappedRace = (static_cast<uint32_t>(synthIdx) << 24) | (raceRaw & 0x00FFFFFF);
+				std::string defPath = findDefiningPlugin(pluginPath, srcMasters, srcSelfIdx, raceRaw);
+				if (!defPath.empty()) {
+					uint8_t synthIdx = EnsureDynamicMaster(defPath);
+					if (synthIdx != 0)
+						info.remappedRace = (static_cast<uint32_t>(synthIdx) << 24) | (raceRaw & 0x00FFFFFF);
 				}
 			}
-			if (info.wnamRaw != 0 && info.remappedWnam == 0) {
-				uint8_t wTop = (info.wnamRaw >> 24) & 0xFF;
-				if (wTop == srcSelfIdx) {
-					info.remappedWnam = (static_cast<uint32_t>(synthIdx) << 24) | (info.wnamRaw & 0x00FFFFFF);
-					info.selfDefined = false;
+
+			// Resolve the WNAM if still unmapped. Use whichever raw value is
+			// available — info.wnamRaw is what we recorded earlier, and the
+			// source plugin's record may have a different one if the override
+			// chain is more complex.
+			uint32_t wnamRaw = info.wnamRaw;
+			if (wnamRaw == 0) {
+				auto wIt = rawWnamByEditorId.find(editorId);
+				if (wIt != rawWnamByEditorId.end())
+					wnamRaw = wIt->second;
+			}
+			if (wnamRaw != 0 && info.remappedWnam == 0) {
+				std::string defPath = findDefiningPlugin(pluginPath, srcMasters, srcSelfIdx, wnamRaw);
+				if (!defPath.empty()) {
+					uint8_t synthIdx = EnsureDynamicMaster(defPath);
+					if (synthIdx != 0) {
+						info.remappedWnam = (static_cast<uint32_t>(synthIdx) << 24) | (wnamRaw & 0x00FFFFFF);
+						info.selfDefined = false;
+					}
 				}
 			}
-			wxLogMessage("ScanAllPluginsForNpcSkins: '%s' override resolved via dynamic master 0x%02X — remappedRace=%08X remappedWnam=%08X",
-						 need.editorId,
-						 synthIdx,
-						 info.remappedRace,
-						 info.remappedWnam);
+
+			wxLogMessage("ScanAllPluginsForNpcSkins: '%s' override resolution — remappedRace=%08X remappedWnam=%08X",
+						 editorId, info.remappedRace, info.remappedWnam);
 		}
 	}
 }

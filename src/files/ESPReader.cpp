@@ -447,6 +447,18 @@ static ArmorAddonRecord ParseArmorAddon(const Record& rec) {
 	if (auto* mo3s = rec.GetSubrecord("MO3S"))
 		aa.altTexFemale = ParseAlternateTextures(*mo3s);
 
+	// NAM0 / NAM1: per-gender skin texture set. A single TXST FormID applied
+	// across the whole worn model — the simpler alternative to per-shape MO3S
+	// overrides, commonly used to retexture an NPC's body via the skin ARMA.
+	if (auto* nam0 = rec.GetSubrecord("NAM0")) {
+		if (nam0->data.size() >= 4)
+			aa.skinTextureMale = ReadLE<uint32_t>(nam0->data.data());
+	}
+	if (auto* nam1 = rec.GetSubrecord("NAM1")) {
+		if (nam1->data.size() >= 4)
+			aa.skinTextureFemale = ReadLE<uint32_t>(nam1->data.data());
+	}
+
 	// RNAM: primary race
 	if (auto* rnam = rec.GetSubrecord("RNAM")) {
 		if (rnam->data.size() >= 4)

@@ -755,7 +755,18 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 				m->color = nifly::Vector3(npcTintR, npcTintG, npcTintB);
 		};
 
-		for (auto& [name, partIds] : bodyShapePartMap) {
+		// Only retexture race-loaded body shapes here. bodyShapePartMap also
+		// holds entries for head shapes (FaceGen NIFs commonly tag eyes /
+		// brows / mouth with body-slot dismember partitions) and for outfit
+		// shapes — neither of those should receive the skin TXST from this
+		// path. ReconcileBodyAndOutfitShapes is the place that retargets
+		// outfit body shapes; head shapes use whatever the FaceGen NIF
+		// embeds.
+		for (auto& name : bodyShapeNames) {
+			auto it = bodyShapePartMap.find(name);
+			if (it == bodyShapePartMap.end())
+				continue;
+			auto& partIds = it->second;
 			if (partIds.count(32))
 				applyToShape(name, bodyTex, "body");
 			else if (partIds.count(33))

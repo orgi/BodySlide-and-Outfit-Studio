@@ -95,6 +95,11 @@ struct ArmorAddonRecord {
 	std::vector<uint32_t> additionalRaces;		   // MODL — additional RACE FormIDs this ARMA also applies to
 	std::vector<AlternateTexture> altTexFemale; // MO3S — female model alternate textures
 	std::vector<AlternateTexture> altTexMale;	// MO2S — male model alternate textures
+	// NAM0 / NAM1: a single TXST FormID applied to every shape in the worn
+	// model (the "skin texture" assignment that ESP/ESL mods commonly use to
+	// give an NPC a custom body texture without authoring per-shape MO3S/MO2S).
+	uint32_t skinTextureMale = 0;	// NAM0 — male model skin texture (TXST FormID)
+	uint32_t skinTextureFemale = 0; // NAM1 — female model skin texture (TXST FormID)
 };
 
 struct TextureSetRecord {
