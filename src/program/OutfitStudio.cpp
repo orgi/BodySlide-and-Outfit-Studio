@@ -18,8 +18,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "OutfitStudio.h"
 #include "../components/SliderGroup.h"
 #include "../components/SliderPresets.h"
-#include "../files/TriFile.h"
+#include "../files/ESPWriter.h"
 #include "../files/SFMorphFile.h"
+#include "../files/TriFile.h"
 #include "../ui/wxBrushSettingsPopup.h"
 #include "../utils/ConfigDialogUtil.h"
 #include "../utils/PlatformUtil.h"
@@ -28,7 +29,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "PresetSaveDialog.h"
 #include "ShapeProperties.h"
 #include "SliderDataImportDialog.h"
-#include "../files/ESPWriter.h"
 #include <wx/dir.h>
 #include <wx/filename.h>
 
@@ -329,7 +329,8 @@ wxIMPLEMENT_APP(OutfitStudio);
 ConfigurationManager Config;
 ConfigurationManager OutfitStudioConfig;
 
-const std::array<wxString, 10> TargetGames = {"Fallout3", "FalloutNewVegas", "Skyrim", "Fallout4", "SkyrimSpecialEdition", "Fallout4VR", "SkyrimVR", "Fallout76", "Oblivion", "Starfield"};
+const std::array<wxString, 10> TargetGames
+	= {"Fallout3", "FalloutNewVegas", "Skyrim", "Fallout4", "SkyrimSpecialEdition", "Fallout4VR", "SkyrimVR", "Fallout76", "Oblivion", "Starfield"};
 const std::array<wxLanguage, 37> SupportedLangs = {wxLANGUAGE_ENGLISH,	  wxLANGUAGE_AFRIKAANS,		   wxLANGUAGE_ARABIC,  wxLANGUAGE_CATALAN,	  wxLANGUAGE_CZECH,
 												   wxLANGUAGE_DANISH,	  wxLANGUAGE_GERMAN,		   wxLANGUAGE_GREEK,   wxLANGUAGE_SPANISH,	  wxLANGUAGE_BASQUE,
 												   wxLANGUAGE_FINNISH,	  wxLANGUAGE_FRENCH,		   wxLANGUAGE_HINDI,   wxLANGUAGE_HUNGARIAN,  wxLANGUAGE_INDONESIAN,
@@ -6915,7 +6916,8 @@ void OutfitStudioFrame::OnTabButtonClick(wxCommandEvent& event) {
 		lightsTabButton->SetCheck(false);
 
 		masksPane->Show();
-		if (auto* btn = FindWindowByName("btnModularize")) btn->Show();
+		if (auto* btn = FindWindowByName("btnModularize"))
+			btn->Show();
 
 		SetNoSubMeshes();
 		SelectTool(glView->GetLastTool());
@@ -6924,7 +6926,8 @@ void OutfitStudioFrame::OnTabButtonClick(wxCommandEvent& event) {
 		currentTabButton = boneTabButton;
 
 		outfitShapes->Hide();
-		if (auto* btn = FindWindowByName("btnModularize")) btn->Hide();
+		if (auto* btn = FindWindowByName("btnModularize"))
+			btn->Hide();
 		colorSettings->Hide();
 		segmentTree->Hide();
 		partitionTree->Hide();
@@ -7008,7 +7011,8 @@ void OutfitStudioFrame::OnTabButtonClick(wxCommandEvent& event) {
 		currentTabButton = colorsTabButton;
 
 		outfitShapes->Hide();
-		if (auto* btn = FindWindowByName("btnModularize")) btn->Hide();
+		if (auto* btn = FindWindowByName("btnModularize"))
+			btn->Hide();
 		outfitBones->Hide();
 		segmentTree->Hide();
 		partitionTree->Hide();
@@ -7072,7 +7076,8 @@ void OutfitStudioFrame::OnTabButtonClick(wxCommandEvent& event) {
 		currentTabButton = segmentTabButton;
 
 		outfitShapes->Hide();
-		if (auto* btn = FindWindowByName("btnModularize")) btn->Hide();
+		if (auto* btn = FindWindowByName("btnModularize"))
+			btn->Hide();
 		outfitBones->Hide();
 		colorSettings->Hide();
 		partitionTree->Hide();
@@ -7150,7 +7155,8 @@ void OutfitStudioFrame::OnTabButtonClick(wxCommandEvent& event) {
 		currentTabButton = partitionTabButton;
 
 		outfitShapes->Hide();
-		if (auto* btn = FindWindowByName("btnModularize")) btn->Hide();
+		if (auto* btn = FindWindowByName("btnModularize"))
+			btn->Hide();
 		outfitBones->Hide();
 		colorSettings->Hide();
 		segmentTree->Hide();
@@ -7218,7 +7224,8 @@ void OutfitStudioFrame::OnTabButtonClick(wxCommandEvent& event) {
 		currentTabButton = lightsTabButton;
 
 		outfitShapes->Hide();
-		if (auto* btn = FindWindowByName("btnModularize")) btn->Hide();
+		if (auto* btn = FindWindowByName("btnModularize"))
+			btn->Hide();
 		outfitBones->Hide();
 		colorSettings->Hide();
 		segmentTree->Hide();
@@ -7893,7 +7900,7 @@ void OutfitStudioFrame::OnSliderImportMorphsSF(wxCommandEvent& WXUNUSED(event)) 
 	}
 
 	morphFile.UpdateCachedMorphData();
-	
+
 	auto shape = activeItem->GetShape();
 
 	std::string shapeName = shape->name.get();
@@ -9674,20 +9681,20 @@ void OutfitStudioFrame::OnSeparateVerts(wxCommandEvent& WXUNUSED(event)) {
 
 void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	wxLogMessage("OnModularizeShapes called.");
-	if (!project || !project->GetWorkNif()) { 
-		wxMessageBox(_("No project or NIF loaded."), _("Error"), wxICON_ERROR); 
-		return; 
+	if (!project || !project->GetWorkNif()) {
+		wxMessageBox(_("No project or NIF loaded."), _("Error"), wxICON_ERROR);
+		return;
 	}
-	if (bEditSlider) { 
-		wxMessageBox(_("You're currently editing slider data. Please exit slider edit mode."), _("Warning")); 
-		return; 
+	if (bEditSlider) {
+		wxMessageBox(_("You're currently editing slider data. Please exit slider edit mode."), _("Warning"));
+		return;
 	}
 
 	wxArrayTreeItemIds selections;
 	outfitShapes->GetSelections(selections);
-	if (selections.GetCount() == 0) { 
-		wxMessageBox(_("No shapes selected! Please select one or more shapes in the Meshes tab to modularize."), _("Info"), wxICON_INFORMATION); 
-		return; 
+	if (selections.GetCount() == 0) {
+		wxMessageBox(_("No shapes selected! Please select one or more shapes in the Meshes tab to modularize."), _("Info"), wxICON_INFORMATION);
+		return;
 	}
 
 	wxDialog dlg;
@@ -9698,39 +9705,48 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	}
 
 	// 1. Helper Definitions
-	struct ModularGroup { 
-		std::string partName; 
-		std::string nifName; 
-		std::vector<std::string> shapes; 
-		uint32_t slot; 
+	struct ModularGroup {
+		std::string partName;
+		std::string nifName;
+		std::vector<std::string> shapes;
+		uint32_t slot;
 	};
 
-	struct ShapeCtrl { 
-		std::string originalName; 
-		wxTextCtrl* partText; 
-		wxTextCtrl* slotText; 
-		wxStaticText* bsPreview; 
-		wxStaticText* gamePreview; 
-		wxStaticText* nifPreview; 
+	struct ShapeCtrl {
+		std::string originalName;
+		wxTextCtrl* partText;
+		wxTextCtrl* slotText;
+		wxStaticText* bsPreview;
+		wxStaticText* gamePreview;
+		wxStaticText* nifPreview;
 	};
 
-	struct MatchingSet { 
-		esp::ArmorAddonRecord arma; 
-		std::vector<esp::ArmorRecord> armors; 
+	struct MatchingSet {
+		esp::ArmorAddonRecord arma;
+		std::vector<esp::ArmorRecord> armors;
 	};
 
 	auto sanitize = [](const std::string& s) {
-		std::string n = s; std::replace(n.begin(), n.end(), ' ', '_');
-		n.erase(std::remove_if(n.begin(), n.end(), [](char c) { return c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|'; }), n.end());
+		std::string n = s;
+		std::replace(n.begin(), n.end(), ' ', '_');
+		n.erase(std::remove_if(n.begin(), n.end(), [](char c) { return c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|'; }),
+				n.end());
 		return n;
 	};
 
 	auto norm = [](const std::string& p) {
-		std::string n = p; std::replace(n.begin(), n.end(), '\\', '/'); 
-		while (n.find("//") != std::string::npos) n.replace(n.find("//"), 2, "/"); 
+		std::string n = p;
+		std::replace(n.begin(), n.end(), '\\', '/');
+		while (n.find("//") != std::string::npos)
+			n.replace(n.find("//"), 2, "/");
 		std::transform(n.begin(), n.end(), n.begin(), ::tolower);
-		if (n.size() > 7 && n.substr(0, 7) == "meshes/") n = n.substr(7); if (!n.empty() && n[0] == '/') n = n.substr(1);
-		if (n.size() < 4 || n.substr(n.size() - 4) != ".nif") n += ".nif"; return n;
+		if (n.size() > 7 && n.substr(0, 7) == "meshes/")
+			n = n.substr(7);
+		if (!n.empty() && n[0] == '/')
+			n = n.substr(1);
+		if (n.size() < 4 || n.substr(n.size() - 4) != ".nif")
+			n += ".nif";
+		return n;
 	};
 
 	// 1. Scan for master ESP and used slots
@@ -9741,12 +9757,13 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 			if (entry.is_regular_file()) {
 				std::string ext = entry.path().extension().string();
 				std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-				if (ext == ".esp" || ext == ".esm" || ext == ".esl") espFiles.push_back(entry.path().string());
+				if (ext == ".esp" || ext == ".esm" || ext == ".esl")
+					espFiles.push_back(entry.path().string());
 			}
 		}
 	}
 
-	std::string masterEsp; 
+	std::string masterEsp;
 	std::vector<MatchingSet> matchingSets;
 	std::map<int, std::string> usedSlots;
 
@@ -9761,22 +9778,33 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		if (modPos != std::string::npos) {
 			std::string baseBase = espName.substr(0, modPos);
 			bool originalExists = false;
-			for (const auto& ext : {".esp", ".esm", ".esl"}) if (std::filesystem::exists(p.parent_path() / (baseBase + ext))) { originalExists = true; break; }
-			if (originalExists) continue;
+			for (const auto& ext : {".esp", ".esm", ".esl"})
+				if (std::filesystem::exists(p.parent_path() / (baseBase + ext))) {
+					originalExists = true;
+					break;
+				}
+			if (originalExists)
+				continue;
 		}
 
 		esp::ESPReader reader;
 		try {
-			if (reader.Load(espPath, { "ARMO", "ARMA" })) {
+			if (reader.Load(espPath, {"ARMO", "ARMA"})) {
 				auto addons = reader.GetArmorAddons();
 				auto armors = reader.GetArmors();
 				bool foundInThisEsp = false;
 				for (const auto& arma : addons) {
 					std::string mF = norm(arma.modelFemale), mM = norm(arma.modelMale);
 					if (mF == t1 || mM == t1 || mF == t1_0 || mM == t1_0 || mF == t1_1 || mM == t1_1 || mF == t2 || mM == t2) {
-						if (masterEsp.empty()) masterEsp = espName; else if (masterEsp != espName) continue;
-						MatchingSet ms; ms.arma = arma;
-						for (const auto& armo : armors) if (std::find(armo.armatureIds.begin(), armo.armatureIds.end(), arma.formId) != armo.armatureIds.end()) ms.armors.push_back(armo);
+						if (masterEsp.empty())
+							masterEsp = espName;
+						else if (masterEsp != espName)
+							continue;
+						MatchingSet ms;
+						ms.arma = arma;
+						for (const auto& armo : armors)
+							if (std::find(armo.armatureIds.begin(), armo.armatureIds.end(), arma.formId) != armo.armatureIds.end())
+								ms.armors.push_back(armo);
 						matchingSets.push_back(ms);
 						foundInThisEsp = true;
 					}
@@ -9786,33 +9814,58 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 					for (const auto& armo : armors) {
 						std::string name = armo.fullName.empty() ? armo.editorId : armo.fullName;
 						for (int slot : armo.BodySlots()) {
-							if (usedSlots.find(slot) == usedSlots.end()) usedSlots[slot] = name; else usedSlots[slot] += ", " + name;
+							if (usedSlots.find(slot) == usedSlots.end())
+								usedSlots[slot] = name;
+							else
+								usedSlots[slot] += ", " + name;
 						}
 					}
-					break; 
+					break;
 				}
 			}
-		} catch (const std::exception& e) { wxLogMessage("Modularize Error: Exception reading %s: %s", espName, e.what()); }
+		}
+		catch (const std::exception& e) {
+			wxLogMessage("Modularize Error: Exception reading %s: %s", espName, e.what());
+		}
 	}
 
 	auto updateWarn = [&](wxTextCtrl* t, wxStaticText* w) {
 		std::string val = t->GetValue().ToStdString();
-		int slotNum = -1; try { slotNum = std::stoi(val); } catch (...) {}
-		if (usedSlots.count(slotNum)) { w->SetLabel(wxString::Format(_("In use by: %s"), wxString::FromUTF8(usedSlots[slotNum]))); w->SetForegroundColour(*wxYELLOW); } else w->SetLabel("");
+		int slotNum = -1;
+		try {
+			slotNum = std::stoi(val);
+		}
+		catch (...) {
+		}
+		if (usedSlots.count(slotNum)) {
+			w->SetLabel(wxString::Format(_("In use by: %s"), wxString::FromUTF8(usedSlots[slotNum])));
+			w->SetForegroundColour(*wxYELLOW);
+		}
+		else
+			w->SetLabel("");
 	};
 
 	wxStaticText* lblFolder = XRCCTRL(dlg, "lblFolder", wxStaticText);
 	std::string dataDir = project->mDataDir.ToStdString();
-	if (lblFolder) lblFolder->SetLabel(wxString::Format(_("Folder: ShapeData/%s/modular"), wxString::FromUTF8(dataDir)));
+	if (lblFolder)
+		lblFolder->SetLabel(wxString::Format(_("Folder: ShapeData/%s/modular"), wxString::FromUTF8(dataDir)));
 
 	wxScrolledWindow* scroll = XRCCTRL(dlg, "scrollShapes", wxScrolledWindow);
 	wxFlexGridSizer* scrollGrid = new wxFlexGridSizer(0, 7, 2, 0);
-	scrollGrid->AddGrowableCol(0, 2); scrollGrid->AddGrowableCol(1, 2); scrollGrid->AddGrowableCol(2, 1); 
-	scrollGrid->AddGrowableCol(3, 3); scrollGrid->AddGrowableCol(4, 3); scrollGrid->AddGrowableCol(5, 2); 
+	scrollGrid->AddGrowableCol(0, 2);
+	scrollGrid->AddGrowableCol(1, 2);
+	scrollGrid->AddGrowableCol(2, 1);
+	scrollGrid->AddGrowableCol(3, 3);
+	scrollGrid->AddGrowableCol(4, 3);
+	scrollGrid->AddGrowableCol(5, 2);
 	scrollGrid->AddGrowableCol(6, 3);
 
 	{
-		auto addHeader = [&](const wxString& label) { wxStaticText* h = new wxStaticText(scroll, wxID_ANY, label); h->SetFont(h->GetFont().Bold()); scrollGrid->Add(h, 0, wxALL, 5); };
+		auto addHeader = [&](const wxString& label) {
+			wxStaticText* h = new wxStaticText(scroll, wxID_ANY, label);
+			h->SetFont(h->GetFont().Bold());
+			scrollGrid->Add(h, 0, wxALL, 5);
+		};
 		addHeader(_("Shape Name"));
 		addHeader(_("Part Suffix"));
 		addHeader(_("New Slot"));
@@ -9829,18 +9882,27 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	std::string gameBasePrefix = project->mOutfitName.ToStdString();
 	if (!matchingSets.empty() && !matchingSets[0].armors.empty()) {
 		gameBasePrefix = matchingSets[0].armors[0].fullName;
-		if (gameBasePrefix.empty()) gameBasePrefix = matchingSets[0].armors[0].editorId;
+		if (gameBasePrefix.empty())
+			gameBasePrefix = matchingSets[0].armors[0].editorId;
 	}
 
 	auto getFinalNames = [&](const std::string& original, const std::string& suffix, std::string& outBS, std::string& outGame, std::string& outNif) {
-		bool doR = chkReplace->GetValue(); std::string toR = txtReplace->GetValue().ToStdString();
+		bool doR = chkReplace->GetValue();
+		std::string toR = txtReplace->GetValue().ToStdString();
 		auto applyReplace = [&](const std::string& b) {
 			std::string res = b;
 			if (doR && !toR.empty()) {
 				size_t pos = res.find(toR);
-				while (pos != std::string::npos) { res.erase(pos, toR.length()); pos = res.find(toR, pos); }
-				while (res.find("  ") != std::string::npos) res.replace(res.find("  "), 2, " ");
-				if (!res.empty() && res[0] == ' ') res.erase(0, 1); if (!res.empty() && res.back() == ' ') res.pop_back();
+				while (pos != std::string::npos) {
+					res.erase(pos, toR.length());
+					pos = res.find(toR, pos);
+				}
+				while (res.find("  ") != std::string::npos)
+					res.replace(res.find("  "), 2, " ");
+				if (!res.empty() && res[0] == ' ')
+					res.erase(0, 1);
+				if (!res.empty() && res.back() == ' ')
+					res.pop_back();
 			}
 			return res + (suffix.empty() ? "" : " " + suffix);
 		};
@@ -9869,34 +9931,52 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		bool isS = false;
 		for (size_t i = 0; i < selections.GetCount(); ++i) {
 			ShapeItemData* d = dynamic_cast<ShapeItemData*>(outfitShapes->GetItemData(selections[i]));
-			if (d && d->GetShape() && d->GetShape()->name.get() == s) { isS = true; break; }
+			if (d && d->GetShape() && d->GetShape()->name.get() == s) {
+				isS = true;
+				break;
+			}
 		}
-		if (!isS) unselectedShapes.push_back(s);
+		if (!isS)
+			unselectedShapes.push_back(s);
 	}
 
-	wxTextCtrl* txtRemainingName = nullptr; wxTextCtrl* txtRemainingSlot = nullptr; 
-	wxStaticText* lblRemBS = nullptr; wxStaticText* lblRemGame = nullptr; wxStaticText* lblRemNif = nullptr;
+	wxTextCtrl* txtRemainingName = nullptr;
+	wxTextCtrl* txtRemainingSlot = nullptr;
+	wxStaticText* lblRemBS = nullptr;
+	wxStaticText* lblRemGame = nullptr;
+	wxStaticText* lblRemNif = nullptr;
 
 	if (!unselectedShapes.empty()) {
 		scrollGrid->Add(new wxStaticText(scroll, wxID_ANY, _("[Remaining Shapes]")), 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
-		txtRemainingName = new wxTextCtrl(scroll, wxID_ANY, _("Base")); scrollGrid->Add(txtRemainingName, 0, wxALL | wxEXPAND, 5);
+		txtRemainingName = new wxTextCtrl(scroll, wxID_ANY, _("Base"));
+		scrollGrid->Add(txtRemainingName, 0, wxALL | wxEXPAND, 5);
 		uint32_t remSNum = 32;
 		if (project && project->GetWorkNif()) {
 			auto* sh = project->GetWorkNif()->FindBlockByName<nifly::NiShape>(unselectedShapes[0]);
 			if (sh && sh->HasSkinInstance()) {
-				nifly::NiVector<nifly::BSDismemberSkinInstance::PartitionInfo> pi; std::vector<int> tp;
-				if (project->GetWorkNif()->GetShapePartitions(sh, pi, tp) && !pi.empty()) remSNum = pi[0].partID;
+				nifly::NiVector<nifly::BSDismemberSkinInstance::PartitionInfo> pi;
+				std::vector<int> tp;
+				if (project->GetWorkNif()->GetShapePartitions(sh, pi, tp) && !pi.empty())
+					remSNum = pi[0].partID;
 			}
 		}
-		txtRemainingSlot = new wxTextCtrl(scroll, wxID_ANY, wxString::Format("%u", remSNum)); scrollGrid->Add(txtRemainingSlot, 0, wxALL | wxEXPAND, 5);
+		txtRemainingSlot = new wxTextCtrl(scroll, wxID_ANY, wxString::Format("%u", remSNum));
+		scrollGrid->Add(txtRemainingSlot, 0, wxALL | wxEXPAND, 5);
 
-		lblRemBS = new wxStaticText(scroll, wxID_ANY, ""); scrollGrid->Add(lblRemBS, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
-		lblRemGame = new wxStaticText(scroll, wxID_ANY, ""); scrollGrid->Add(lblRemGame, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
-		lblRemNif = new wxStaticText(scroll, wxID_ANY, ""); scrollGrid->Add(lblRemNif, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+		lblRemBS = new wxStaticText(scroll, wxID_ANY, "");
+		scrollGrid->Add(lblRemBS, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+		lblRemGame = new wxStaticText(scroll, wxID_ANY, "");
+		scrollGrid->Add(lblRemGame, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+		lblRemNif = new wxStaticText(scroll, wxID_ANY, "");
+		scrollGrid->Add(lblRemNif, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
 
-		wxStaticText* w = new wxStaticText(scroll, wxID_ANY, ""); scrollGrid->Add(w, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+		wxStaticText* w = new wxStaticText(scroll, wxID_ANY, "");
+		scrollGrid->Add(w, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
 		updateWarn(txtRemainingSlot, w);
-		txtRemainingSlot->Bind(wxEVT_TEXT, [=, &dlg](wxCommandEvent&) { updateWarn(txtRemainingSlot, w); dlg.Layout(); });
+		txtRemainingSlot->Bind(wxEVT_TEXT, [=, &dlg](wxCommandEvent&) {
+			updateWarn(txtRemainingSlot, w);
+			dlg.Layout();
+		});
 		txtRemainingName->Bind(wxEVT_TEXT, [=](wxCommandEvent&) { updatePreviews(); });
 		activeCtrls.push_back({"[Remaining Shapes]", txtRemainingName, txtRemainingSlot, lblRemBS, lblRemGame, lblRemNif});
 	}
@@ -9907,38 +9987,66 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		if (data && data->GetShape()) {
 			std::string sName = data->GetShape()->name.get();
 			scrollGrid->Add(new wxStaticText(scroll, wxID_ANY, wxString::FromUTF8(sName)), 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
-			wxTextCtrl* pt = new wxTextCtrl(scroll, wxID_ANY, wxString::FromUTF8(sName)); scrollGrid->Add(pt, 0, wxALL | wxEXPAND, 5);
-			wxTextCtrl* st = new wxTextCtrl(scroll, wxID_ANY, wxString::Format("%u", currentSlotNum++)); scrollGrid->Add(st, 0, wxALL | wxEXPAND, 5);
-			
-			wxStaticText* bsP = new wxStaticText(scroll, wxID_ANY, ""); scrollGrid->Add(bsP, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
-			wxStaticText* gmP = new wxStaticText(scroll, wxID_ANY, ""); scrollGrid->Add(gmP, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
-			wxStaticText* nifP = new wxStaticText(scroll, wxID_ANY, ""); scrollGrid->Add(nifP, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
-			
-			wxStaticText* w = new wxStaticText(scroll, wxID_ANY, ""); scrollGrid->Add(w, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+			wxTextCtrl* pt = new wxTextCtrl(scroll, wxID_ANY, wxString::FromUTF8(sName));
+			scrollGrid->Add(pt, 0, wxALL | wxEXPAND, 5);
+			wxTextCtrl* st = new wxTextCtrl(scroll, wxID_ANY, wxString::Format("%u", currentSlotNum++));
+			scrollGrid->Add(st, 0, wxALL | wxEXPAND, 5);
+
+			wxStaticText* bsP = new wxStaticText(scroll, wxID_ANY, "");
+			scrollGrid->Add(bsP, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+			wxStaticText* gmP = new wxStaticText(scroll, wxID_ANY, "");
+			scrollGrid->Add(gmP, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+			wxStaticText* nifP = new wxStaticText(scroll, wxID_ANY, "");
+			scrollGrid->Add(nifP, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+
+			wxStaticText* w = new wxStaticText(scroll, wxID_ANY, "");
+			scrollGrid->Add(w, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
 			updateWarn(st, w);
-			st->Bind(wxEVT_TEXT, [=, &dlg](wxCommandEvent&) { updateWarn(st, w); dlg.Layout(); });
+			st->Bind(wxEVT_TEXT, [=, &dlg](wxCommandEvent&) {
+				updateWarn(st, w);
+				dlg.Layout();
+			});
 			pt->Bind(wxEVT_TEXT, [=](wxCommandEvent&) { updatePreviews(); });
 			activeCtrls.push_back({sName, pt, st, bsP, gmP, nifP});
 		}
 	}
-	scroll->SetSizer(scrollGrid); scroll->SetScrollRate(0, 20); updatePreviews();
-	dlg.SetSize(dlg.FromDIP(wxSize(1600, 800))); dlg.Layout(); scroll->FitInside();
+	scroll->SetSizer(scrollGrid);
+	scroll->SetScrollRate(0, 20);
+	updatePreviews();
+	dlg.SetSize(dlg.FromDIP(wxSize(1600, 800)));
+	dlg.Layout();
+	scroll->FitInside();
 
-	if (dlg.ShowModal() != wxID_OK) return;
+	if (dlg.ShowModal() != wxID_OK)
+		return;
 
 	// 4. Final Input Processing
 	std::string remainingPartNameFinal = txtRemainingName ? txtRemainingName->GetValue().ToStdString() : "";
 	uint32_t remainingSlotNumFinal = 32;
-	if (txtRemainingSlot) try { remainingSlotNumFinal = std::stoul(txtRemainingSlot->GetValue().ToStdString()); } catch(...) {}
+	if (txtRemainingSlot)
+		try {
+			remainingSlotNumFinal = std::stoul(txtRemainingSlot->GetValue().ToStdString());
+		}
+		catch (...) {
+		}
 
 	std::map<std::string, ModularGroup> groupsMap;
 	for (auto& ctrl : activeCtrls) {
-		if (ctrl.originalName == "[Remaining Shapes]") continue;
+		if (ctrl.originalName == "[Remaining Shapes]")
+			continue;
 		std::string pN = ctrl.partText->GetValue().ToStdString();
 		if (groupsMap.find(pN) == groupsMap.end()) {
-			std::string bs, gm, nifName; getFinalNames(gameBasePrefix, pN, bs, gm, nifName);
-			ModularGroup g; g.partName = pN; g.nifName = nifName; 
-			try { g.slot = std::stoul(ctrl.slotText->GetValue().ToStdString()); } catch(...) { g.slot = 52; }
+			std::string bs, gm, nifName;
+			getFinalNames(gameBasePrefix, pN, bs, gm, nifName);
+			ModularGroup g;
+			g.partName = pN;
+			g.nifName = nifName;
+			try {
+				g.slot = std::stoul(ctrl.slotText->GetValue().ToStdString());
+			}
+			catch (...) {
+				g.slot = 52;
+			}
 			groupsMap[pN] = g;
 		}
 		groupsMap[pN].shapes.push_back(ctrl.originalName);
@@ -9946,16 +10054,28 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 
 	std::vector<ModularGroup> activeGroups;
 	if (!unselectedShapes.empty()) {
-		std::string bs, gm, nifName; getFinalNames(gameBasePrefix, remainingPartNameFinal, bs, gm, nifName);
-		ModularGroup g; g.partName = remainingPartNameFinal; g.nifName = nifName; g.shapes = unselectedShapes; g.slot = remainingSlotNumFinal;
+		std::string bs, gm, nifName;
+		getFinalNames(gameBasePrefix, remainingPartNameFinal, bs, gm, nifName);
+		ModularGroup g;
+		g.partName = remainingPartNameFinal;
+		g.nifName = nifName;
+		g.shapes = unselectedShapes;
+		g.slot = remainingSlotNumFinal;
 		activeGroups.push_back(g);
 	}
-	for (auto const& [name, g] : groupsMap) activeGroups.push_back(g);
+	for (auto const& [name, g] : groupsMap)
+		activeGroups.push_back(g);
 
 	// --- Phase 1: NIF Extraction ---
 	std::string projPath = GetProjectPath();
 	std::string modularPath = projPath + "/ShapeData/" + dataDir + "/modular";
-	try { std::filesystem::create_directories(modularPath); } catch (const std::exception& e) { wxLogMessage("Modularize Error: Failed to create modular path %s: %s", modularPath, e.what()); return; }
+	try {
+		std::filesystem::create_directories(modularPath);
+	}
+	catch (const std::exception& e) {
+		wxLogMessage("Modularize Error: Failed to create modular path %s: %s", modularPath, e.what());
+		return;
+	}
 
 	std::vector<std::string> curUiShapes = GetShapeList();
 	for (auto& g : activeGroups) {
@@ -9964,57 +10084,97 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		for (auto* s : nif.GetShapes()) {
 			bool inP = std::find(g.shapes.begin(), g.shapes.end(), s->name.get()) != g.shapes.end();
 			bool inU = std::find(curUiShapes.begin(), curUiShapes.end(), s->name.get()) != curUiShapes.end();
-			if (!inP && (inU || g.partName != remainingPartNameFinal)) toD.push_back(s);
+			if (!inP && (inU || g.partName != remainingPartNameFinal))
+				toD.push_back(s);
 			else if (s->HasSkinInstance()) {
-				bool hasT = false; auto tr = nif.GetTexturePathRefs(s);
-				for (const auto& r : tr) if (!r.get().empty()) { hasT = true; break; }
+				bool hasT = false;
+				auto tr = nif.GetTexturePathRefs(s);
+				for (const auto& r : tr)
+					if (!r.get().empty()) {
+						hasT = true;
+						break;
+					}
 				if (hasT) {
 					auto* si = nif.GetHeader().GetBlock<nifly::NiSkinInstance>(*s->SkinInstanceRef());
-					if (auto* ds = dynamic_cast<nifly::BSDismemberSkinInstance*>(si)) for (auto& p : ds->partitions) p.partID = (uint16_t)g.slot;
+					if (auto* ds = dynamic_cast<nifly::BSDismemberSkinInstance*>(si))
+						for (auto& p : ds->partitions)
+							p.partID = (uint16_t)g.slot;
 				}
 			}
 		}
-		for (auto* s : toD) nif.DeleteShape(s);
+		for (auto* s : toD)
+			nif.DeleteShape(s);
 		nif.GetHeader().SetExportInfo("Exported using Outfit Studio Modularizer.");
-		if (nif.Save(modularPath + "/" + g.nifName) != 0) wxLogMessage("Modularize Error: Failed to save NIF %s", g.nifName);
+		if (nif.Save(modularPath + "/" + g.nifName) != 0)
+			wxLogMessage("Modularize Error: Failed to save NIF %s", g.nifName);
 	}
 
 	// --- Phase 2: XML Generation (.osp) ---
 	std::string ospPath = projPath + "/SliderSets/" + project->mFileName.BeforeLast('.').AfterLast('/').AfterLast('\\').ToStdString() + "_modular.osp";
-	SliderSetFile ospFile; if (std::filesystem::exists(ospPath)) ospFile.Open(ospPath); else ospFile.New(ospPath);
+	SliderSetFile ospFile;
+	if (std::filesystem::exists(ospPath))
+		ospFile.Open(ospPath);
+	else
+		ospFile.New(ospPath);
 
 	auto getBSName = [&](const std::string& sfx) {
-		std::string bs, gm, nif; getFinalNames(gameBasePrefix, sfx, bs, gm, nif);
+		std::string bs, gm, nif;
+		getFinalNames(gameBasePrefix, sfx, bs, gm, nif);
 		return bs;
 	};
 
 	for (auto& g : activeGroups) {
 		SliderSet ss = project->activeSet;
-		ss.SetName(getBSName(g.partName)); 
-		std::string outN = g.nifName; if (outN.size() > 4 && outN.substr(outN.size() - 4) == ".nif") outN = outN.substr(0, outN.size() - 4);
-		ss.SetInputFile(g.nifName); ss.SetOutputFile(outN); ss.SetDataFolder(dataDir + "/modular"); ss.Clear();
+		ss.SetName(getBSName(g.partName));
+		std::string outN = g.nifName;
+		if (outN.size() > 4 && outN.substr(outN.size() - 4) == ".nif")
+			outN = outN.substr(0, outN.size() - 4);
+		ss.SetInputFile(g.nifName);
+		ss.SetOutputFile(outN);
+		ss.SetDataFolder(dataDir + "/modular");
+		ss.Clear();
 		std::set<std::string> filesToC;
-		for (const auto& sName : g.shapes) ss.AddShapeTarget(sName, sName);
+		for (const auto& sName : g.shapes)
+			ss.AddShapeTarget(sName, sName);
 		for (size_t i = 0; i < project->activeSet.size(); ++i) {
-			SliderData& srcS = project->activeSet[i]; bool affectsInc = false;
-			for (const auto& sName : g.shapes) if (!srcS.TargetDataName(sName).empty()) { affectsInc = true; break; }
+			SliderData& srcS = project->activeSet[i];
+			bool affectsInc = false;
+			for (const auto& sName : g.shapes)
+				if (!srcS.TargetDataName(sName).empty()) {
+					affectsInc = true;
+					break;
+				}
 			if (affectsInc) {
 				ss.CopySlider(&srcS);
-				for (auto& df : srcS.dataFiles) if (std::find(g.shapes.begin(), g.shapes.end(), df.targetName) != g.shapes.end()) {
-					std::string actF = df.fileName; size_t pos = actF.find(".osd/"); if (pos != std::string::npos) actF = actF.substr(0, pos + 4);
-					else { pos = actF.find(".bsd/"); if (pos != std::string::npos) actF = actF.substr(0, pos + 4); }
-					filesToC.insert(actF);
-				}
+				for (auto& df : srcS.dataFiles)
+					if (std::find(g.shapes.begin(), g.shapes.end(), df.targetName) != g.shapes.end()) {
+						std::string actF = df.fileName;
+						size_t pos = actF.find(".osd/");
+						if (pos != std::string::npos)
+							actF = actF.substr(0, pos + 4);
+						else {
+							pos = actF.find(".bsd/");
+							if (pos != std::string::npos)
+								actF = actF.substr(0, pos + 4);
+						}
+						filesToC.insert(actF);
+					}
 			}
 		}
 		ospFile.UpdateSet(ss);
 		std::filesystem::path srcDP = std::filesystem::path(projPath) / "ShapeData" / dataDir;
 		std::filesystem::path dstDP = std::filesystem::path(projPath) / "ShapeData" / dataDir / "modular";
 		for (const auto& fN : filesToC) {
-			std::filesystem::path srcF = srcDP / fN; std::filesystem::path dstF = dstDP / fN;
+			std::filesystem::path srcF = srcDP / fN;
+			std::filesystem::path dstF = dstDP / fN;
 			if (std::filesystem::exists(srcF)) {
-				try { std::filesystem::create_directories(dstF.parent_path()); std::filesystem::copy_file(srcF, dstF, std::filesystem::copy_options::overwrite_existing); }
-				catch (const std::exception& e) { wxLogMessage("Modularize Error: Failed to copy data file %s: %s", fN, e.what()); }
+				try {
+					std::filesystem::create_directories(dstF.parent_path());
+					std::filesystem::copy_file(srcF, dstF, std::filesystem::copy_options::overwrite_existing);
+				}
+				catch (const std::exception& e) {
+					wxLogMessage("Modularize Error: Failed to copy data file %s: %s", fN, e.what());
+				}
 			}
 		}
 	}
@@ -10026,24 +10186,35 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		std::set<std::string> targetGroupNames;
 		for (const auto& entry : std::filesystem::directory_iterator(groupsDir)) {
 			if (entry.is_regular_file() && entry.path().extension() == ".xml") {
-				SliderSetGroupFile sgFile(entry.path().string()); std::vector<SliderSetGroup> grs; sgFile.GetAllGroups(grs);
+				SliderSetGroupFile sgFile(entry.path().string());
+				std::vector<SliderSetGroup> grs;
+				sgFile.GetAllGroups(grs);
 				for (auto& gr : grs) {
-					std::vector<std::string> members; gr.GetMembers(members);
-					for (const auto& m : members) if (std::equal(m.begin(), m.end(), project->mOutfitName.ToStdString().begin(), project->mOutfitName.ToStdString().end(), [](char c1, char c2) { return std::tolower(c1) == std::tolower(c2); })) {
-						targetGroupNames.insert(gr.GetName()); break;
-					}
+					std::vector<std::string> members;
+					gr.GetMembers(members);
+					for (const auto& m : members)
+						if (std::equal(m.begin(), m.end(), project->mOutfitName.ToStdString().begin(), project->mOutfitName.ToStdString().end(), [](char c1, char c2) {
+								return std::tolower(c1) == std::tolower(c2);
+							})) {
+							targetGroupNames.insert(gr.GetName());
+							break;
+						}
 				}
 			}
 		}
 
 		if (!targetGroupNames.empty()) {
 			std::string sgFileName = "[Modularized] " + project->mOutfitName.ToStdString() + ".xml";
-			SliderSetGroupFile newSgFile; newSgFile.New((groupsDir / sgFileName).string());
+			SliderSetGroupFile newSgFile;
+			newSgFile.New((groupsDir / sgFileName).string());
 			for (const auto& gn : targetGroupNames) {
-				SliderSetGroup ng; ng.SetName(gn);
+				SliderSetGroup ng;
+				ng.SetName(gn);
 				std::vector<std::string> mems;
-				for (const auto& ag : activeGroups) mems.push_back(getBSName(ag.partName));
-				ng.AddMembers(mems); newSgFile.UpdateGroup(ng);
+				for (const auto& ag : activeGroups)
+					mems.push_back(getBSName(ag.partName));
+				ng.AddMembers(mems);
+				newSgFile.UpdateGroup(ng);
 			}
 			newSgFile.Save();
 		}
@@ -10052,56 +10223,131 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	// --- Phase 3: Standalone ESP Generation ---
 	if (gameDataPath.empty()) {
 		wxLogMessage("Modularize: Game data path not set. Skipping ESP patch.");
-	} else if (!matchingSets.empty()) {
+	}
+	else if (!matchingSets.empty()) {
 		wxLogMessage("Modularize: Phase 3 (ESP Patching) started.");
 		std::string patchName = masterEsp.substr(0, masterEsp.find_last_of('.')) + "_modular.esp";
 		std::string patchPath = gameDataPath + "/" + patchName;
-		esp::ESPWriter writer; bool exists = std::filesystem::exists(patchPath);
-		if (exists) { wxLogMessage("Modularize: Updating existing patch %s...", patchName); writer.Load(patchPath); }
-		else { wxLogMessage("Modularize: Creating new patch %s...", patchName); esp::ESPReader reader; if (reader.Load(gameDataPath + "/" + masterEsp, { "TES4" })) { for (const auto& m : reader.GetMasters()) writer.AddMaster(m); } }
+		esp::ESPWriter writer;
+		bool exists = std::filesystem::exists(patchPath);
+		if (exists) {
+			wxLogMessage("Modularize: Updating existing patch %s...", patchName);
+			writer.Load(patchPath);
+		}
+		else {
+			wxLogMessage("Modularize: Creating new patch %s...", patchName);
+			esp::ESPReader reader;
+			if (reader.Load(gameDataPath + "/" + masterEsp, {"TES4"})) {
+				for (const auto& m : reader.GetMasters())
+					writer.AddMaster(m);
+			}
+		}
 		writer.AddMaster(masterEsp);
-		
+
 		auto getP = [&](const std::string& f) {
-			std::string p = project->mGamePath.ToStdString() + "/" + f; std::replace(p.begin(), p.end(), '\\', '/');
-			while (p.find("\\\\") != std::string::npos) p.replace(p.find("\\\\"), 2, "\\"); if (p.size() > 7 && p.substr(0, 7) == "meshes\\") p = p.substr(7);
-			if (!p.empty() && p[0] == '\\') p = p.substr(1); if (p.size() > 4 && p.substr(p.size() - 4) == ".nif") p = p.substr(0, p.size() - 4) + "_1.nif"; return p;
+			// Build the in-record mesh path. Skyrim ESP records expect MOD2/MOD3 paths
+			// using backslashes and WITHOUT the leading "meshes\" prefix (the engine
+			// prepends it automatically). Failing to strip that prefix causes the game
+			// to look up "meshes\meshes\..." and render nothing.
+			std::string p = project->mGamePath.ToStdString() + "\\" + f;
+			// Normalize slashes to backslashes (Skyrim path convention).
+			std::replace(p.begin(), p.end(), '/', '\\');
+			// Collapse duplicate backslashes that may arise from concatenation.
+			while (p.find("\\\\") != std::string::npos)
+				p.replace(p.find("\\\\"), 2, "\\");
+			// Case-insensitive strip of the leading "meshes\" prefix.
+			if (p.size() > 7) {
+				std::string head = p.substr(0, 7);
+				std::transform(head.begin(), head.end(), head.begin(), ::tolower);
+				if (head == "meshes\\")
+					p = p.substr(7);
+			}
+			if (!p.empty() && p[0] == '\\')
+				p = p.substr(1);
+			if (p.size() > 4 && p.substr(p.size() - 4) == ".nif")
+				p = p.substr(0, p.size() - 4) + "_1.nif";
+			wxLogMessage("Modularize: ARMA model path = '%s'", p);
+			return p;
 		};
 
 		wxLogMessage("Modularize: Loading clone source %s...", masterEsp);
-		esp::ESPReader cloneSource; try { cloneSource.Load(gameDataPath + "/" + masterEsp, {"ARMO", "ARMA"}); }
-		catch (const std::exception& e) { wxLogMessage("Modularize Error: Exception loading clone source %s: %s", masterEsp, e.what()); return; }
+		esp::ESPReader cloneSource;
+		try {
+			cloneSource.Load(gameDataPath + "/" + masterEsp, {"ARMO", "ARMA"});
+		}
+		catch (const std::exception& e) {
+			wxLogMessage("Modularize Error: Exception loading clone source %s: %s", masterEsp, e.what());
+			return;
+		}
 
 		for (const auto& ms : matchingSets) {
-			const auto* srcArmaRec = cloneSource.GetRecordByFormId(ms.arma.formId); if (!srcArmaRec) continue;
+			const auto* srcArmaRec = cloneSource.GetRecordByFormId(ms.arma.formId);
+			if (!srcArmaRec)
+				continue;
 			for (auto const& g : activeGroups) {
-				uint32_t aFid = 0; uint32_t slotMask = 0; if (g.slot >= 30 && g.slot <= 61) slotMask = (1 << (g.slot - 30));
+				uint32_t aFid = 0;
+				uint32_t slotMask = 0;
+				if (g.slot >= 30 && g.slot <= 61)
+					slotMask = (1 << (g.slot - 30));
 				bool isBase = (g.partName == remainingPartNameFinal);
 				esp::Record newArma = esp::ESPWriter::CloneRecord(*srcArmaRec, isBase ? ms.arma.formId : 0);
 				for (auto& sr : newArma.subrecords) {
-					if (sr.type == "EDID") { std::string s = sanitize(ms.arma.editorId + "_" + g.partName); sr.data.assign(s.begin(), s.end()); sr.data.push_back('\0'); }
-					else if (sr.type == "MOD2" || sr.type == "MOD3") { std::string p = getP(g.nifName); sr.data.assign(p.begin(), p.end()); sr.data.push_back('\0'); }
-					else if (sr.type == "BOD2" || sr.type == "BODT") { if (sr.data.size() >= 4) memcpy(sr.data.data(), &slotMask, 4); }
+					if (sr.type == "EDID") {
+						std::string s = sanitize(ms.arma.editorId + "_" + g.partName);
+						sr.data.assign(s.begin(), s.end());
+						sr.data.push_back('\0');
+					}
+					else if (sr.type == "MOD2" || sr.type == "MOD3") {
+						std::string p = getP(g.nifName);
+						sr.data.assign(p.begin(), p.end());
+						sr.data.push_back('\0');
+					}
+					else if (sr.type == "BOD2" || sr.type == "BODT") {
+						if (sr.data.size() >= 4)
+							memcpy(sr.data.data(), &slotMask, 4);
+					}
 				}
 				aFid = writer.AddRecord(newArma);
 				for (const auto& armo : ms.armors) {
-					const auto* srcArmoRec = cloneSource.GetRecordByFormId(armo.formId); if (!srcArmoRec) continue;
+					const auto* srcArmoRec = cloneSource.GetRecordByFormId(armo.formId);
+					if (!srcArmoRec)
+						continue;
 					esp::Record newArmo = esp::ESPWriter::CloneRecord(*srcArmoRec, isBase ? armo.formId : 0);
 					for (auto& sr : newArmo.subrecords) {
-						if (sr.type == "EDID") { std::string s = sanitize(armo.editorId + "_" + g.partName); sr.data.assign(s.begin(), s.end()); sr.data.push_back('\0'); }
-						else if (sr.type == "FULL") { 
-							bool doRFinal = chkReplace->GetValue(); std::string toRFinal = txtReplace->GetValue().ToStdString();
+						if (sr.type == "EDID") {
+							std::string s = sanitize(armo.editorId + "_" + g.partName);
+							sr.data.assign(s.begin(), s.end());
+							sr.data.push_back('\0');
+						}
+						else if (sr.type == "FULL") {
+							bool doRFinal = chkReplace->GetValue();
+							std::string toRFinal = txtReplace->GetValue().ToStdString();
 							std::string res = armo.fullName;
 							if (doRFinal && !toRFinal.empty()) {
 								size_t pos = res.find(toRFinal);
-								while (pos != std::string::npos) { res.erase(pos, toRFinal.length()); pos = res.find(toRFinal, pos); }
-								while (res.find("  ") != std::string::npos) res.replace(res.find("  "), 2, " ");
-								if (!res.empty() && res[0] == ' ') res.erase(0, 1); if (!res.empty() && res.back() == ' ') res.pop_back();
+								while (pos != std::string::npos) {
+									res.erase(pos, toRFinal.length());
+									pos = res.find(toRFinal, pos);
+								}
+								while (res.find("  ") != std::string::npos)
+									res.replace(res.find("  "), 2, " ");
+								if (!res.empty() && res[0] == ' ')
+									res.erase(0, 1);
+								if (!res.empty() && res.back() == ' ')
+									res.pop_back();
 							}
 							std::string s = res + (g.partName.empty() ? "" : " " + g.partName);
-							sr.data.assign(s.begin(), s.end()); sr.data.push_back('\0'); 
+							sr.data.assign(s.begin(), s.end());
+							sr.data.push_back('\0');
 						}
-						else if (sr.type == "MODL") { if (sr.data.size() >= 4) sr.data.assign((uint8_t*)&aFid, (uint8_t*)&aFid + 4); }
-						else if (sr.type == "BOD2" || sr.type == "BODT") { if (sr.data.size() >= 4) memcpy(sr.data.data(), &slotMask, 4); }
+						else if (sr.type == "MODL") {
+							if (sr.data.size() >= 4)
+								sr.data.assign((uint8_t*)&aFid, (uint8_t*)&aFid + 4);
+						}
+						else if (sr.type == "BOD2" || sr.type == "BODT") {
+							if (sr.data.size() >= 4)
+								memcpy(sr.data.data(), &slotMask, 4);
+						}
 					}
 					writer.AddRecord(newArmo);
 				}
@@ -10111,7 +10357,9 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 			wxLogMessage("Modularize: Successfully saved patch %s.", patchName);
 			wxMessageBox(wxString::Format(_("Modularization complete!\n%s: %s"), exists ? _("Updated patch") : _("Created patch"), patchName));
 		}
-	} else wxLogMessage("Modularize: No master ESP found to patch.");
+	}
+	else
+		wxLogMessage("Modularize: No master ESP found to patch.");
 }
 void OutfitStudioFrame::CheckCopyGeo(wxDialog& dlg) {
 	wxStaticText* errors = XRCCTRL(dlg, "copyGeometryErrors", wxStaticText);
@@ -10960,7 +11208,6 @@ int OutfitStudioFrame::CopyBoneWeightForShapes(std::vector<NiShape*> shapes, boo
 	StartProgress(_("Copying bone weights..."));
 
 	if (ShowWeightCopy(options, silent)) {
-
 		UndoStateProject* usp = glView->GetUndoHistory()->PushState();
 		usp->undoType = UndoType::Weight;
 
@@ -11262,12 +11509,18 @@ void OutfitStudioFrame::OnCopySegPart(wxCommandEvent& WXUNUSED(event)) {
 		if (auto shape = s->GetShape(); !project->IsBaseShape(shape))
 			selectedShapes.push_back(s->GetShape());
 		else
-			wxMessageBox(_("Sorry, you can't copy partitions/segments from the reference shape to itself. Skipping this shape."), _("Can't copy segments/partitions"), wxICON_WARNING);
+			wxMessageBox(_("Sorry, you can't copy partitions/segments from the reference shape to itself. Skipping this shape."),
+						 _("Can't copy segments/partitions"),
+						 wxICON_WARNING);
 	}
 	if (selectedShapes.empty())
 		return;
 
-	if (wxMessageBox(_("Triangles will be assigned to the partition/segment of the nearest triangle in the reference.  Existing partitions/segments are cleared.  This action can't be undone."), _("Copy Partitions/Segments"), wxOK | wxCANCEL | wxICON_INFORMATION | wxOK_DEFAULT) != wxOK)
+	if (wxMessageBox(_("Triangles will be assigned to the partition/segment of the nearest triangle in the reference.  Existing partitions/segments are cleared.  This action "
+					   "can't be undone."),
+					 _("Copy Partitions/Segments"),
+					 wxOK | wxCANCEL | wxICON_INFORMATION | wxOK_DEFAULT)
+		!= wxOK)
 		return;
 
 	CopySegPartForShapes(selectedShapes);
@@ -11287,7 +11540,8 @@ int OutfitStudioFrame::CopySegPartForShapes(std::vector<NiShape*> shapes, bool s
 
 		int failcount = project->CopySegPart(shape);
 		if (failcount && !silent)
-			wxMessageBox(wxString::Format(_("The partitions/segments could not be copied for '%s' because %d triangles could not be matched."), shape->name.get(), failcount), _("Error"));
+			wxMessageBox(wxString::Format(_("The partitions/segments could not be copied for '%s' because %d triangles could not be matched."), shape->name.get(), failcount),
+						 _("Error"));
 		if (failcount)
 			++failshapes;
 
@@ -11311,7 +11565,8 @@ int OutfitStudioFrame::CopySegPartForShapes(std::vector<NiShape*> shapes, bool s
 	return failshapes;
 }
 
-bool OutfitStudioFrame::ShowVertexAsym(Mesh* m, const SymmetricVertices& symverts, const VertexAsymmetries& asyms, VertexAsymmetryTasks& tasks, const std::vector<bool>& selVerts, bool trize) {
+bool OutfitStudioFrame::ShowVertexAsym(
+	Mesh* m, const SymmetricVertices& symverts, const VertexAsymmetries& asyms, VertexAsymmetryTasks& tasks, const std::vector<bool>& selVerts, bool trize) {
 	// This dialog has two versions, one for OnMaskSymVert and one for
 	// OnSymVert.  trize tells us which version to do.
 
@@ -11422,10 +11677,10 @@ bool OutfitStudioFrame::ShowVertexAsym(Mesh* m, const SymmetricVertices& symvert
 	for (int sai = 0; sai < nSliders; ++sai) {
 		const auto& sa = asyms.sliders[sai];
 		wxCheckBox* cb = new wxCheckBox(slidersPane, wxID_ANY, sa.sliderName);
-		slidersSz->Add(cb, 0, wxLEFT|wxRIGHT, 5);
+		slidersSz->Add(cb, 0, wxLEFT | wxRIGHT, 5);
 		cbSliders[sai] = cb;
-		slidersSz->Add(new wxStaticText(slidersPane, wxID_ANY, wxString() << stats.sliderAvgs[sai]), 0, wxRIGHT|wxALIGN_RIGHT, 20);
-		slidersSz->Add(new wxStaticText(slidersPane, wxID_ANY, wxString() << stats.sliderCounts[sai]), 0, wxLEFT|wxRIGHT|wxALIGN_RIGHT, 5);
+		slidersSz->Add(new wxStaticText(slidersPane, wxID_ANY, wxString() << stats.sliderAvgs[sai]), 0, wxRIGHT | wxALIGN_RIGHT, 20);
+		slidersSz->Add(new wxStaticText(slidersPane, wxID_ANY, wxString() << stats.sliderCounts[sai]), 0, wxLEFT | wxRIGHT | wxALIGN_RIGHT, 5);
 		cb->Bind(wxEVT_CHECKBOX, [&, sai](wxCommandEvent& e) {
 			tasks.doSliders[sai] = e.IsChecked();
 			UpdateChecks();
@@ -11448,10 +11703,10 @@ bool OutfitStudioFrame::ShowVertexAsym(Mesh* m, const SymmetricVertices& symvert
 			continue;
 
 		wxCheckBox* cb = new wxCheckBox(bonesPane, wxID_ANY, ba.boneName);
-		bonesSz->Add(cb, 0, wxLEFT|wxRIGHT, 5);
+		bonesSz->Add(cb, 0, wxLEFT | wxRIGHT, 5);
 		cbBones.push_back(cb);
-		bonesSz->Add(new wxStaticText(bonesPane, wxID_ANY, wxString() << stats.boneAvgs[bai]), 0, wxRIGHT|wxALIGN_RIGHT, 20);
-		bonesSz->Add(new wxStaticText(bonesPane, wxID_ANY, wxString() << stats.boneCounts[bai]), 0, wxLEFT|wxRIGHT|wxALIGN_RIGHT, 5);
+		bonesSz->Add(new wxStaticText(bonesPane, wxID_ANY, wxString() << stats.boneAvgs[bai]), 0, wxRIGHT | wxALIGN_RIGHT, 20);
+		bonesSz->Add(new wxStaticText(bonesPane, wxID_ANY, wxString() << stats.boneCounts[bai]), 0, wxLEFT | wxRIGHT | wxALIGN_RIGHT, 5);
 		cb->Bind(wxEVT_CHECKBOX, [&, bai](wxCommandEvent& e) {
 			tasks.doBones[bai] = e.IsChecked();
 			UpdateChecks();
@@ -12039,9 +12294,7 @@ void OutfitStudioFrame::OnPoseValChanged(int cind, float val) {
 }
 
 void OutfitStudioFrame::OnAnyPoseSlider(wxScrollEvent& e, wxTextCtrl* t, int cind) {
-	float val = (cind == 6) ?
-		std::exp(e.GetPosition() * 0.002f * std::log(2)) :
-		e.GetPosition() * 0.01f;
+	float val = (cind == 6) ? std::exp(e.GetPosition() * 0.002f * std::log(2)) : e.GetPosition() * 0.01f;
 	t->ChangeValue(wxString() << val);
 	OnPoseValChanged(cind, val);
 }
@@ -13728,7 +13981,7 @@ void wxGLPanel::MaskLess() {
 		for (int i = 0; i < m->nVerts; ++i) {
 			if (m->mask[i] > 0.0f)
 				continue;
-			m->DoForEachWeldedVertex(i, [&](int wvi){
+			m->DoForEachWeldedVertex(i, [&](int wvi) {
 				if (m->mask[wvi] != 0.0f) {
 					uss.pointStartState[wvi].x = m->mask[wvi];
 					uss.pointEndState[wvi].x = 0.0f;
@@ -13777,7 +14030,7 @@ void wxGLPanel::MaskMore() {
 		for (int i = 0; i < m->nVerts; ++i) {
 			if (m->mask[i] == 0.0f)
 				continue;
-			m->DoForEachWeldedVertex(i, [&](int wvi){
+			m->DoForEachWeldedVertex(i, [&](int wvi) {
 				if (m->mask[wvi] != 1.0f) {
 					uss.pointStartState[wvi].x = m->mask[wvi];
 					uss.pointEndState[wvi].x = 1.0f;
@@ -14729,7 +14982,13 @@ void wxGLPanel::OnMouseMove(wxMouseEvent& event) {
 					os->statusBar->SetStatusText(wxString::Format("Vertex: %d, Mask: %g", hitResult.hoverPoint, hitResult.hoverMask), 1);
 				else if (activeTool == ToolID::WeightBrush) {
 					Vector3 hoverCoordNif = Mesh::TransformPosMeshToNif(hitResult.hoverMeshCoord);
-					os->statusBar->SetStatusText(wxString::Format("Vertex: %d, Weight: %g, X: %.5f Y: %.5f Z: %.5f", hitResult.hoverPoint, hitResult.hoverWeight, hoverCoordNif.x, hoverCoordNif.y, hoverCoordNif.z), 1);
+					os->statusBar->SetStatusText(wxString::Format("Vertex: %d, Weight: %g, X: %.5f Y: %.5f Z: %.5f",
+																  hitResult.hoverPoint,
+																  hitResult.hoverWeight,
+																  hoverCoordNif.x,
+																  hoverCoordNif.y,
+																  hoverCoordNif.z),
+												 1);
 				}
 				else if (activeTool == ToolID::ColorBrush || activeTool == ToolID::AlphaBrush)
 					os->statusBar->SetStatusText(wxString::Format("Vertex: %d, Color: %g, %g, %g, Alpha: %g",
