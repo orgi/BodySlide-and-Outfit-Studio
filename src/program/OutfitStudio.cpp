@@ -9710,6 +9710,9 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		std::string nifName;
 		std::vector<std::string> shapes;
 		uint32_t slot;
+		// Actual shape order in the saved split NIF (block order from nifly::NifFile::GetShapes()).
+		// Used to remap MO2S/MO3S/MO4S/MO5S alternate-texture 3D indices on the cloned ARMA.
+		std::vector<std::string> shapeOrder;
 	};
 
 	struct ShapeCtrl {
@@ -10066,6 +10069,32 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	for (auto const& [name, g] : groupsMap)
 		activeGroups.push_back(g);
 
+	// Pre-compute each group's expected post-split shape order from the source
+	// WorkNif's block order. This is what nifly preserves when shapes are deleted
+	// (DeleteShape is order-stable for the surviving shapes), so we can use this
+	// ordering to remap MO2S/MO3S/MO4S/MO5S 3D indices in the cloned ESP records.
+	// Also capture the full original block order so the base/remainder group can
+	// shift orphan MO?S 3D indices to account for shapes removed by other splits.
+	std::vector<std::string> originalOrder;
+	if (project && project->GetWorkNif()) {
+		for (auto* s : project->GetWorkNif()->GetShapes())
+			originalOrder.push_back(s->name.get());
+		for (auto& g : activeGroups) {
+			g.shapeOrder.clear();
+			for (const std::string& nm : originalOrder) {
+				if (std::find(g.shapes.begin(), g.shapes.end(), nm) != g.shapes.end())
+					g.shapeOrder.push_back(nm);
+			}
+			std::string joined;
+			for (size_t i = 0; i < g.shapeOrder.size(); ++i) {
+				if (i)
+					joined += ", ";
+				joined += g.shapeOrder[i];
+			}
+			wxLogMessage("Modularize: group '%s' shapeOrder=[%s]", g.partName, joined);
+		}
+	}
+
 	// --- Phase 1: NIF Extraction ---
 	std::string projPath = GetProjectPath();
 	std::string modularPath = projPath + "/ShapeData/" + dataDir + "/modular";
@@ -10291,6 +10320,126 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 					slotMask = (1 << (g.slot - 30));
 				bool isBase = (g.partName == remainingPartNameFinal);
 				esp::Record newArma = esp::ESPWriter::CloneRecord(*srcArmaRec, isBase ? ms.arma.formId : 0);
+				// Build a name->new-3D-index map from this group's expected shape order
+				// (computed from WorkNif block order, intersected with the group's shape list).
+				// Decide each MO2S/MO3S/MO4S/MO5S entry's fate:
+				//   * Name is a shape in THIS group -> remap idx to new position.
+				//   * Name is a shape in a DIFFERENT group -> drop (it moved out).
+				//   * Name is unknown to all groups (orphan, e.g. user renamed the shape
+				//     in OS or the ESP referenced an obsolete name) -> keep ONLY on the
+				//     base/remainder group with original idx, so existing texture
+				//     overrides are not silently lost.
+				// Lookup is case-insensitive.
+				auto lc = [](std::string s) {
+					std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+					return s;
+				};
+				std::map<std::string, uint32_t> shapeIdx;
+				for (uint32_t i = 0; i < g.shapeOrder.size(); ++i)
+					shapeIdx[lc(g.shapeOrder[i])] = i;
+				std::set<std::string> otherGroupShapes;
+				for (auto const& og : activeGroups) {
+					if (&og == &g)
+						continue;
+					for (auto const& nm : og.shapes)
+						otherGroupShapes.insert(lc(nm));
+				}
+				// For the base group, build oldIdx->newIdx map for orphan entries:
+				// shapes that belong to other groups are removed from the base nif,
+				// so surviving original-block-order shapes shift down accordingly.
+				std::vector<int32_t> baseIdxShift; // -1 = removed
+				if (isBase) {
+					baseIdxShift.resize(originalOrder.size(), -1);
+					uint32_t newPos = 0;
+					for (size_t i = 0; i < originalOrder.size(); ++i) {
+						if (otherGroupShapes.count(lc(originalOrder[i])) > 0)
+							baseIdxShift[i] = -1;
+						else
+							baseIdxShift[i] = static_cast<int32_t>(newPos++);
+					}
+				}
+				auto remapAltTex = [&](esp::Subrecord& sr) {
+					if (sr.data.size() < 4)
+						return;
+					const uint8_t* in = sr.data.data();
+					size_t off = 4;
+					uint32_t count = 0;
+					memcpy(&count, in, 4);
+					std::vector<uint8_t> out;
+					out.resize(4, 0);
+					uint32_t newCount = 0;
+					for (uint32_t i = 0; i < count; ++i) {
+						if (off + 4 > sr.data.size())
+							break;
+						uint32_t nameLen = 0;
+						memcpy(&nameLen, in + off, 4);
+						if (nameLen > 1024 || off + 4 + nameLen + 8 > sr.data.size())
+							break;
+						std::string name(reinterpret_cast<const char*>(in + off + 4), nameLen);
+						while (!name.empty() && name.back() == '\0')
+							name.pop_back();
+						uint32_t txstFid = 0, idx3d = 0;
+						memcpy(&txstFid, in + off + 4 + nameLen, 4);
+						memcpy(&idx3d, in + off + 4 + nameLen + 4, 4);
+
+						auto it = shapeIdx.find(lc(name));
+						bool inThisGroup = (it != shapeIdx.end());
+						bool inOtherGroup = otherGroupShapes.count(lc(name)) > 0;
+						bool keep = false;
+						uint32_t newIdx = idx3d;
+						const char* reason = "drop";
+						if (inThisGroup) {
+							keep = true;
+							newIdx = it->second;
+							reason = "remap";
+						}
+						else if (inOtherGroup) {
+							keep = false;
+							reason = "drop (in other group)";
+						}
+						else if (isBase) {
+							// Orphan kept on base: shift original idx to compensate
+							// for shapes other groups removed from the base nif.
+							if (idx3d < baseIdxShift.size() && baseIdxShift[idx3d] >= 0) {
+								keep = true;
+								newIdx = static_cast<uint32_t>(baseIdxShift[idx3d]);
+								reason = "keep-orphan-on-base";
+							}
+							else {
+								keep = false;
+								reason = "drop (orphan idx out of range or removed)";
+							}
+						}
+						else {
+							reason = "drop (orphan, not base)";
+						}
+
+						if (keep) {
+							uint32_t newNameLen = static_cast<uint32_t>(name.size());
+							size_t base = out.size();
+							out.resize(base + 4 + newNameLen + 8);
+							memcpy(out.data() + base, &newNameLen, 4);
+							memcpy(out.data() + base + 4, name.data(), newNameLen);
+							memcpy(out.data() + base + 4 + newNameLen, &txstFid, 4);
+							memcpy(out.data() + base + 4 + newNameLen + 4, &newIdx, 4);
+							++newCount;
+							wxLogMessage("Modularize: %s %s shape '%s' idx %u -> %u (txst %08X) on '%s'",
+										 sr.type.c_str(),
+										 reason,
+										 name.c_str(),
+										 idx3d,
+										 newIdx,
+										 txstFid,
+										 g.partName.c_str());
+						}
+						else {
+							wxLogMessage("Modularize: %s %s shape '%s' (split nif %s)", sr.type.c_str(), reason, name.c_str(), g.nifName.c_str());
+						}
+						off += 4 + nameLen + 8;
+					}
+					memcpy(out.data(), &newCount, 4);
+					sr.data = std::move(out);
+				};
 				for (auto& sr : newArma.subrecords) {
 					if (sr.type == "EDID") {
 						std::string s = sanitize(ms.arma.editorId + "_" + g.partName);
@@ -10306,7 +10455,24 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 						if (sr.data.size() >= 4)
 							memcpy(sr.data.data(), &slotMask, 4);
 					}
+					else if (sr.type == "MO2S" || sr.type == "MO3S" || sr.type == "MO4S" || sr.type == "MO5S") {
+						remapAltTex(sr);
+					}
 				}
+				// Drop alternate-texture subrecords that ended up empty after remap so the
+				// engine doesn't see a zero-count placeholder.
+				newArma.subrecords.erase(std::remove_if(newArma.subrecords.begin(),
+														newArma.subrecords.end(),
+														[](const esp::Subrecord& sr) {
+															if (sr.type != "MO2S" && sr.type != "MO3S" && sr.type != "MO4S" && sr.type != "MO5S")
+																return false;
+															if (sr.data.size() < 4)
+																return true;
+															uint32_t c = 0;
+															memcpy(&c, sr.data.data(), 4);
+															return c == 0;
+														}),
+										 newArma.subrecords.end());
 				aFid = writer.AddRecord(newArma);
 				for (const auto& armo : ms.armors) {
 					const auto* srcArmoRec = cloneSource.GetRecordByFormId(armo.formId);
