@@ -9709,7 +9709,17 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		std::string partName;
 		std::string nifName;
 		std::vector<std::string> shapes;
-		uint32_t slot;
+		// Per-shape destination dismember partID. The shape's partitions whose
+		// partID is currently in originalClaimedSlots will be rewritten to this
+		// value during Phase 1; hidden shapes are excluded from this map and
+		// keep their original partIDs untouched.
+		std::map<std::string, uint32_t> shapeSlots;
+		// Shapes the user marked "Hidden" — neither rewritten in Phase 1 nor
+		// contributing to the new ARMA's BOD2 slot mask.
+		std::set<std::string> hiddenShapes;
+		// Bitmask (bit N = slot 30+N) built from the OR of every non-hidden
+		// shape's slot in this group. Written into the cloned ARMA/ARMO BOD2.
+		uint32_t slotMask;
 		// Actual shape order in the saved split NIF (block order from nifly::NifFile::GetShapes()).
 		// Used to remap MO2S/MO3S/MO4S/MO5S alternate-texture 3D indices on the cloned ARMA.
 		std::vector<std::string> shapeOrder;
@@ -9717,7 +9727,13 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 
 	struct ShapeCtrl {
 		std::string originalName;
-		wxTextCtrl* partText;
+		// True for shapes that were NOT selected before invoking Modularize.
+		// These shapes share a single "remainder" part-suffix textbox instead
+		// of having their own per-shape suffix textbox.
+		bool wasUnselected;
+		wxCheckBox* hiddenCb;
+		wxTextCtrl* partText;	 // nullptr when wasUnselected (uses shared textbox)
+		wxStaticText* partLabel; // mirrors shared textbox; only set when wasUnselected
 		wxTextCtrl* slotText;
 		wxStaticText* bsPreview;
 		wxStaticText* gamePreview;
@@ -9848,20 +9864,71 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 			w->SetLabel("");
 	};
 
+	// Body slots originally claimed by the source ARMAs we are about to split.
+	// Only partitions whose partID is in this set are considered "worn-armor"
+	// partitions; other partitions (typically partID 32 used for collision/SMP
+	// physics shapes) are left untouched in Phase 1 and used to auto-detect
+	// shapes that were already hidden in the original outfit.
+	std::set<uint16_t> originalClaimedSlots;
+	for (const auto& ms : matchingSets) {
+		for (int bit = 0; bit < 32; ++bit) {
+			if (ms.arma.bodySlotFlags & (1u << bit))
+				originalClaimedSlots.insert(static_cast<uint16_t>(30 + bit));
+		}
+	}
+
+	// Collect each shape's current dismember partition IDs from the work NIF so
+	// we can both pre-fill per-shape slot textboxes and auto-tick the "hidden"
+	// checkbox for shapes whose partitions don't intersect originalClaimedSlots.
+	auto getShapePartIds = [&](const std::string& shapeName) {
+		std::vector<uint16_t> ids;
+		if (!project || !project->GetWorkNif())
+			return ids;
+		auto* sh = project->GetWorkNif()->FindBlockByName<nifly::NiShape>(shapeName);
+		if (!sh || !sh->HasSkinInstance())
+			return ids;
+		nifly::NiVector<nifly::BSDismemberSkinInstance::PartitionInfo> pi;
+		std::vector<int> tp;
+		if (project->GetWorkNif()->GetShapePartitions(sh, pi, tp))
+			for (const auto& p : pi)
+				ids.push_back(p.partID);
+		return ids;
+	};
+
+	auto isOriginallyHidden = [&](const std::vector<uint16_t>& partIds) {
+		if (partIds.empty())
+			return false;
+		for (uint16_t id : partIds)
+			if (originalClaimedSlots.count(id) > 0)
+				return false;
+		return true;
+	};
+
 	wxStaticText* lblFolder = XRCCTRL(dlg, "lblFolder", wxStaticText);
 	std::string dataDir = project->mDataDir.ToStdString();
-	if (lblFolder)
-		lblFolder->SetLabel(wxString::Format(_("Folder: ShapeData/%s/modular"), wxString::FromUTF8(dataDir)));
+	if (lblFolder) {
+		std::string slotsJoined;
+		for (uint16_t s : originalClaimedSlots) {
+			if (!slotsJoined.empty())
+				slotsJoined += ", ";
+			slotsJoined += std::to_string(s);
+		}
+		if (slotsJoined.empty())
+			slotsJoined = "(none detected)";
+		lblFolder->SetLabel(wxString::Format(_("Folder: ShapeData/%s/modular   |   Original ARMA slots: %s"), wxString::FromUTF8(dataDir), wxString::FromUTF8(slotsJoined)));
+	}
 
 	wxScrolledWindow* scroll = XRCCTRL(dlg, "scrollShapes", wxScrolledWindow);
-	wxFlexGridSizer* scrollGrid = new wxFlexGridSizer(0, 7, 2, 0);
+	// 8 columns: Shape Name | Hidden | Part Suffix | New Slot | BS Name | Game Name | Nif Name | Comment
+	wxFlexGridSizer* scrollGrid = new wxFlexGridSizer(0, 8, 2, 0);
 	scrollGrid->AddGrowableCol(0, 2);
-	scrollGrid->AddGrowableCol(1, 2);
-	scrollGrid->AddGrowableCol(2, 1);
-	scrollGrid->AddGrowableCol(3, 3);
+	scrollGrid->AddGrowableCol(1, 0);
+	scrollGrid->AddGrowableCol(2, 2);
+	scrollGrid->AddGrowableCol(3, 1);
 	scrollGrid->AddGrowableCol(4, 3);
-	scrollGrid->AddGrowableCol(5, 2);
-	scrollGrid->AddGrowableCol(6, 3);
+	scrollGrid->AddGrowableCol(5, 3);
+	scrollGrid->AddGrowableCol(6, 2);
+	scrollGrid->AddGrowableCol(7, 3);
 
 	{
 		auto addHeader = [&](const wxString& label) {
@@ -9870,6 +9937,7 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 			scrollGrid->Add(h, 0, wxALL, 5);
 		};
 		addHeader(_("Shape Name"));
+		addHeader(_("Hidden"));
 		addHeader(_("Part Suffix"));
 		addHeader(_("New Slot"));
 		addHeader(_("Name in BodySlide"));
@@ -9879,6 +9947,7 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	}
 
 	std::vector<ShapeCtrl> activeCtrls;
+	wxTextCtrl* txtRemainingName = nullptr;
 	wxCheckBox* chkReplace = XRCCTRL(dlg, "chkReplace", wxCheckBox);
 	wxTextCtrl* txtReplace = XRCCTRL(dlg, "txtReplace", wxTextCtrl);
 
@@ -9914,10 +9983,25 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		outNif = sanitize(suffix.empty() ? project->mOutfitName.ToStdString() : suffix) + ".nif";
 	};
 
+	// For unselected shapes, the part suffix comes from the shared remainder
+	// textbox; for selected shapes it comes from their per-shape textbox. The
+	// preview lambda also keeps the per-row mirror label in sync so the grid
+	// visually reflects the shared value.
+	auto getCtrlSuffix = [&](const ShapeCtrl& ctrl) {
+		if (ctrl.partText)
+			return ctrl.partText->GetValue().ToStdString();
+		if (txtRemainingName)
+			return txtRemainingName->GetValue().ToStdString();
+		return std::string();
+	};
+
 	auto updatePreviews = [&]() {
 		for (auto& ctrl : activeCtrls) {
+			std::string suffix = getCtrlSuffix(ctrl);
+			if (ctrl.partLabel)
+				ctrl.partLabel->SetLabel(wxString::FromUTF8(suffix));
 			std::string bs, gm, nif;
-			getFinalNames(gameBasePrefix, ctrl.partText->GetValue().ToStdString(), bs, gm, nif);
+			getFinalNames(gameBasePrefix, suffix, bs, gm, nif);
 			ctrl.bsPreview->SetLabel(wxString::FromUTF8(bs));
 			ctrl.gamePreview->SetLabel(wxString::FromUTF8(gm));
 			ctrl.nifPreview->SetLabel(wxString::FromUTF8(nif));
@@ -9929,94 +10013,124 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	txtReplace->Bind(wxEVT_TEXT, [=](wxCommandEvent&) { updatePreviews(); });
 
 	std::vector<std::string> allShapesList = GetShapeList();
-	std::vector<std::string> unselectedShapes;
-	for (const auto& s : allShapesList) {
-		bool isS = false;
-		for (size_t i = 0; i < selections.GetCount(); ++i) {
-			ShapeItemData* d = dynamic_cast<ShapeItemData*>(outfitShapes->GetItemData(selections[i]));
-			if (d && d->GetShape() && d->GetShape()->name.get() == s) {
-				isS = true;
-				break;
-			}
-		}
-		if (!isS)
-			unselectedShapes.push_back(s);
+	std::set<std::string> selectedSet;
+	for (size_t i = 0; i < selections.GetCount(); ++i) {
+		ShapeItemData* d = dynamic_cast<ShapeItemData*>(outfitShapes->GetItemData(selections[i]));
+		if (d && d->GetShape())
+			selectedSet.insert(d->GetShape()->name.get());
 	}
+	std::vector<std::string> unselectedShapes;
+	for (const auto& s : allShapesList)
+		if (selectedSet.find(s) == selectedSet.end())
+			unselectedShapes.push_back(s);
 
-	wxTextCtrl* txtRemainingName = nullptr;
-	wxTextCtrl* txtRemainingSlot = nullptr;
-	wxStaticText* lblRemBS = nullptr;
-	wxStaticText* lblRemGame = nullptr;
-	wxStaticText* lblRemNif = nullptr;
+	// Per-row helper: append the 4 trailing cells (BS, Game, Nif, Comment) and
+	// wire up live-warning/preview updates. Returns a bundle the caller can
+	// install into a ShapeCtrl record.
+	struct RowPreviewCells {
+		wxStaticText* bs;
+		wxStaticText* gm;
+		wxStaticText* nif;
+		wxStaticText* warn;
+	};
+	auto addPreviewCells = [&]() {
+		RowPreviewCells r;
+		r.bs = new wxStaticText(scroll, wxID_ANY, "");
+		scrollGrid->Add(r.bs, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+		r.gm = new wxStaticText(scroll, wxID_ANY, "");
+		scrollGrid->Add(r.gm, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+		r.nif = new wxStaticText(scroll, wxID_ANY, "");
+		scrollGrid->Add(r.nif, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+		r.warn = new wxStaticText(scroll, wxID_ANY, "");
+		scrollGrid->Add(r.warn, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+		return r;
+	};
 
+	// Row 1 — shared remainder configuration. Holds ONE part-suffix textbox
+	// that drives every previously-unselected shape's part suffix; per-row
+	// labels mirror this value (read-only) so the grid still shows it inline.
 	if (!unselectedShapes.empty()) {
 		scrollGrid->Add(new wxStaticText(scroll, wxID_ANY, _("[Remaining Shapes]")), 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+		scrollGrid->Add(new wxStaticText(scroll, wxID_ANY, ""), 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
 		txtRemainingName = new wxTextCtrl(scroll, wxID_ANY, _("Base"));
 		scrollGrid->Add(txtRemainingName, 0, wxALL | wxEXPAND, 5);
-		uint32_t remSNum = 32;
-		if (project && project->GetWorkNif()) {
-			auto* sh = project->GetWorkNif()->FindBlockByName<nifly::NiShape>(unselectedShapes[0]);
-			if (sh && sh->HasSkinInstance()) {
-				nifly::NiVector<nifly::BSDismemberSkinInstance::PartitionInfo> pi;
-				std::vector<int> tp;
-				if (project->GetWorkNif()->GetShapePartitions(sh, pi, tp) && !pi.empty())
-					remSNum = pi[0].partID;
+		scrollGrid->Add(new wxStaticText(scroll, wxID_ANY, ""), 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+		// Trailing 4 preview/comment cells stay empty for the shared row.
+		for (int i = 0; i < 4; ++i)
+			scrollGrid->Add(new wxStaticText(scroll, wxID_ANY, ""), 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+		txtRemainingName->Bind(wxEVT_TEXT, [=](wxCommandEvent&) { updatePreviews(); });
+	}
+
+	// One row per shape: every shape gets its own Hidden checkbox and Slot
+	// textbox. Selected shapes additionally get an editable Part Suffix
+	// textbox; unselected shapes show a static label that mirrors the shared
+	// remainder textbox above.
+	// Pre-fill each shape's slot textbox with the slot it currently occupies in
+	// the work NIF (the first partition partID that the source ARMA actually
+	// claimed, falling back to the first partID, else 32). This keeps the
+	// user's existing slot assignments visible and unchanged unless they
+	// explicitly edit them.
+	for (const auto& sName : allShapesList) {
+		bool selected = selectedSet.count(sName) > 0;
+		std::vector<uint16_t> partIds = getShapePartIds(sName);
+		bool hiddenDefault = isOriginallyHidden(partIds);
+		uint32_t slotDefault = 0;
+		for (uint16_t id : partIds)
+			if (originalClaimedSlots.count(id) > 0) {
+				slotDefault = id;
+				break;
 			}
+		if (slotDefault == 0 && !partIds.empty())
+			slotDefault = partIds.front();
+		if (slotDefault == 0)
+			slotDefault = 32;
+
+		scrollGrid->Add(new wxStaticText(scroll, wxID_ANY, wxString::FromUTF8(sName)), 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+
+		wxCheckBox* hiddenCb = new wxCheckBox(scroll, wxID_ANY, "");
+		hiddenCb->SetValue(hiddenDefault);
+		scrollGrid->Add(hiddenCb, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+
+		wxTextCtrl* partText = nullptr;
+		wxStaticText* partLabel = nullptr;
+		if (selected) {
+			partText = new wxTextCtrl(scroll, wxID_ANY, wxString::FromUTF8(sName));
+			scrollGrid->Add(partText, 0, wxALL | wxEXPAND, 5);
 		}
-		txtRemainingSlot = new wxTextCtrl(scroll, wxID_ANY, wxString::Format("%u", remSNum));
-		scrollGrid->Add(txtRemainingSlot, 0, wxALL | wxEXPAND, 5);
+		else {
+			partLabel = new wxStaticText(scroll, wxID_ANY, txtRemainingName ? txtRemainingName->GetValue() : wxString());
+			scrollGrid->Add(partLabel, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+		}
 
-		lblRemBS = new wxStaticText(scroll, wxID_ANY, "");
-		scrollGrid->Add(lblRemBS, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
-		lblRemGame = new wxStaticText(scroll, wxID_ANY, "");
-		scrollGrid->Add(lblRemGame, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
-		lblRemNif = new wxStaticText(scroll, wxID_ANY, "");
-		scrollGrid->Add(lblRemNif, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+		wxTextCtrl* slotText = new wxTextCtrl(scroll, wxID_ANY, wxString::Format("%u", slotDefault));
+		scrollGrid->Add(slotText, 0, wxALL | wxEXPAND, 5);
 
-		wxStaticText* w = new wxStaticText(scroll, wxID_ANY, "");
-		scrollGrid->Add(w, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
-		updateWarn(txtRemainingSlot, w);
-		txtRemainingSlot->Bind(wxEVT_TEXT, [=, &dlg](wxCommandEvent&) {
-			updateWarn(txtRemainingSlot, w);
+		RowPreviewCells row = addPreviewCells();
+		updateWarn(slotText, row.warn);
+		slotText->Bind(wxEVT_TEXT, [=, &dlg](wxCommandEvent&) {
+			updateWarn(slotText, row.warn);
 			dlg.Layout();
 		});
-		txtRemainingName->Bind(wxEVT_TEXT, [=](wxCommandEvent&) { updatePreviews(); });
-		activeCtrls.push_back({"[Remaining Shapes]", txtRemainingName, txtRemainingSlot, lblRemBS, lblRemGame, lblRemNif});
+		if (partText)
+			partText->Bind(wxEVT_TEXT, [=](wxCommandEvent&) { updatePreviews(); });
+
+		ShapeCtrl ctrl;
+		ctrl.originalName = sName;
+		ctrl.wasUnselected = !selected;
+		ctrl.hiddenCb = hiddenCb;
+		ctrl.partText = partText;
+		ctrl.partLabel = partLabel;
+		ctrl.slotText = slotText;
+		ctrl.bsPreview = row.bs;
+		ctrl.gamePreview = row.gm;
+		ctrl.nifPreview = row.nif;
+		activeCtrls.push_back(ctrl);
 	}
 
-	uint32_t currentSlotNum = 52;
-	for (size_t i = 0; i < selections.GetCount(); ++i) {
-		ShapeItemData* data = dynamic_cast<ShapeItemData*>(outfitShapes->GetItemData(selections[i]));
-		if (data && data->GetShape()) {
-			std::string sName = data->GetShape()->name.get();
-			scrollGrid->Add(new wxStaticText(scroll, wxID_ANY, wxString::FromUTF8(sName)), 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
-			wxTextCtrl* pt = new wxTextCtrl(scroll, wxID_ANY, wxString::FromUTF8(sName));
-			scrollGrid->Add(pt, 0, wxALL | wxEXPAND, 5);
-			wxTextCtrl* st = new wxTextCtrl(scroll, wxID_ANY, wxString::Format("%u", currentSlotNum++));
-			scrollGrid->Add(st, 0, wxALL | wxEXPAND, 5);
-
-			wxStaticText* bsP = new wxStaticText(scroll, wxID_ANY, "");
-			scrollGrid->Add(bsP, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
-			wxStaticText* gmP = new wxStaticText(scroll, wxID_ANY, "");
-			scrollGrid->Add(gmP, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
-			wxStaticText* nifP = new wxStaticText(scroll, wxID_ANY, "");
-			scrollGrid->Add(nifP, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
-
-			wxStaticText* w = new wxStaticText(scroll, wxID_ANY, "");
-			scrollGrid->Add(w, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
-			updateWarn(st, w);
-			st->Bind(wxEVT_TEXT, [=, &dlg](wxCommandEvent&) {
-				updateWarn(st, w);
-				dlg.Layout();
-			});
-			pt->Bind(wxEVT_TEXT, [=](wxCommandEvent&) { updatePreviews(); });
-			activeCtrls.push_back({sName, pt, st, bsP, gmP, nifP});
-		}
-	}
 	scroll->SetSizer(scrollGrid);
 	scroll->SetScrollRate(0, 20);
 	updatePreviews();
-	dlg.SetSize(dlg.FromDIP(wxSize(1600, 800)));
+	dlg.SetSize(dlg.FromDIP(wxSize(1700, 800)));
 	dlg.Layout();
 	scroll->FitInside();
 
@@ -10025,46 +10139,49 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 
 	// 4. Final Input Processing
 	std::string remainingPartNameFinal = txtRemainingName ? txtRemainingName->GetValue().ToStdString() : "";
-	uint32_t remainingSlotNumFinal = 32;
-	if (txtRemainingSlot)
-		try {
-			remainingSlotNumFinal = std::stoul(txtRemainingSlot->GetValue().ToStdString());
-		}
-		catch (...) {
-		}
 
 	std::map<std::string, ModularGroup> groupsMap;
 	for (auto& ctrl : activeCtrls) {
-		if (ctrl.originalName == "[Remaining Shapes]")
-			continue;
-		std::string pN = ctrl.partText->GetValue().ToStdString();
-		if (groupsMap.find(pN) == groupsMap.end()) {
+		// Shape's effective part suffix (shared for unselected, per-shape otherwise).
+		std::string pN = ctrl.partText ? ctrl.partText->GetValue().ToStdString() : remainingPartNameFinal;
+		uint32_t shapeSlot = 0;
+		try {
+			shapeSlot = std::stoul(ctrl.slotText->GetValue().ToStdString());
+		}
+		catch (...) {
+			shapeSlot = 32;
+		}
+		bool hidden = ctrl.hiddenCb && ctrl.hiddenCb->GetValue();
+
+		auto it = groupsMap.find(pN);
+		if (it == groupsMap.end()) {
 			std::string bs, gm, nifName;
 			getFinalNames(gameBasePrefix, pN, bs, gm, nifName);
 			ModularGroup g;
 			g.partName = pN;
 			g.nifName = nifName;
-			try {
-				g.slot = std::stoul(ctrl.slotText->GetValue().ToStdString());
-			}
-			catch (...) {
-				g.slot = 52;
-			}
-			groupsMap[pN] = g;
+			g.slotMask = 0;
+			it = groupsMap.emplace(pN, g).first;
 		}
-		groupsMap[pN].shapes.push_back(ctrl.originalName);
+		it->second.shapes.push_back(ctrl.originalName);
+		if (hidden) {
+			it->second.hiddenShapes.insert(ctrl.originalName);
+		}
+		else {
+			it->second.shapeSlots[ctrl.originalName] = shapeSlot;
+			if (shapeSlot >= 30 && shapeSlot <= 61)
+				it->second.slotMask |= (1u << (shapeSlot - 30));
+		}
 	}
 
 	std::vector<ModularGroup> activeGroups;
-	if (!unselectedShapes.empty()) {
-		std::string bs, gm, nifName;
-		getFinalNames(gameBasePrefix, remainingPartNameFinal, bs, gm, nifName);
-		ModularGroup g;
-		g.partName = remainingPartNameFinal;
-		g.nifName = nifName;
-		g.shapes = unselectedShapes;
-		g.slot = remainingSlotNumFinal;
-		activeGroups.push_back(g);
+	// Remainder group first so Phase 3 base-detection (g.partName == remainingPartNameFinal) works.
+	{
+		auto it = groupsMap.find(remainingPartNameFinal);
+		if (it != groupsMap.end()) {
+			activeGroups.push_back(it->second);
+			groupsMap.erase(it);
+		}
 	}
 	for (auto const& [name, g] : groupsMap)
 		activeGroups.push_back(g);
@@ -10091,7 +10208,19 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 					joined += ", ";
 				joined += g.shapeOrder[i];
 			}
-			wxLogMessage("Modularize: group '%s' (slot=%u) shapeOrder=[%s]", g.partName, g.slot, joined);
+			std::string slotsLog;
+			for (auto const& [nm, slot] : g.shapeSlots) {
+				if (!slotsLog.empty())
+					slotsLog += ", ";
+				slotsLog += nm + "=" + std::to_string(slot);
+			}
+			std::string hiddenLog;
+			for (auto const& nm : g.hiddenShapes) {
+				if (!hiddenLog.empty())
+					hiddenLog += ", ";
+				hiddenLog += nm;
+			}
+			wxLogMessage("Modularize: group '%s' (slotMask=%08X) shapeOrder=[%s] slots=[%s] hidden=[%s]", g.partName, g.slotMask, joined, slotsLog, hiddenLog);
 		}
 	}
 
@@ -10107,18 +10236,9 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	}
 
 	// Union of body slots originally claimed by the source ARMAs we are splitting.
-	// The Phase 1 partID rewrite below only touches partitions whose partID is in
-	// this set, so collision / cloth / SMP partitions (typically partID 32 or
-	// unrelated bones not declared in the original BOD2) are left alone and don't
-	// inherit the new garment slot — otherwise the engine would render them as
-	// solid worn geometry, producing the well-known "blue shimmer" artifact.
-	std::set<uint16_t> originalClaimedSlots;
-	for (const auto& ms : matchingSets) {
-		for (int bit = 0; bit < 32; ++bit) {
-			if (ms.arma.bodySlotFlags & (1u << bit))
-				originalClaimedSlots.insert(static_cast<uint16_t>(30 + bit));
-		}
-	}
+	// (Already computed above before the dialog so it could feed the auto-detect
+	// for the per-shape "Hidden" checkbox; logged here so the build phase stays
+	// self-contained when reading the log.)
 	{
 		std::string joined;
 		for (uint16_t s : originalClaimedSlots) {
@@ -10134,77 +10254,85 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		nifly::NifFile nif(*project->GetWorkNif());
 		std::vector<nifly::NiShape*> toD;
 		for (auto* s : nif.GetShapes()) {
-			bool inP = std::find(g.shapes.begin(), g.shapes.end(), s->name.get()) != g.shapes.end();
-			bool inU = std::find(curUiShapes.begin(), curUiShapes.end(), s->name.get()) != curUiShapes.end();
-			if (!inP && (inU || g.partName != remainingPartNameFinal))
+			const std::string& sn = s->name.get();
+			bool inP = std::find(g.shapes.begin(), g.shapes.end(), sn) != g.shapes.end();
+			bool inU = std::find(curUiShapes.begin(), curUiShapes.end(), sn) != curUiShapes.end();
+			if (!inP && (inU || g.partName != remainingPartNameFinal)) {
 				toD.push_back(s);
-			else if (s->HasSkinInstance()) {
-				// Force this shape's dismember partID to match the group's ARMA slot.
-				// The Skyrim engine only renders NIF shapes whose partID is in the
-				// owning ARMA's BOD2 slot list, so any mismatch makes the shape
-				// invisible in-game (and likewise hidden by the LL previewer's
-				// partition filter). The previous logic gated this on the shape
-				// having a non-empty BSShaderTextureSet path, which fails when
-				// textures live in a material file (.bgsm/.bgem) or when the slot
-				// names happen to be empty — both legitimate cases — so we
-				// unconditionally reassign every partition's partID here.
-				// We also convert plain NiSkinInstance to BSDismemberSkinInstance
-				// (via nifly's SetShapePartitions convertSkinInstance path) when
-				// needed so single-partition slot 49/52 can still be expressed.
-				auto* si = nif.GetHeader().GetBlock<nifly::NiSkinInstance>(*s->SkinInstanceRef());
-				auto* ds = dynamic_cast<nifly::BSDismemberSkinInstance*>(si);
-				if (ds) {
-					std::string before, after;
-					int rewritten = 0, skipped = 0;
-					for (auto& p : ds->partitions) {
-						if (!before.empty())
-							before += ",";
-						before += std::to_string(p.partID);
-						// Only rewrite partitions that the original ARMA actually
-						// claimed as worn-armor slots. Other partitions (collision,
-						// SMP physics, etc.) keep their original partID so the
-						// engine still treats them as non-rendering.
-						if (originalClaimedSlots.count(p.partID) > 0) {
-							p.partID = static_cast<uint16_t>(g.slot);
-							++rewritten;
-						}
-						else {
-							++skipped;
-						}
-						if (!after.empty())
-							after += ",";
-						after += std::to_string(p.partID);
+				continue;
+			}
+			if (!s->HasSkinInstance())
+				continue;
+			// Hidden shapes are kept in the split nif untouched: their partID is
+			// preserved so the engine still classifies them as collision/SMP/etc.
+			// and their slot is excluded from the new ARMA's BOD2 mask.
+			bool hidden = g.hiddenShapes.count(sn) > 0;
+			if (hidden) {
+				wxLogMessage("Modularize: shape '%s' kept hidden, partID untouched (group '%s')", sn.c_str(), g.partName.c_str());
+				continue;
+			}
+			auto slotIt = g.shapeSlots.find(sn);
+			if (slotIt == g.shapeSlots.end())
+				continue;
+			uint16_t shapeSlot = static_cast<uint16_t>(slotIt->second);
+			// Force this shape's dismember partID to match the user-chosen slot.
+			// The Skyrim engine only renders NIF shapes whose partID is in the
+			// owning ARMA's BOD2 slot list, so any mismatch makes the shape
+			// invisible in-game (and likewise hidden by the LL previewer's
+			// partition filter). Only partitions that the original ARMA claimed
+			// are rewritten — collision/SMP partitions keep their partIDs.
+			// Plain NiSkinInstance is converted to BSDismemberSkinInstance via
+			// nifly's SetShapePartitions convertSkinInstance path when needed.
+			auto* si = nif.GetHeader().GetBlock<nifly::NiSkinInstance>(*s->SkinInstanceRef());
+			auto* ds = dynamic_cast<nifly::BSDismemberSkinInstance*>(si);
+			if (ds) {
+				std::string before, after;
+				int rewritten = 0, skipped = 0;
+				for (auto& p : ds->partitions) {
+					if (!before.empty())
+						before += ",";
+					before += std::to_string(p.partID);
+					if (originalClaimedSlots.count(p.partID) > 0) {
+						p.partID = shapeSlot;
+						++rewritten;
 					}
-					wxLogMessage("Modularize: shape '%s' partID [%s] -> [%s] (rewritten=%d, skipped=%d, group '%s')",
-								 s->name.get().c_str(),
-								 before.c_str(),
-								 after.c_str(),
-								 rewritten,
-								 skipped,
-								 g.partName.c_str());
+					else {
+						++skipped;
+					}
+					if (!after.empty())
+						after += ",";
+					after += std::to_string(p.partID);
 				}
-				else if (si) {
-					nifly::NiVector<nifly::BSDismemberSkinInstance::PartitionInfo> partInfo;
-					std::vector<int> triParts;
-					if (nif.GetShapePartitions(s, partInfo, triParts)) {
-						bool anyRewritten = false;
-						for (auto& p : partInfo) {
-							if (originalClaimedSlots.count(p.partID) > 0) {
-								p.partID = static_cast<uint16_t>(g.slot);
-								anyRewritten = true;
-							}
-						}
-						if (partInfo.empty()) {
-							nifly::BSDismemberSkinInstance::PartitionInfo pi;
-							pi.partID = static_cast<uint16_t>(g.slot);
-							partInfo.push_back(pi);
-							triParts.assign(triParts.size(), 0);
+				wxLogMessage("Modularize: shape '%s' partID [%s] -> [%s] slot=%u (rewritten=%d, skipped=%d, group '%s')",
+							 sn.c_str(),
+							 before.c_str(),
+							 after.c_str(),
+							 shapeSlot,
+							 rewritten,
+							 skipped,
+							 g.partName.c_str());
+			}
+			else if (si) {
+				nifly::NiVector<nifly::BSDismemberSkinInstance::PartitionInfo> partInfo;
+				std::vector<int> triParts;
+				if (nif.GetShapePartitions(s, partInfo, triParts)) {
+					bool anyRewritten = false;
+					for (auto& p : partInfo) {
+						if (originalClaimedSlots.count(p.partID) > 0) {
+							p.partID = shapeSlot;
 							anyRewritten = true;
 						}
-						if (anyRewritten) {
-							nif.SetShapePartitions(s, partInfo, triParts, true);
-							wxLogMessage("Modularize: shape '%s' converted NiSkinInstance to BSDismember partID=%u (group '%s')", s->name.get().c_str(), g.slot, g.partName.c_str());
-						}
+					}
+					if (partInfo.empty()) {
+						nifly::BSDismemberSkinInstance::PartitionInfo pi;
+						pi.partID = shapeSlot;
+						partInfo.push_back(pi);
+						triParts.assign(triParts.size(), 0);
+						anyRewritten = true;
+					}
+					if (anyRewritten) {
+						nif.SetShapePartitions(s, partInfo, triParts, true);
+						wxLogMessage("Modularize: shape '%s' converted NiSkinInstance to BSDismember partID=%u (group '%s')", sn.c_str(), shapeSlot, g.partName.c_str());
 					}
 				}
 			}
@@ -10393,15 +10521,12 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 				continue;
 			for (auto const& g : activeGroups) {
 				uint32_t aFid = 0;
-				uint32_t slotMask = 0;
-				if (g.slot >= 30 && g.slot <= 61)
-					slotMask = (1u << (g.slot - 30));
+				uint32_t slotMask = g.slotMask;
 				bool isBase = (g.partName == remainingPartNameFinal);
-				wxLogMessage("Modularize: ms='%s' (formId %08X) group='%s' slot=%u slotMask=%08X isBase=%d",
+				wxLogMessage("Modularize: ms='%s' (formId %08X) group='%s' slotMask=%08X isBase=%d",
 							 ms.arma.editorId.c_str(),
 							 ms.arma.formId,
 							 g.partName.c_str(),
-							 g.slot,
 							 slotMask,
 							 isBase ? 1 : 0);
 				esp::Record newArma = esp::ESPWriter::CloneRecord(*srcArmaRec, isBase ? ms.arma.formId : 0);
