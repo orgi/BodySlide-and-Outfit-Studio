@@ -10091,7 +10091,7 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 					joined += ", ";
 				joined += g.shapeOrder[i];
 			}
-			wxLogMessage("Modularize: group '%s' shapeOrder=[%s]", g.partName, joined);
+			wxLogMessage("Modularize: group '%s' (slot=%u) shapeOrder=[%s]", g.partName, g.slot, joined);
 		}
 	}
 
@@ -10106,6 +10106,29 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		return;
 	}
 
+	// Union of body slots originally claimed by the source ARMAs we are splitting.
+	// The Phase 1 partID rewrite below only touches partitions whose partID is in
+	// this set, so collision / cloth / SMP partitions (typically partID 32 or
+	// unrelated bones not declared in the original BOD2) are left alone and don't
+	// inherit the new garment slot — otherwise the engine would render them as
+	// solid worn geometry, producing the well-known "blue shimmer" artifact.
+	std::set<uint16_t> originalClaimedSlots;
+	for (const auto& ms : matchingSets) {
+		for (int bit = 0; bit < 32; ++bit) {
+			if (ms.arma.bodySlotFlags & (1u << bit))
+				originalClaimedSlots.insert(static_cast<uint16_t>(30 + bit));
+		}
+	}
+	{
+		std::string joined;
+		for (uint16_t s : originalClaimedSlots) {
+			if (!joined.empty())
+				joined += ",";
+			joined += std::to_string(s);
+		}
+		wxLogMessage("Modularize: original ARMA claimed slots = [%s]", joined.c_str());
+	}
+
 	std::vector<std::string> curUiShapes = GetShapeList();
 	for (auto& g : activeGroups) {
 		nifly::NifFile nif(*project->GetWorkNif());
@@ -10116,18 +10139,73 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 			if (!inP && (inU || g.partName != remainingPartNameFinal))
 				toD.push_back(s);
 			else if (s->HasSkinInstance()) {
-				bool hasT = false;
-				auto tr = nif.GetTexturePathRefs(s);
-				for (const auto& r : tr)
-					if (!r.get().empty()) {
-						hasT = true;
-						break;
+				// Force this shape's dismember partID to match the group's ARMA slot.
+				// The Skyrim engine only renders NIF shapes whose partID is in the
+				// owning ARMA's BOD2 slot list, so any mismatch makes the shape
+				// invisible in-game (and likewise hidden by the LL previewer's
+				// partition filter). The previous logic gated this on the shape
+				// having a non-empty BSShaderTextureSet path, which fails when
+				// textures live in a material file (.bgsm/.bgem) or when the slot
+				// names happen to be empty — both legitimate cases — so we
+				// unconditionally reassign every partition's partID here.
+				// We also convert plain NiSkinInstance to BSDismemberSkinInstance
+				// (via nifly's SetShapePartitions convertSkinInstance path) when
+				// needed so single-partition slot 49/52 can still be expressed.
+				auto* si = nif.GetHeader().GetBlock<nifly::NiSkinInstance>(*s->SkinInstanceRef());
+				auto* ds = dynamic_cast<nifly::BSDismemberSkinInstance*>(si);
+				if (ds) {
+					std::string before, after;
+					int rewritten = 0, skipped = 0;
+					for (auto& p : ds->partitions) {
+						if (!before.empty())
+							before += ",";
+						before += std::to_string(p.partID);
+						// Only rewrite partitions that the original ARMA actually
+						// claimed as worn-armor slots. Other partitions (collision,
+						// SMP physics, etc.) keep their original partID so the
+						// engine still treats them as non-rendering.
+						if (originalClaimedSlots.count(p.partID) > 0) {
+							p.partID = static_cast<uint16_t>(g.slot);
+							++rewritten;
+						}
+						else {
+							++skipped;
+						}
+						if (!after.empty())
+							after += ",";
+						after += std::to_string(p.partID);
 					}
-				if (hasT) {
-					auto* si = nif.GetHeader().GetBlock<nifly::NiSkinInstance>(*s->SkinInstanceRef());
-					if (auto* ds = dynamic_cast<nifly::BSDismemberSkinInstance*>(si))
-						for (auto& p : ds->partitions)
-							p.partID = (uint16_t)g.slot;
+					wxLogMessage("Modularize: shape '%s' partID [%s] -> [%s] (rewritten=%d, skipped=%d, group '%s')",
+								 s->name.get().c_str(),
+								 before.c_str(),
+								 after.c_str(),
+								 rewritten,
+								 skipped,
+								 g.partName.c_str());
+				}
+				else if (si) {
+					nifly::NiVector<nifly::BSDismemberSkinInstance::PartitionInfo> partInfo;
+					std::vector<int> triParts;
+					if (nif.GetShapePartitions(s, partInfo, triParts)) {
+						bool anyRewritten = false;
+						for (auto& p : partInfo) {
+							if (originalClaimedSlots.count(p.partID) > 0) {
+								p.partID = static_cast<uint16_t>(g.slot);
+								anyRewritten = true;
+							}
+						}
+						if (partInfo.empty()) {
+							nifly::BSDismemberSkinInstance::PartitionInfo pi;
+							pi.partID = static_cast<uint16_t>(g.slot);
+							partInfo.push_back(pi);
+							triParts.assign(triParts.size(), 0);
+							anyRewritten = true;
+						}
+						if (anyRewritten) {
+							nif.SetShapePartitions(s, partInfo, triParts, true);
+							wxLogMessage("Modularize: shape '%s' converted NiSkinInstance to BSDismember partID=%u (group '%s')", s->name.get().c_str(), g.slot, g.partName.c_str());
+						}
+					}
 				}
 			}
 		}
@@ -10317,8 +10395,15 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 				uint32_t aFid = 0;
 				uint32_t slotMask = 0;
 				if (g.slot >= 30 && g.slot <= 61)
-					slotMask = (1 << (g.slot - 30));
+					slotMask = (1u << (g.slot - 30));
 				bool isBase = (g.partName == remainingPartNameFinal);
+				wxLogMessage("Modularize: ms='%s' (formId %08X) group='%s' slot=%u slotMask=%08X isBase=%d",
+							 ms.arma.editorId.c_str(),
+							 ms.arma.formId,
+							 g.partName.c_str(),
+							 g.slot,
+							 slotMask,
+							 isBase ? 1 : 0);
 				esp::Record newArma = esp::ESPWriter::CloneRecord(*srcArmaRec, isBase ? ms.arma.formId : 0);
 				// Build a name->new-3D-index map from this group's expected shape order
 				// (computed from WorkNif block order, intersected with the group's shape list).
@@ -10399,11 +10484,17 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 						}
 						else if (isBase) {
 							// Orphan kept on base: shift original idx to compensate
-							// for shapes other groups removed from the base nif.
+							// for shapes other groups removed from the base nif. Also
+							// translate the entry's shape name to the project's current
+							// name for the same physical shape (block index is preserved
+							// by nifly across renames), so name-based lookups (e.g. the
+							// LL previewer and OS UI) match the post-rename shapes.
 							if (idx3d < baseIdxShift.size() && baseIdxShift[idx3d] >= 0) {
 								keep = true;
 								newIdx = static_cast<uint32_t>(baseIdxShift[idx3d]);
-								reason = "keep-orphan-on-base";
+								if (idx3d < originalOrder.size())
+									name = originalOrder[idx3d];
+								reason = "keep-orphan-on-base (renamed)";
 							}
 							else {
 								keep = false;
