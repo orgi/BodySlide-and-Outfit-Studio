@@ -718,6 +718,12 @@ static void AddPiecesFromArmo(uint32_t formId,
 
 		// Resolve alternate textures from the matched ARMA
 		if (arma) {
+			// Capture race(s) targeted by this ARMA so the previewer can filter
+			// out pieces whose ARMA doesn't apply to the selected NPC's race
+			// (e.g. ARMOs that bundle one ARMA per race).
+			piece.armaRaceFormId = arma->raceFormId;
+			piece.armaAdditionalRaceFormIds = arma->additionalRaceFormIds;
+
 			auto& altTexList = arma->altTexFemale.empty() ? arma->altTexMale : arma->altTexFemale;
 			for (auto& at : altTexList) {
 				auto txstIt = txstCache.find(at.txstFormId);
@@ -1430,6 +1436,57 @@ LeveledListData::EffectiveRace LeveledListData::GetEffectiveNpcRace(const std::s
 	return er;
 }
 
+std::set<uint32_t> LeveledListData::GetEffectiveArmorRaces(uint32_t npcRaceFormId) const {
+	std::set<uint32_t> races;
+	if (npcRaceFormId == 0)
+		return races;
+	races.insert(npcRaceFormId);
+
+	auto raceIt = raceCache.find(npcRaceFormId);
+	if (raceIt == raceCache.end() || raceIt->second.skinFormId == 0)
+		return races;
+
+	auto armoIt = armoCache.find(raceIt->second.skinFormId);
+	if (armoIt == armoCache.end())
+		return races;
+
+	// Collect every race targeted by any ARMA hanging off the race's skin ARMO.
+	// In Skyrim, this is what makes a custom child / variant race compatible
+	// with vanilla armor: the skin ARMO references vanilla ARMAs whose RNAMs
+	// list NordRace / DefaultRace / etc., so outfits whose ARMAs target those
+	// same races are equippable on the custom race in-game.
+	for (uint32_t armaId : armoIt->second.armatureIds) {
+		auto armaIt = armaCache.find(armaId);
+		if (armaIt == armaCache.end())
+			continue;
+		if (armaIt->second.raceFormId != 0)
+			races.insert(armaIt->second.raceFormId);
+		for (uint32_t r : armaIt->second.additionalRaceFormIds)
+			races.insert(r);
+	}
+
+	// Walk template-armor chain too in case the skin ARMO is an enchanted
+	// copy that inherits its ARMAs from a base.
+	uint32_t tid = armoIt->second.templateId;
+	for (int depth = 0; depth < 10 && tid != 0; ++depth) {
+		auto tit = armoCache.find(tid);
+		if (tit == armoCache.end())
+			break;
+		for (uint32_t armaId : tit->second.armatureIds) {
+			auto armaIt = armaCache.find(armaId);
+			if (armaIt == armaCache.end())
+				continue;
+			if (armaIt->second.raceFormId != 0)
+				races.insert(armaIt->second.raceFormId);
+			for (uint32_t r : armaIt->second.additionalRaceFormIds)
+				races.insert(r);
+		}
+		tid = tit->second.templateId;
+	}
+
+	return races;
+}
+
 std::string LeveledListData::ResolveHeadPartNif(uint32_t headPartFormId) const {
 	auto it = headPartCache.find(headPartFormId);
 	if (it == headPartCache.end())
@@ -1538,8 +1595,7 @@ void FillPartTexturesFromArmo(uint32_t armoFid,
 		return;
 	}
 
-	wxLogMessage("FillPartTexturesFromArmo: walking ARMO %08X (%zu ARMAs) raceHint=%08X",
-				 armoFid, armoIt->second.armatureIds.size(), npcRaceFid);
+	wxLogMessage("FillPartTexturesFromArmo: walking ARMO %08X (%zu ARMAs) raceHint=%08X", armoFid, armoIt->second.armatureIds.size(), npcRaceFid);
 
 	auto tryFill = [&](bool requireRaceMatch) {
 		for (uint32_t armaId : armoIt->second.armatureIds) {
@@ -1566,8 +1622,13 @@ void FillPartTexturesFromArmo(uint32_t armoFid,
 			std::size_t altF = arma.altTexFemale.size();
 			std::size_t altM = arma.altTexMale.size();
 			wxLogMessage("  ARMA %08X race=%08X slotFlags=%08X altTexF=%zu altTexM=%zu skinTxstF=%08X skinTxstM=%08X",
-						 armaId, arma.raceFormId, arma.bodySlotFlags, altF, altM,
-						 arma.skinTextureFemale, arma.skinTextureMale);
+						 armaId,
+						 arma.raceFormId,
+						 arma.bodySlotFlags,
+						 altF,
+						 altM,
+						 arma.skinTextureFemale,
+						 arma.skinTextureMale);
 
 			if ((arma.bodySlotFlags & (1u << 2)) && out.body[0].empty()) {
 				if (FillFromArmaTextures(arma, txstCache, out.body))
@@ -1834,10 +1895,7 @@ void LeveledListData::ScanAllPluginsForNpcSkins() {
 	// Resolve a raw FormID (in the source plugin's master-index space) to the
 	// plugin path that actually defines it. Returns empty string if the master
 	// can't be located in the data directory.
-	auto findDefiningPlugin = [&](const std::string& srcPath,
-								  const std::vector<std::string>& srcMasters,
-								  uint8_t srcSelfIdx,
-								  uint32_t rawFid) -> std::string {
+	auto findDefiningPlugin = [&](const std::string& srcPath, const std::vector<std::string>& srcMasters, uint8_t srcSelfIdx, uint32_t rawFid) -> std::string {
 		uint8_t topByte = (rawFid >> 24) & 0xFF;
 		if (topByte == srcSelfIdx)
 			return srcPath;
@@ -1909,8 +1967,7 @@ void LeveledListData::ScanAllPluginsForNpcSkins() {
 				}
 			}
 
-			wxLogMessage("ScanAllPluginsForNpcSkins: '%s' override resolution — remappedRace=%08X remappedWnam=%08X",
-						 editorId, info.remappedRace, info.remappedWnam);
+			wxLogMessage("ScanAllPluginsForNpcSkins: '%s' override resolution — remappedRace=%08X remappedWnam=%08X", editorId, info.remappedRace, info.remappedWnam);
 		}
 	}
 }

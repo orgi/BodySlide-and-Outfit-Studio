@@ -3,8 +3,8 @@
  */
 
 #include "LeveledListPreviewer.h"
-#include "BodySlideApp.h"
 #include "../components/Anim.h"
+#include "BodySlideApp.h"
 
 #include <algorithm>
 #include <cctype>
@@ -580,12 +580,16 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 		std::set<std::string> raceBodySet(bodyShapeNames.begin(), bodyShapeNames.end());
 
 		for (auto it = bodyGameVerts.begin(); it != bodyGameVerts.end();) {
-			if (raceBodySet.count(it->first)) it = bodyGameVerts.erase(it);
-			else ++it;
+			if (raceBodySet.count(it->first))
+				it = bodyGameVerts.erase(it);
+			else
+				++it;
 		}
 		for (auto it = bodyShapePartMap.begin(); it != bodyShapePartMap.end();) {
-			if (raceBodySet.count(it->first)) it = bodyShapePartMap.erase(it);
-			else ++it;
+			if (raceBodySet.count(it->first))
+				it = bodyShapePartMap.erase(it);
+			else
+				++it;
 		}
 	}
 
@@ -610,8 +614,7 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 
 	if (!currentHeadEditorId.empty()) {
 		auto paths = data.ResolveNpcBodyNifPaths(currentHeadEditorId, useHighWeight);
-		wxLogMessage("LeveledListPreviewer: ResolveNpcBodyNifPaths('%s') -> body='%s' hands='%s' feet='%s'",
-					 currentHeadEditorId, paths.body, paths.hands, paths.feet);
+		wxLogMessage("LeveledListPreviewer: ResolveNpcBodyNifPaths('%s') -> body='%s' hands='%s' feet='%s'", currentHeadEditorId, paths.body, paths.hands, paths.feet);
 
 		if (!paths.body.empty())
 			bodyNifs.push_back({32, paths.body});
@@ -637,9 +640,7 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 					slotList += ", ";
 				slotList += missing[i];
 			}
-			std::string err = "NPC '" + currentHeadEditorId
-							  + "': no skin NIF defined for " + slotList
-							  + " (neither NPC's WNAM nor race's WNAM resolves)";
+			std::string err = "NPC '" + currentHeadEditorId + "': no skin NIF defined for " + slotList + " (neither NPC's WNAM nor race's WNAM resolves)";
 			wxLogError("LeveledListPreviewer: %s", err.c_str());
 			SetStatusText(wxString::FromUTF8(err));
 		}
@@ -669,8 +670,7 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 			wxLogMessage("  Race body slot %d loaded but hidden — outfit ARMO declares this slot", entry.slot);
 			for (auto& raceShape : bodyShapeNames) {
 				auto pit = bodyShapePartMap.find(raceShape);
-				if (pit != bodyShapePartMap.end()
-					&& pit->second.count(static_cast<uint16_t>(entry.slot))) {
+				if (pit != bodyShapePartMap.end() && pit->second.count(static_cast<uint16_t>(entry.slot))) {
 					gls.SetMeshVisibility(raceShape, false);
 				}
 			}
@@ -686,8 +686,7 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 	// That IS the in-game behavior and the user-requested fallback — log it so
 	// the chain is traceable.
 	if (!currentHeadEditorId.empty() && !hasNpcSkinTextures) {
-		wxLogMessage("LeveledListPreviewer: NPC '%s' has no WNAM/race TXST override - using NIF embedded textures",
-					 currentHeadEditorId);
+		wxLogMessage("LeveledListPreviewer: NPC '%s' has no WNAM/race TXST override - using NIF embedded textures", currentHeadEditorId);
 	}
 
 	// Apply per-slot NPC skin textures (body / hands / feet independently) and
@@ -937,19 +936,16 @@ void LeveledListPreviewer::ReconcileBodyAndOutfitShapes() {
 	// femalebody substitute baked into the outfit NIF) without touching the
 	// clothing parts.
 	auto lower = [](std::string s) {
-		std::transform(s.begin(), s.end(), s.begin(),
-					   [](unsigned char c) { return std::tolower(c); });
+		std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
 		return s;
 	};
 	auto isVanillaBodyTex = [&](const std::string& path) {
 		std::string p = lower(path);
-		return p.find("femalebody") != std::string::npos
-			   || p.find("malebody") != std::string::npos;
+		return p.find("femalebody") != std::string::npos || p.find("malebody") != std::string::npos;
 	};
 	auto isVanillaHandsTex = [&](const std::string& path) {
 		std::string p = lower(path);
-		return p.find("femalehands") != std::string::npos
-			   || p.find("malehands") != std::string::npos;
+		return p.find("femalehands") != std::string::npos || p.find("malehands") != std::string::npos;
 	};
 	auto isVanillaFeetTex = [&](const std::string& path) {
 		// Vanilla feet meshes (FemaleFeet.nif / MaleFeet.nif) point at the
@@ -958,9 +954,7 @@ void LeveledListPreviewer::ReconcileBodyAndOutfitShapes() {
 		// femalefeet patterns so an outfit's reference feet shape is
 		// recognized regardless of which convention the modder used.
 		std::string p = lower(path);
-		return p.find("femalefeet") != std::string::npos
-			   || p.find("malefeet") != std::string::npos
-			   || p.find("femalebody") != std::string::npos
+		return p.find("femalefeet") != std::string::npos || p.find("malefeet") != std::string::npos || p.find("femalebody") != std::string::npos
 			   || p.find("malebody") != std::string::npos;
 	};
 
@@ -973,17 +967,20 @@ void LeveledListPreviewer::ReconcileBodyAndOutfitShapes() {
 		const std::vector<std::string>* tex = nullptr;
 		const char* slotLabel = nullptr;
 		if (it->second.count(32)) {
-			slot = 32; slotLabel = "body";
+			slot = 32;
+			slotLabel = "body";
 			if (!bodyTex.empty() && !bodyTex[0].empty())
 				tex = &bodyTex;
 		}
 		else if (it->second.count(33)) {
-			slot = 33; slotLabel = "hands";
+			slot = 33;
+			slotLabel = "hands";
 			if (!handsTex.empty() && !handsTex[0].empty())
 				tex = &handsTex;
 		}
 		else if (it->second.count(37)) {
-			slot = 37; slotLabel = "feet";
+			slot = 37;
+			slotLabel = "feet";
 			if (!feetTex.empty() && !feetTex[0].empty())
 				tex = &feetTex;
 		}
@@ -1073,10 +1070,12 @@ void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
 	}
 	if (!loaded) {
 		for (FSArchiveFile* archive : FSManager::archiveList()) {
-			if (!archive || !archive->hasFile(relativePath)) continue;
+			if (!archive || !archive->hasFile(relativePath))
+				continue;
 			wxMemoryBuffer outData;
 			archive->fileContents(relativePath, outData);
-			if (outData.IsEmpty()) continue;
+			if (outData.IsEmpty())
+				continue;
 			std::string content(static_cast<char*>(outData.GetData()), outData.GetDataLen());
 			std::istringstream stream(content, std::istringstream::binary);
 			loaded = (nif.Load(stream) == 0);
@@ -1112,10 +1111,12 @@ void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
 				break;
 			}
 			for (FSArchiveFile* archive : FSManager::archiveList()) {
-				if (!archive || !archive->hasFile(ovRelPath)) continue;
+				if (!archive || !archive->hasFile(ovRelPath))
+					continue;
 				wxMemoryBuffer outData;
 				archive->fileContents(ovRelPath, outData);
-				if (outData.IsEmpty()) continue;
+				if (outData.IsEmpty())
+					continue;
 				std::string content(static_cast<char*>(outData.GetData()), outData.GetDataLen());
 				std::istringstream stream(content, std::istringstream::binary);
 				if (nif.Load(stream) == 0) {
@@ -1151,7 +1152,7 @@ void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
 	// verts at origin and char_head_global translates them to the head.
 	nifly::MatTransform charHeadBoneGlobal;
 	bool haveCharHeadBone = AnimSkeleton::getInstance().GetBoneTransformToGlobal("NPC Head [Head]", charHeadBoneGlobal)
-						 || AnimSkeleton::getInstance().GetBoneTransformToGlobal("NPC Head", charHeadBoneGlobal);
+							|| AnimSkeleton::getInstance().GetBoneTransformToGlobal("NPC Head", charHeadBoneGlobal);
 	if (!haveCharHeadBone) {
 		wxLogError("LeveledListPreviewer: NPC Head bone not in skeleton; head shape positioning will be incorrect");
 	}
@@ -1166,15 +1167,19 @@ void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
 		nifly::MatTransform skinToBone;
 		if (!sourceNif.GetShapeTransformSkinToBone(shape, "NPC Head [Head]", skinToBone))
 			if (!sourceNif.GetShapeTransformSkinToBone(shape, "NPC Head", skinToBone))
-				return;  // shape isn't weighted to NPC Head — leave AddMeshFromNif's positioning
+				return; // shape isn't weighted to NPC Head — leave AddMeshFromNif's positioning
 
 		nifly::MatTransform targetNif = charHeadBoneGlobal.ComposeTransforms(skinToBone);
 		nifly::MatTransform targetMesh = Mesh::xformNifToMesh.ComposeTransforms(targetNif.ComposeTransforms(Mesh::xformMeshToNif));
 		m->SetXformMeshToModel(targetMesh);
 		wxLogMessage("LeveledListPreviewer: head correction for '%s': skinToBone=(%.2f,%.2f,%.2f) charHead=(%.2f,%.2f,%.2f)",
 					 shapeName,
-					 skinToBone.translation.x, skinToBone.translation.y, skinToBone.translation.z,
-					 charHeadBoneGlobal.translation.x, charHeadBoneGlobal.translation.y, charHeadBoneGlobal.translation.z);
+					 skinToBone.translation.x,
+					 skinToBone.translation.y,
+					 skinToBone.translation.z,
+					 charHeadBoneGlobal.translation.x,
+					 charHeadBoneGlobal.translation.y,
+					 charHeadBoneGlobal.translation.z);
 	};
 
 	for (auto& shapeName : nif.GetShapeNames()) {
@@ -1196,11 +1201,13 @@ void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
 		//
 		// Heuristic for "this is the face shape": name contains "head", "face" or "basehead"
 		// (nifly shape naming convention for FaceGen), case-insensitive.
-		auto toLower = [](std::string s) { for (auto& c : s) c = std::tolower(static_cast<unsigned char>(c)); return s; };
+		auto toLower = [](std::string s) {
+			for (auto& c : s)
+				c = std::tolower(static_cast<unsigned char>(c));
+			return s;
+		};
 		std::string lowerShape = toLower(shapeName);
-		bool isFaceShape = lowerShape.find("head") != std::string::npos
-						   || lowerShape.find("face") != std::string::npos
-						   || lowerShape.find("basehead") != std::string::npos;
+		bool isFaceShape = lowerShape.find("head") != std::string::npos || lowerShape.find("face") != std::string::npos || lowerShape.find("basehead") != std::string::npos;
 
 		if (isFaceShape) {
 			// Force valpha buffer to 1.0 and disable the shape's vertex-alpha flag so the
@@ -1237,8 +1244,8 @@ void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
 			NiVector<BSDismemberSkinInstance::PartitionInfo> partInfo;
 			std::vector<int> triParts;
 			bool gotParts = nif.GetShapePartitions(shape, partInfo, triParts);
-			
-			// Fallback: if GetShapePartitions fails (e.g. no NiSkinPartition), 
+
+			// Fallback: if GetShapePartitions fails (e.g. no NiSkinPartition),
 			// try to get slot info directly from BSDismemberSkinInstance if it exists.
 			if (!gotParts || partInfo.empty()) {
 				auto* bsdSkin = nif.GetHeader().GetBlock<BSDismemberSkinInstance>(shape->SkinInstanceRef());
@@ -1268,7 +1275,11 @@ void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
 		// Skip paths that are already loaded as part of the main FaceGen NIF
 		// (rare but possible if the cache is messy).
 		bool alreadyLoaded = false;
-		auto toLower = [](std::string s) { for (auto& c : s) c = std::tolower(static_cast<unsigned char>(c)); return s; };
+		auto toLower = [](std::string s) {
+			for (auto& c : s)
+				c = std::tolower(static_cast<unsigned char>(c));
+			return s;
+		};
 		for (auto const& [meshName, source] : shapeNifSource) {
 			if (toLower(source) == toLower(hpRelPath)) {
 				alreadyLoaded = true;
@@ -1290,10 +1301,12 @@ void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
 		}
 		if (!hpLoaded) {
 			for (FSArchiveFile* archive : FSManager::archiveList()) {
-				if (!archive || !archive->hasFile(hpRelPath)) continue;
+				if (!archive || !archive->hasFile(hpRelPath))
+					continue;
 				wxMemoryBuffer outData;
 				archive->fileContents(hpRelPath, outData);
-				if (outData.IsEmpty()) continue;
+				if (outData.IsEmpty())
+					continue;
 				std::string content(static_cast<char*>(outData.GetData()), outData.GetDataLen());
 				std::istringstream stream(content, std::istringstream::binary);
 				hpLoaded = (hpNif.Load(stream) == 0);
@@ -1390,14 +1403,10 @@ void LeveledListPreviewer::OnHeadEntered(wxCommandEvent& WXUNUSED(event)) {
 
 	// Resolve per-slot NPC skin textures (body / hands / feet independently).
 	npcBodyPartTextures = data.ResolveNpcBodyPartTextures(npc.editorId);
-	hasNpcSkinTextures = !npcBodyPartTextures.body[0].empty()
-						 || !npcBodyPartTextures.hands[0].empty()
-						 || !npcBodyPartTextures.feet[0].empty();
+	hasNpcSkinTextures = !npcBodyPartTextures.body[0].empty() || !npcBodyPartTextures.hands[0].empty() || !npcBodyPartTextures.feet[0].empty();
 
 	if (hasNpcSkinTextures) {
-		std::string skinLog = "LeveledListPreviewer: NPC '" + logName
-							  + "' skin resolved — body='" + npcBodyPartTextures.body[0]
-							  + "' hands='" + npcBodyPartTextures.hands[0]
+		std::string skinLog = "LeveledListPreviewer: NPC '" + logName + "' skin resolved — body='" + npcBodyPartTextures.body[0] + "' hands='" + npcBodyPartTextures.hands[0]
 							  + "' feet='" + npcBodyPartTextures.feet[0] + "'";
 		wxLogMessage("%s", skinLog.c_str());
 	}
@@ -1446,7 +1455,8 @@ void LeveledListPreviewer::UpdateHeadVisibility() {
 
 	for (const auto& meshName : headShapeNames) {
 		Mesh* m = gls.GetMesh(meshName);
-		if (!m) continue;
+		if (!m)
+			continue;
 
 		bool visible = true;
 		auto it = bodyShapePartMap.find(meshName);
@@ -1869,7 +1879,86 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	};
 	std::vector<PieceShapeInfo> pieceInfos;
 
-	for (auto& piece : outfit.pieces) {
+	// Determine the selected NPC's race, if any. ARMOs that contain multiple
+	// ARMAs targeting different races (one ARMA per race) need to be filtered
+	// to the ARMA that matches the NPC's race — otherwise we render every
+	// race variant on top of each other.
+	uint32_t npcRaceFid = 0;
+	std::set<uint32_t> effectiveArmorRaces;
+	if (!currentHeadEditorId.empty()) {
+		auto effRace = data.GetEffectiveNpcRace(currentHeadEditorId);
+		npcRaceFid = effRace.formId;
+		// "Effective" set covers custom child / variant races that inherit
+		// armor compatibility from a parent via the skin ARMO's ARMAs.
+		effectiveArmorRaces = data.GetEffectiveArmorRaces(npcRaceFid);
+	}
+	if (npcRaceFid != 0) {
+		std::string ras;
+		for (uint32_t r : effectiveArmorRaces) {
+			if (!ras.empty())
+				ras += ",";
+			char buf[16];
+			std::snprintf(buf, sizeof(buf), "%08X", r);
+			ras += buf;
+		}
+		wxLogMessage("LeveledListPreviewer: NPC race %08X effective armor races: [%s]", npcRaceFid, ras);
+	}
+
+	// Build the set of piece indices (into outfit.pieces) we will actually
+	// render. For each ARMO (grouped by formId), if any of its ARMA-derived
+	// pieces matches the NPC's race we keep only the race-matching ones; if
+	// none match (or no NPC race is known) we keep all — this preserves the
+	// current behavior when race info is missing.
+	std::set<size_t> renderPieceIdx;
+	{
+		auto pieceMatchesRace = [&](const lldata::OutfitPiece& p) -> bool {
+			if (effectiveArmorRaces.empty())
+				return false;
+			if (effectiveArmorRaces.count(p.armaRaceFormId))
+				return true;
+			for (uint32_t r : p.armaAdditionalRaceFormIds) {
+				if (effectiveArmorRaces.count(r))
+					return true;
+			}
+			return false;
+		};
+
+		std::map<uint32_t, std::vector<size_t>> byArmo;
+		for (size_t i = 0; i < outfit.pieces.size(); ++i)
+			byArmo[outfit.pieces[i].formId].push_back(i);
+
+		for (auto& [armoId, indices] : byArmo) {
+			bool anyMatch = false;
+			if (!effectiveArmorRaces.empty()) {
+				for (size_t i : indices) {
+					if (pieceMatchesRace(outfit.pieces[i])) {
+						anyMatch = true;
+						break;
+					}
+				}
+			}
+			if (anyMatch) {
+				for (size_t i : indices) {
+					if (pieceMatchesRace(outfit.pieces[i]))
+						renderPieceIdx.insert(i);
+					else
+						wxLogMessage("  Hiding ARMA variant of piece '%s' [%08X]: ARMA race %08X not in NPC effective race set",
+									 outfit.pieces[i].name,
+									 outfit.pieces[i].formId,
+									 outfit.pieces[i].armaRaceFormId);
+				}
+			}
+			else {
+				for (size_t i : indices)
+					renderPieceIdx.insert(i);
+			}
+		}
+	}
+
+	for (size_t pieceIdx = 0; pieceIdx < outfit.pieces.size(); ++pieceIdx) {
+		auto& piece = outfit.pieces[pieceIdx];
+		if (!renderPieceIdx.count(pieceIdx))
+			continue;
 		if (piece.nifPath.empty()) {
 			wxLogMessage("  Piece '%s' [%08X]: no model path, skipping", piece.name, piece.formId);
 			continue;
@@ -1991,14 +2080,23 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 			psi.shapeNames.push_back(m->shapeName);
 			++loadedCount;
 
-			// Game-accurate filter: a NIF shape only renders if its dismember
-			// partition matches one of the slots declared by the owning ARMO.
-			// Cloak NIFs commonly bundle a copy of the body / hands / feet
-			// shapes for rigging reference even though the cloak's ARMO only
-			// declares the cloak slot — the engine skips those bundled shapes
-			// and renders only the parts whose partition the ARMO actually
-			// claims. We mirror that here: shapes whose partition isn't
-			// claimed by their piece's ARMO are hidden on load.
+			// In Skyrim, NIF dismember partitions drive dismemberment effects
+			// (decapitation, severed limbs) — they do NOT gate rendering. The
+			// engine renders every shape in the equipped ARMA's NIF regardless
+			// of whether its partition is in the ARMO's biped slot mask.
+			//
+			// The one exception we still want to mirror is "ARMO bundles a
+			// duplicate body / hands / feet shape" (common in cloaks, hoods,
+			// helmets that ship a rigged-reference body). Those would double
+			// up with the body/hands/feet NIFs we load separately for the NPC
+			// or default character. So we hide an outfit shape ONLY when:
+			//   * its partition is one of the canonical body-slot IDs
+			//     (32 = Body, 33 = Hands, 37 = Feet), AND
+			//   * the piece's ARMO doesn't itself declare that body slot
+			//     (i.e. it's not legitimately a body-replacing armor).
+			// Other partition IDs (calf 38, head 30/31, helmet 42, custom
+			// 130+ etc.) are dismember markers, not body bundles, so we leave
+			// those shapes visible.
 			if (auto* nifShape = nif.FindBlockByName<NiShape>(shapeName)) {
 				NiVector<BSDismemberSkinInstance::PartitionInfo> partInfo;
 				std::vector<int> triParts;
@@ -2007,29 +2105,42 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 					std::string partList;
 					for (size_t i = 0; i < partInfo.size(); ++i) {
 						partIds.insert(partInfo[i].partID);
-						if (!partList.empty()) partList += ",";
+						if (!partList.empty())
+							partList += ",";
 						partList += std::to_string(partInfo[i].partID);
 					}
 					if (!partIds.empty()) {
 						bodyShapePartMap[m->shapeName] = partIds;
 
-						bool slotCoveredByPiece = false;
-						if (!piece.bodySlots.empty()) {
+						// Slot 32/33/37 are the canonical body/hands/feet
+						// dismember IDs we load separately as the NPC body.
+						static const std::array<uint16_t, 3> kBodyParts = {32, 33, 37};
+						uint16_t bundledBodyPart = 0;
+						for (uint16_t bp : kBodyParts) {
+							if (partIds.count(bp)) {
+								bundledBodyPart = bp;
+								break;
+							}
+						}
+
+						bool pieceClaimsBundled = false;
+						if (bundledBodyPart != 0) {
 							for (int slot : piece.bodySlots) {
-								if (partIds.count(static_cast<uint16_t>(slot))) {
-									slotCoveredByPiece = true;
+								if (slot == bundledBodyPart) {
+									pieceClaimsBundled = true;
 									break;
 								}
 							}
 						}
-						if (!piece.bodySlots.empty() && !slotCoveredByPiece) {
+
+						if (bundledBodyPart != 0 && !pieceClaimsBundled) {
 							std::string declared;
 							for (int slot : piece.bodySlots) {
-								if (!declared.empty()) declared += ",";
+								if (!declared.empty())
+									declared += ",";
 								declared += std::to_string(slot);
 							}
-							wxLogMessage("  Hiding outfit shape '%s' (partitions [%s] not in piece slots [%s])",
-										 m->shapeName, partList, declared);
+							wxLogMessage("  Hiding outfit shape '%s' (bundled body part %u not declared by piece slots [%s])", m->shapeName, bundledBodyPart, declared);
 							gls.SetMeshVisibility(m->shapeName, false);
 						}
 						else {
@@ -2143,9 +2254,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 				// Resolve per-slot NPC skin + QNAM tint if not yet done
 				if (!hasNpcSkinTextures && !hasNpcTint) {
 					npcBodyPartTextures = data.ResolveNpcBodyPartTextures(npc.editorId);
-					hasNpcSkinTextures = !npcBodyPartTextures.body[0].empty()
-										 || !npcBodyPartTextures.hands[0].empty()
-										 || !npcBodyPartTextures.feet[0].empty();
+					hasNpcSkinTextures = !npcBodyPartTextures.body[0].empty() || !npcBodyPartTextures.hands[0].empty() || !npcBodyPartTextures.feet[0].empty();
 					hasNpcTint = npc.hasTint;
 					if (hasNpcTint) {
 						npcTintR = npc.tintR / 255.0f;
@@ -2497,10 +2606,14 @@ void LeveledListPreviewer::RefreshMeshOverlay() {
 		if (n.size() > 6 && n.substr(0, 6) == "_head_") {
 			std::string base = n.substr(6);
 			// Clean up common head part shape names
-			if (base.find("Eye") != std::string::npos) return "Eyes (" + base + ")";
-			if (base.find("Teeth") != std::string::npos || base.find("Mouth") != std::string::npos) return "Teeth (" + base + ")";
-			if (base.find("Hair") != std::string::npos) return "Hair (" + base + ")";
-			if (base.find("Brow") != std::string::npos) return "Brows (" + base + ")";
+			if (base.find("Eye") != std::string::npos)
+				return "Eyes (" + base + ")";
+			if (base.find("Teeth") != std::string::npos || base.find("Mouth") != std::string::npos)
+				return "Teeth (" + base + ")";
+			if (base.find("Hair") != std::string::npos)
+				return "Hair (" + base + ")";
+			if (base.find("Brow") != std::string::npos)
+				return "Brows (" + base + ")";
 			return base;
 		}
 		return n;
@@ -2513,11 +2626,15 @@ void LeveledListPreviewer::RefreshMeshOverlay() {
 	for (auto& n : bodyShapeNames) {
 		auto it = bodyShapePartMap.find(n);
 		if (it != bodyShapePartMap.end()) {
-			if (it->second.count(33)) handsOnly.push_back(n);
-			else if (it->second.count(37)) feetOnly.push_back(n);
-			else bodyOnly.push_back(n);
+			if (it->second.count(33))
+				handsOnly.push_back(n);
+			else if (it->second.count(37))
+				feetOnly.push_back(n);
+			else
+				bodyOnly.push_back(n);
 		}
-		else bodyOnly.push_back(n);
+		else
+			bodyOnly.push_back(n);
 	}
 
 	auto bodyOnlyCat = buildCategory("Body", bodyOnly, [](const std::string& n) -> std::string { return n; });
