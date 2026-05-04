@@ -661,20 +661,13 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 			wxLogMessage("LeveledListPreviewer: Body part not found: %s", entry.path);
 			continue;
 		}
-		// When the outfit's ARMO already covers this slot, hide the race body
-		// shape so we don't double-render. We still loaded the NIF so its
-		// BSShaderTextureSet is captured into shapeTexFiles — that lets
-		// ReconcileBodyAndOutfitShapes retarget the race skin texture onto the
-		// outfit's bundled body shape afterwards.
-		if (outfitDeclaredSlots.count(entry.slot)) {
-			wxLogMessage("  Race body slot %d loaded but hidden — outfit ARMO declares this slot", entry.slot);
-			for (auto& raceShape : bodyShapeNames) {
-				auto pit = bodyShapePartMap.find(raceShape);
-				if (pit != bodyShapePartMap.end() && pit->second.count(static_cast<uint16_t>(entry.slot))) {
-					gls.SetMeshVisibility(raceShape, false);
-				}
-			}
-		}
+		// Visibility of race body shapes is decided later in
+		// ReconcileBodyAndOutfitShapes(), which inspects the dismember
+		// partitions of the actually-loaded outfit shapes. We must not
+		// pre-hide based solely on outfitDeclaredSlots (the union of ARMO
+		// BOD2 flags), because an ARMO may declare e.g. slot 33 (Hands)
+		// without its NIF actually containing a hands shape — pre-hiding
+		// would leave the body without any hands geometry.
 	}
 
 	if (bodyShapeNames.empty())
@@ -2112,40 +2105,20 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 					if (!partIds.empty()) {
 						bodyShapePartMap[m->shapeName] = partIds;
 
-						// Slot 32/33/37 are the canonical body/hands/feet
-						// dismember IDs we load separately as the NPC body.
-						static const std::array<uint16_t, 3> kBodyParts = {32, 33, 37};
-						uint16_t bundledBodyPart = 0;
-						for (uint16_t bp : kBodyParts) {
-							if (partIds.count(bp)) {
-								bundledBodyPart = bp;
-								break;
-							}
-						}
-
-						bool pieceClaimsBundled = false;
-						if (bundledBodyPart != 0) {
-							for (int slot : piece.bodySlots) {
-								if (slot == bundledBodyPart) {
-									pieceClaimsBundled = true;
-									break;
-								}
-							}
-						}
-
-						if (bundledBodyPart != 0 && !pieceClaimsBundled) {
-							std::string declared;
-							for (int slot : piece.bodySlots) {
-								if (!declared.empty())
-									declared += ",";
-								declared += std::to_string(slot);
-							}
-							wxLogMessage("  Hiding outfit shape '%s' (bundled body part %u not declared by piece slots [%s])", m->shapeName, bundledBodyPart, declared);
-							gls.SetMeshVisibility(m->shapeName, false);
-						}
-						else {
-							wxLogMessage("  Outfit shape '%s' partitions: [%s]", m->shapeName, partList);
-						}
+						// Dismember partitions don't gate rendering in-game.
+						// We used to hide outfit shapes whose partition is
+						// 32/33/37 when the piece's ARMO doesn't claim that
+						// slot, on the assumption that such shapes were body
+						// duplicates bundled into a cloak/hood NIF. That
+						// heuristic is wrong: many outfit authors use
+						// partition 32 as a generic rigging partition for
+						// every shape (e.g. COCO Mysterious Mage), so the
+						// filter ends up hiding nearly all outfit shapes.
+						// Untextured rigging ghosts (VirtualBody/VirtualHands)
+						// are already filtered by the "no diffuse" check
+						// above. Race body shape duplication is handled
+						// downstream by ReconcileBodyAndOutfitShapes.
+						wxLogMessage("  Outfit shape '%s' partitions: [%s]", m->shapeName, partList);
 					}
 				}
 			}
