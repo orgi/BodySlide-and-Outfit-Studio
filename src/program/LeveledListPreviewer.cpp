@@ -2066,19 +2066,61 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 				untexturedShapes.push_back(m->shapeName);
 			}
 
-			// Hide shapes that have no shader property (typically
-			// BSLightingShaderProperty). SMP / collision / cloth-driver
-			// shapes are usually authored without a shader so they never
-			// render in-game; this is the most reliable game-independent
-			// signal we have. Note: under some setups such shapes can still
-			// be made visible (e.g. by re-slotting them into an ARMA), but
-			// the previewer can't reproduce that without ARMA-specific data.
+			// Hide non-rendered helper shapes (SMP / collision / cloth-driver
+			// rigging meshes). The game uses two independent gates and we
+			// mirror both:
+			//   1. Shader property absent — authors strip the shader so the
+			//      shape never reaches the render pipeline.
+			//   2. `BSDismemberSkinInstance` present AND all biped-range
+			//      partitions (30..61) are outside the ARMA's BOD2/BODT
+			//      flag set. The engine only consults dismember partitions
+			//      when the shape carries one; shapes using plain
+			//      `NiSkinInstance` (no partitions) bypass this gate and
+			//      always render. This is why COCO Mysterious Mage shows
+			//      every shape (all use plain `NiSkinInstance`) while
+			//      Paragon Fey Lower's collision is hidden (uses
+			//      `BSDismemberSkinInstance` with partition 32, which is
+			//      not in the ARMA flags).
+			// A shape is hidden when EITHER gate trips.
+			bool hideShape = false;
+			std::string hideReason;
 			if (auto* nifShape = nif.FindBlockByName<NiShape>(shapeName)) {
 				NiShader* shader = nif.GetShader(nifShape);
 				if (!shader) {
-					wxLogMessage("  Hiding outfit shape '%s' (no shader property)", m->shapeName);
-					gls.SetMeshVisibility(m->shapeName, false);
+					hideShape = true;
+					hideReason = "no shader property";
 				}
+				else if (!piece.armaBodySlots.empty() && nifShape->HasSkinInstance()) {
+					auto* skinRef = nifShape->SkinInstanceRef();
+					BSDismemberSkinInstance* dismember = skinRef ? nif.GetHeader().GetBlock<BSDismemberSkinInstance>(*skinRef) : nullptr;
+					if (dismember) {
+						NiVector<BSDismemberSkinInstance::PartitionInfo> partInfo;
+						std::vector<int> triParts;
+						if (nif.GetShapePartitions(nifShape, partInfo, triParts)) {
+							std::set<int> armaSet(piece.armaBodySlots.begin(), piece.armaBodySlots.end());
+							bool hasBipedPart = false;
+							bool anyMatch = false;
+							for (auto& pi : partInfo) {
+								uint16_t p = pi.partID;
+								if (p >= 30 && p <= 61) {
+									hasBipedPart = true;
+									if (armaSet.count(static_cast<int>(p))) {
+										anyMatch = true;
+										break;
+									}
+								}
+							}
+							if (hasBipedPart && !anyMatch) {
+								hideShape = true;
+								hideReason = "biped partitions not in ARMA slots";
+							}
+						}
+					}
+				}
+			}
+			if (hideShape) {
+				wxLogMessage("  Hiding outfit shape '%s' (%s)", m->shapeName, hideReason);
+				gls.SetMeshVisibility(m->shapeName, false);
 			}
 			if (std::find(outfitShapeNames.begin(), outfitShapeNames.end(), m->shapeName) == outfitShapeNames.end())
 				outfitShapeNames.push_back(m->shapeName);
