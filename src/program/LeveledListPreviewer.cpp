@@ -2060,9 +2060,23 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 			// Pass original shapeName for texture override matching (overrides use NIF shape names)
 			bool hasTexture = AddNifShapeTextures(&nif, shapeName, overrides, m->shapeName);
 			if (!hasTexture) {
+				// Track for the "Show untextured" toggle but do NOT hide the
+				// shape: missing textures should be visible as the default
+				// untextured material (mirrors BodySlide's preview behaviour).
 				untexturedShapes.push_back(m->shapeName);
-				if (!showUntextured) {
-					wxLogWarning("  HIDING shape '%s' (no diffuse)", wxString(m->shapeName));
+			}
+
+			// Hide shapes that have no shader property (typically
+			// BSLightingShaderProperty). SMP / collision / cloth-driver
+			// shapes are usually authored without a shader so they never
+			// render in-game; this is the most reliable game-independent
+			// signal we have. Note: under some setups such shapes can still
+			// be made visible (e.g. by re-slotting them into an ARMA), but
+			// the previewer can't reproduce that without ARMA-specific data.
+			if (auto* nifShape = nif.FindBlockByName<NiShape>(shapeName)) {
+				NiShader* shader = nif.GetShader(nifShape);
+				if (!shader) {
+					wxLogMessage("  Hiding outfit shape '%s' (no shader property)", m->shapeName);
 					gls.SetMeshVisibility(m->shapeName, false);
 				}
 			}
@@ -2104,20 +2118,6 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 					}
 					if (!partIds.empty()) {
 						bodyShapePartMap[m->shapeName] = partIds;
-
-						// Dismember partitions don't gate rendering in-game.
-						// We used to hide outfit shapes whose partition is
-						// 32/33/37 when the piece's ARMO doesn't claim that
-						// slot, on the assumption that such shapes were body
-						// duplicates bundled into a cloak/hood NIF. That
-						// heuristic is wrong: many outfit authors use
-						// partition 32 as a generic rigging partition for
-						// every shape (e.g. COCO Mysterious Mage), so the
-						// filter ends up hiding nearly all outfit shapes.
-						// Untextured rigging ghosts (VirtualBody/VirtualHands)
-						// are already filtered by the "no diffuse" check
-						// above. Race body shape duplication is handled
-						// downstream by ReconcileBodyAndOutfitShapes.
 						wxLogMessage("  Outfit shape '%s' partitions: [%s]", m->shapeName, partList);
 					}
 				}

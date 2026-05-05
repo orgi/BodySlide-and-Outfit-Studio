@@ -52,6 +52,12 @@ struct OutfitPiece {
 	std::string nifPath;   // MOD2 (female model) path, relative to Data/
 	std::string armorType; // "Light Armor", "Heavy Armor", "Clothing"
 	std::vector<int> bodySlots;
+	// Body slots declared by the source ARMA's BOD2/BODT flags. The ARMA flags
+	// are typically a superset of the ARMO flags and include every dismember
+	// partition the NIF's shapes use. The game appears to render shapes only
+	// when their dismember partition is present in the ARMA's flag set; we
+	// mirror this in the previewer to hide rigging-only / collision shapes.
+	std::vector<int> armaBodySlots;
 	std::vector<TextureOverride> textureOverrides; // per-shape texture swaps from ARMA MO3S
 	int useAnyGroup = -1;						   // "Use Any" variant group ID (-1 = not in a group)
 	int useAnyVariant = -1;						   // variant index within the group (-1 = not in a group)

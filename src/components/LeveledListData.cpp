@@ -723,6 +723,12 @@ static void AddPiecesFromArmo(uint32_t formId,
 			// (e.g. ARMOs that bundle one ARMA per race).
 			piece.armaRaceFormId = arma->raceFormId;
 			piece.armaAdditionalRaceFormIds = arma->additionalRaceFormIds;
+			// Capture the ARMA's body slot flags. They are usually a superset
+			// of the ARMO flags and list every dismember partition the NIF's
+			// shapes are allowed to use — used by the previewer to hide shapes
+			// (e.g. SMP/collision rigging meshes) whose partition isn't
+			// covered by this ARMA.
+			piece.armaBodySlots = DecodeBodySlots(arma->bodySlotFlags);
 
 			auto& altTexList = arma->altTexFemale.empty() ? arma->altTexMale : arma->altTexFemale;
 			for (auto& at : altTexList) {
