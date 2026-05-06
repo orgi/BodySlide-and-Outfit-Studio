@@ -10279,61 +10279,52 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 			// The Skyrim engine only renders NIF shapes whose partID is in the
 			// owning ARMA's BOD2 slot list, so any mismatch makes the shape
 			// invisible in-game (and likewise hidden by the LL previewer's
-			// partition filter). Only partitions that the original ARMA claimed
-			// are rewritten — collision/SMP partitions keep their partIDs.
+			// partition filter). The "Hidden" checkbox in the dialog already
+			// segregates collision/SMP shapes (which keep their partIDs and
+			// stay out of the new BOD2 mask), so for any non-hidden shape we
+			// rewrite EVERY partition to the user-chosen slot. This also
+			// covers the in-place fix-up case where the source mesh's partID
+			// wasn't in the original ARMA's BOD2 list to begin with (the
+			// exact misconfiguration the user is repairing).
 			// Plain NiSkinInstance is converted to BSDismemberSkinInstance via
 			// nifly's SetShapePartitions convertSkinInstance path when needed.
 			auto* si = nif.GetHeader().GetBlock<nifly::NiSkinInstance>(*s->SkinInstanceRef());
 			auto* ds = dynamic_cast<nifly::BSDismemberSkinInstance*>(si);
 			if (ds) {
 				std::string before, after;
-				int rewritten = 0, skipped = 0;
+				int rewritten = 0;
 				for (auto& p : ds->partitions) {
 					if (!before.empty())
 						before += ",";
 					before += std::to_string(p.partID);
-					if (originalClaimedSlots.count(p.partID) > 0) {
-						p.partID = shapeSlot;
-						++rewritten;
-					}
-					else {
-						++skipped;
-					}
+					p.partID = shapeSlot;
+					++rewritten;
 					if (!after.empty())
 						after += ",";
 					after += std::to_string(p.partID);
 				}
-				wxLogMessage("Modularize: shape '%s' partID [%s] -> [%s] slot=%u (rewritten=%d, skipped=%d, group '%s')",
+				wxLogMessage("Modularize: shape '%s' partID [%s] -> [%s] slot=%u (rewritten=%d, group '%s')",
 							 sn.c_str(),
 							 before.c_str(),
 							 after.c_str(),
 							 shapeSlot,
 							 rewritten,
-							 skipped,
 							 g.partName.c_str());
 			}
 			else if (si) {
 				nifly::NiVector<nifly::BSDismemberSkinInstance::PartitionInfo> partInfo;
 				std::vector<int> triParts;
 				if (nif.GetShapePartitions(s, partInfo, triParts)) {
-					bool anyRewritten = false;
-					for (auto& p : partInfo) {
-						if (originalClaimedSlots.count(p.partID) > 0) {
-							p.partID = shapeSlot;
-							anyRewritten = true;
-						}
-					}
+					for (auto& p : partInfo)
+						p.partID = shapeSlot;
 					if (partInfo.empty()) {
 						nifly::BSDismemberSkinInstance::PartitionInfo pi;
 						pi.partID = shapeSlot;
 						partInfo.push_back(pi);
 						triParts.assign(triParts.size(), 0);
-						anyRewritten = true;
 					}
-					if (anyRewritten) {
-						nif.SetShapePartitions(s, partInfo, triParts, true);
-						wxLogMessage("Modularize: shape '%s' converted NiSkinInstance to BSDismember partID=%u (group '%s')", sn.c_str(), shapeSlot, g.partName.c_str());
-					}
+					nif.SetShapePartitions(s, partInfo, triParts, true);
+					wxLogMessage("Modularize: shape '%s' converted NiSkinInstance to BSDismember partID=%u (group '%s')", sn.c_str(), shapeSlot, g.partName.c_str());
 				}
 			}
 		}
