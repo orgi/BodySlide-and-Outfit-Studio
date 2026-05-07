@@ -37,6 +37,54 @@ static std::string ReadString(const std::vector<uint8_t>& data) {
 	return std::string(reinterpret_cast<const char*>(data.data()), len);
 }
 
+// Convert a Windows-1252 byte string to UTF-8. Non-localized Skyrim plugins
+// store FULL/DESC text in cp1252 (e.g. 0xB4 = ´). Returning the raw bytes as a
+// std::string yields invalid UTF-8 which wxString::FromUTF8 silently rejects,
+// resulting in empty UI labels. cp1252 is identical to Latin-1 except in the
+// 0x80–0x9F range; we map those code points explicitly. Bytes that have no
+// cp1252 mapping (0x81, 0x8D, 0x8F, 0x90, 0x9D) are passed through as Latin-1.
+static std::string Cp1252ToUtf8(const std::string& in) {
+	// Code points for 0x80..0x9F in Windows-1252 (0 means "no mapping" — use byte).
+	static const uint16_t cp1252[32] = {
+		0x20AC, 0x0000, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
+		0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0x0000, 0x017D, 0x0000,
+		0x0000, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+		0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x0000, 0x017E, 0x0178,
+	};
+	std::string out;
+	out.reserve(in.size());
+	bool needsConvert = false;
+	for (unsigned char b : in) {
+		if (b >= 0x80) {
+			needsConvert = true;
+			break;
+		}
+	}
+	if (!needsConvert)
+		return in;
+	for (unsigned char b : in) {
+		uint32_t cp;
+		if (b < 0x80) {
+			out.push_back(static_cast<char>(b));
+			continue;
+		}
+		if (b >= 0x80 && b <= 0x9F && cp1252[b - 0x80] != 0)
+			cp = cp1252[b - 0x80];
+		else
+			cp = b; // Latin-1 fallback (covers 0xA0..0xFF and unmapped 0x8x/0x9x)
+		if (cp < 0x800) {
+			out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+			out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+		}
+		else {
+			out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+			out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+			out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+		}
+	}
+	return out;
+}
+
 template<typename T>
 static T ReadLE(const uint8_t* p) {
 	T val;
@@ -148,7 +196,8 @@ std::string Record::FullName() const {
 		snprintf(buf, sizeof(buf), "[LSTRING:%08X]", idx);
 		return buf;
 	}
-	return ReadString(sr->data);
+	// Plugin FULL strings are Windows-1252; convert so the UI / wxString get valid UTF-8.
+	return Cp1252ToUtf8(ReadString(sr->data));
 }
 
 std::vector<const Subrecord*> Record::GetSubrecords(const std::string& srType) const {
@@ -780,7 +829,8 @@ std::string ESPReader::ResolveFullName(const Record& rec) const {
 			return it->second;
 		return {}; // Unresolved localized string — treat as no name
 	}
-	return ReadString(sr->data);
+	// Inline FULL is Windows-1252 in non-localized plugins; convert to UTF-8.
+	return Cp1252ToUtf8(ReadString(sr->data));
 }
 
 // ---------------------------------------------------------------------------
@@ -874,8 +924,14 @@ std::vector<ArmorRecord> ESPReader::GetArmors() const {
 
 	for (uint32_t fid : it->second) {
 		auto rit = records.find(fid);
-		if (rit != records.end())
-			result.push_back(ParseArmor(rit->second));
+		if (rit != records.end()) {
+			auto ar = ParseArmor(rit->second);
+			// Override with lstring-resolved name when this ESP is localized;
+			// ParseArmor only sees the raw FULL subrecord and emits an
+			// "[LSTRING:########]" placeholder for 4-byte localized indices.
+			ar.fullName = ResolveFullName(rit->second);
+			result.push_back(std::move(ar));
+		}
 	}
 	return result;
 }
