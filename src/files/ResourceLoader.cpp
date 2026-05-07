@@ -5,6 +5,7 @@ See the included LICENSE file
 
 #include "../render/GLMaterial.h"
 #include "../utils/ConfigurationManager.h"
+#include "../utils/StringStuff.h"
 
 #include "../FSEngine/FSEngine.h"
 #include "../FSEngine/FSManager.h"
@@ -30,7 +31,20 @@ GLuint ResourceLoader::LoadTexture(const std::string& inFileName, bool isCubeMap
 			return ti->second;
 	}
 
-	wxFileName fileName(inFileName);
+	// On case-sensitive filesystems (Linux), texture paths embedded in NIFs/materials
+	// may differ in case from the actual file on disk. Resolve a case-insensitive
+	// match before handing the path to the loaders. No-op on Windows / when the file
+	// already exists exactly as given.
+	std::string diskFileName = inFileName;
+	if (!wxFileName::FileExists(wxString::FromUTF8(inFileName))) {
+		std::string resolved = ResolveCaseInsensitivePath(inFileName);
+		if (!resolved.empty() && resolved != inFileName) {
+			wxLogMessage("Resolved texture '%s' to '%s' via case-insensitive lookup.", inFileName, resolved);
+			diskFileName = resolved;
+		}
+	}
+
+	wxFileName fileName(diskFileName);
 	wxString fileExt = fileName.GetExt().Lower();
 	std::string fileExtStr = std::string(fileExt.c_str());
 
@@ -42,15 +56,15 @@ GLuint ResourceLoader::LoadTexture(const std::string& inFileName, bool isCubeMap
 
 	// All textures (GLI)
 	if (fileExtStr == "dds" || fileExtStr == "ktx")
-		textureID = GLI_load_texture(inFileName, textureID);
+		textureID = GLI_load_texture(diskFileName, textureID);
 
 	// Cubemap fallback (SOIL)
 	if (!textureID && isCubeMap)
-		textureID = SOIL_load_OGL_single_cubemap(inFileName.c_str(), SOIL_DDS_CUBEMAP_FACE_ORDER, SOIL_LOAD_AUTO, textureID, SOIL_FLAG_GL_MIPMAPS);
+		textureID = SOIL_load_OGL_single_cubemap(diskFileName.c_str(), SOIL_DDS_CUBEMAP_FACE_ORDER, SOIL_LOAD_AUTO, textureID, SOIL_FLAG_GL_MIPMAPS);
 
 	// Texture and image fallback (SOIL)
 	if (!textureID)
-		textureID = SOIL_load_OGL_texture(inFileName.c_str(), SOIL_LOAD_AUTO, textureID, SOIL_FLAG_TEXTURE_REPEATS | SOIL_FLAG_MIPMAPS | SOIL_FLAG_GL_MIPMAPS);
+		textureID = SOIL_load_OGL_texture(diskFileName.c_str(), SOIL_LOAD_AUTO, textureID, SOIL_FLAG_TEXTURE_REPEATS | SOIL_FLAG_MIPMAPS | SOIL_FLAG_GL_MIPMAPS);
 
 	if (!textureID && Config.MatchValue("BSATextureScan", "true")) {
 		if (Config["GameDataPath"].empty()) {

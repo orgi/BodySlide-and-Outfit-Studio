@@ -1,5 +1,6 @@
 #include "StringStuff.h"
 #include <cctype>
+#include <filesystem>
 #include <sstream>
 
 bool StringsEqualNInsens(const char* a, const char* b, int len) {
@@ -76,4 +77,93 @@ std::string JoinStrings(const std::vector<std::string>& elements, const char* co
 			os << *elements.rbegin();
 			return os.str();
 	}
+}
+
+namespace {
+bool IEqualsAscii(const std::string& a, const std::string& b) {
+	if (a.size() != b.size())
+		return false;
+	for (size_t i = 0; i < a.size(); ++i) {
+		if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i])))
+			return false;
+	}
+	return true;
+}
+} // namespace
+
+std::string ResolveCaseInsensitivePath(const std::string& inPath) {
+	namespace fs = std::filesystem;
+
+	if (inPath.empty())
+		return inPath;
+
+	std::error_code ec;
+	if (fs::exists(fs::u8path(inPath), ec))
+		return inPath;
+
+	// Normalize: convert backslashes to forward slashes for splitting.
+	std::string normalized = inPath;
+	for (char& c : normalized) {
+		if (c == '\\')
+			c = '/';
+	}
+
+	// Detect and preserve a root prefix so the walk starts from a real directory.
+	std::string prefix;
+	size_t startPos = 0;
+	if (normalized.size() >= 1 && normalized[0] == '/') {
+		prefix = "/";
+		startPos = 1;
+	}
+	else if (normalized.size() >= 3 && std::isalpha(static_cast<unsigned char>(normalized[0])) && normalized[1] == ':' && normalized[2] == '/') {
+		prefix = normalized.substr(0, 3);
+		startPos = 3;
+	}
+
+	// Split remaining components on '/'.
+	std::vector<std::string> components;
+	std::string cur;
+	for (size_t i = startPos; i < normalized.size(); ++i) {
+		if (normalized[i] == '/') {
+			if (!cur.empty())
+				components.push_back(cur);
+			cur.clear();
+		}
+		else {
+			cur += normalized[i];
+		}
+	}
+	if (!cur.empty())
+		components.push_back(cur);
+
+	if (components.empty())
+		return {};
+
+	fs::path resolved = fs::u8path(prefix.empty() ? std::string(".") : prefix);
+
+	for (const std::string& comp : components) {
+		// Try exact match first (fast path).
+		fs::path candidate = resolved / fs::u8path(comp);
+		if (fs::exists(candidate, ec)) {
+			resolved = candidate;
+			continue;
+		}
+
+		// Case-insensitive scan of the current directory.
+		bool found = false;
+		if (fs::is_directory(resolved, ec)) {
+			for (fs::directory_iterator it(resolved, ec), end; !ec && it != end; it.increment(ec)) {
+				const std::string name = it->path().filename().u8string();
+				if (IEqualsAscii(name, comp)) {
+					resolved = it->path();
+					found = true;
+					break;
+				}
+			}
+		}
+		if (!found)
+			return {};
+	}
+
+	return resolved.u8string();
 }

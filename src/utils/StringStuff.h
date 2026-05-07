@@ -37,6 +37,12 @@ std::vector<std::string> SplitString(const std::string& s, const char delim);
 /* JoinStrings: joins a vector of strings into one string with separators */
 std::string JoinStrings(const std::vector<std::string>& elements, const char* const separator);
 
+/* ResolveCaseInsensitivePath: on case-sensitive filesystems (Linux), returns a path
+that resolves to an existing file by matching path components case-insensitively.
+Returns the input path unchanged if it already exists, or an empty string if no
+match is found. Works with absolute Linux paths and Windows drive paths. */
+std::string ResolveCaseInsensitivePath(const std::string& path);
+
 /* case_insensitive_compare: can be used for maps and more */
 struct case_insensitive_compare {
 	struct nocase_compare {
