@@ -9848,6 +9848,20 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		}
 	}
 
+	// Skyrim dismember partition IDs use two interchangeable ranges for the
+	// same biped slot: 30..61 (direct) and 130..161 (with the +100
+	// "skin-modifying" offset). BOD2/BODT only encodes 32 bits covering
+	// slots 30..61, so any 130..161 input must be folded back to 30..61 when
+	// building the slot mask. Anything outside both ranges is invalid for
+	// BOD2 and yields a 0 bit (caller logs a warning).
+	auto normalizeBipedSlot = [](uint32_t slot) -> int {
+		if (slot >= 30 && slot <= 61)
+			return static_cast<int>(slot);
+		if (slot >= 130 && slot <= 161)
+			return static_cast<int>(slot - 100);
+		return -1;
+	};
+
 	auto updateWarn = [&](wxTextCtrl* t, wxStaticText* w) {
 		std::string val = t->GetValue().ToStdString();
 		int slotNum = -1;
@@ -9856,8 +9870,13 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		}
 		catch (...) {
 		}
-		if (usedSlots.count(slotNum)) {
-			w->SetLabel(wxString::Format(_("In use by: %s"), wxString::FromUTF8(usedSlots[slotNum])));
+		int normSlot = slotNum >= 0 ? normalizeBipedSlot(static_cast<uint32_t>(slotNum)) : -1;
+		if (normSlot < 0) {
+			w->SetLabel(_("Invalid slot (use 30-61 or 130-161)"));
+			w->SetForegroundColour(*wxRED);
+		}
+		else if (usedSlots.count(normSlot)) {
+			w->SetLabel(wxString::Format(_("In use by: %s"), wxString::FromUTF8(usedSlots[normSlot])));
 			w->SetForegroundColour(*wxYELLOW);
 		}
 		else
@@ -9898,9 +9917,11 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 	auto isOriginallyHidden = [&](const std::vector<uint16_t>& partIds) {
 		if (partIds.empty())
 			return false;
-		for (uint16_t id : partIds)
-			if (originalClaimedSlots.count(id) > 0)
+		for (uint16_t id : partIds) {
+			int norm = normalizeBipedSlot(id);
+			if (norm >= 0 && originalClaimedSlots.count(static_cast<uint16_t>(norm)) > 0)
 				return false;
+		}
 		return true;
 	};
 
@@ -9939,7 +9960,7 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		addHeader(_("Shape Name"));
 		addHeader(_("Hidden"));
 		addHeader(_("Part Suffix"));
-		addHeader(_("New Slot"));
+		addHeader(_("BOD2 Slot (30-61)"));
 		addHeader(_("Name in BodySlide"));
 		addHeader(_("Name in Game"));
 		addHeader(_("Nif File Name"));
@@ -10074,14 +10095,24 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		bool selected = selectedSet.count(sName) > 0;
 		std::vector<uint16_t> partIds = getShapePartIds(sName);
 		bool hiddenDefault = isOriginallyHidden(partIds);
+		// Pre-fill the textbox with the BOD2-canonical slot number (30-61),
+		// folding any NIF +100 partID (130-161) back to the matching biped slot.
+		// Skyrim BOD2 only encodes slots 30-61; the +100 form is a NIF
+		// dismember convention, not a separate slot. Showing 31 (not 131) here
+		// matches what xEdit/CK display and prevents user confusion about why
+		// the saved ESP says slot 31.
 		uint32_t slotDefault = 0;
-		for (uint16_t id : partIds)
-			if (originalClaimedSlots.count(id) > 0) {
-				slotDefault = id;
+		for (uint16_t id : partIds) {
+			int norm = normalizeBipedSlot(id);
+			if (norm >= 0 && originalClaimedSlots.count(static_cast<uint16_t>(norm)) > 0) {
+				slotDefault = static_cast<uint32_t>(norm);
 				break;
 			}
-		if (slotDefault == 0 && !partIds.empty())
-			slotDefault = partIds.front();
+		}
+		if (slotDefault == 0 && !partIds.empty()) {
+			int norm = normalizeBipedSlot(partIds.front());
+			slotDefault = norm >= 0 ? static_cast<uint32_t>(norm) : partIds.front();
+		}
 		if (slotDefault == 0)
 			slotDefault = 32;
 
@@ -10169,8 +10200,15 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 		}
 		else {
 			it->second.shapeSlots[ctrl.originalName] = shapeSlot;
-			if (shapeSlot >= 30 && shapeSlot <= 61)
-				it->second.slotMask |= (1u << (shapeSlot - 30));
+			int normSlot = normalizeBipedSlot(shapeSlot);
+			if (normSlot >= 30 && normSlot <= 61) {
+				it->second.slotMask |= (1u << (normSlot - 30));
+			}
+			else {
+				wxLogMessage("Modularize: WARNING shape '%s' slot %u is outside the BOD2-encodable ranges (30-61 / 130-161); not contributing to ARMA/ARMO body-slot mask.",
+							 ctrl.originalName.c_str(),
+							 shapeSlot);
+			}
 		}
 	}
 
@@ -10647,6 +10685,7 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 					memcpy(out.data(), &newCount, 4);
 					sr.data = std::move(out);
 				};
+				bool armaBodWritten = false;
 				for (auto& sr : newArma.subrecords) {
 					if (sr.type == "EDID") {
 						std::string s = sanitize(ms.arma.editorId + "_" + g.partName);
@@ -10659,12 +10698,26 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 						sr.data.push_back('\0');
 					}
 					else if (sr.type == "BOD2" || sr.type == "BODT") {
-						if (sr.data.size() >= 4)
+						if (sr.data.size() >= 4) {
 							memcpy(sr.data.data(), &slotMask, 4);
+							armaBodWritten = true;
+							wxLogMessage("Modularize: ARMA %s wrote slotMask=%08X to %s (size=%zu)", ms.arma.editorId.c_str(), slotMask, sr.type.c_str(), sr.data.size());
+						}
+						else {
+							wxLogMessage("Modularize: ARMA %s has %s with size %zu < 4, cannot write slot mask", ms.arma.editorId.c_str(), sr.type.c_str(), sr.data.size());
+						}
 					}
 					else if (sr.type == "MO2S" || sr.type == "MO3S" || sr.type == "MO4S" || sr.type == "MO5S") {
 						remapAltTex(sr);
 					}
+				}
+				if (!armaBodWritten) {
+					wxLogMessage("Modularize: ARMA %s has NO BOD2/BODT subrecord; injecting BOD2 with slotMask=%08X", ms.arma.editorId.c_str(), slotMask);
+					esp::Subrecord bod2;
+					bod2.type = "BOD2";
+					bod2.data.resize(4);
+					memcpy(bod2.data.data(), &slotMask, 4);
+					newArma.subrecords.push_back(std::move(bod2));
 				}
 				// Drop alternate-texture subrecords that ended up empty after remap so the
 				// engine doesn't see a zero-count placeholder.
@@ -10686,6 +10739,7 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 					if (!srcArmoRec)
 						continue;
 					esp::Record newArmo = esp::ESPWriter::CloneRecord(*srcArmoRec, isBase ? armo.formId : 0);
+					bool armoBodWritten = false;
 					for (auto& sr : newArmo.subrecords) {
 						if (sr.type == "EDID") {
 							std::string s = sanitize(armo.editorId + "_" + g.partName);
@@ -10718,9 +10772,27 @@ void OutfitStudioFrame::OnModularizeShapes(wxCommandEvent& WXUNUSED(event)) {
 								sr.data.assign((uint8_t*)&aFid, (uint8_t*)&aFid + 4);
 						}
 						else if (sr.type == "BOD2" || sr.type == "BODT") {
-							if (sr.data.size() >= 4)
+							if (sr.data.size() >= 4) {
 								memcpy(sr.data.data(), &slotMask, 4);
+								armoBodWritten = true;
+								wxLogMessage("Modularize: ARMO %s wrote slotMask=%08X to %s (size=%zu)", armo.editorId.c_str(), slotMask, sr.type.c_str(), sr.data.size());
+							}
+							else {
+								wxLogMessage("Modularize: ARMO %s has %s with size %zu < 4, cannot write slot mask", armo.editorId.c_str(), sr.type.c_str(), sr.data.size());
+							}
 						}
+					}
+					if (!armoBodWritten) {
+						wxLogMessage("Modularize: ARMO %s has NO BOD2/BODT subrecord; injecting BOD2 with slotMask=%08X", armo.editorId.c_str(), slotMask);
+						esp::Subrecord bod2;
+						bod2.type = "BOD2";
+						// ARMO BOD2 is 8 bytes: 4 bytes body part flags + 4 bytes armor type.
+						// Armor type defaults to 0 (Light) when we have to fabricate the subrecord;
+						// the source clone was missing BOD2 entirely (e.g. ITPO override) so there
+						// is no prior armor type value to preserve.
+						bod2.data.resize(8, 0);
+						memcpy(bod2.data.data(), &slotMask, 4);
+						newArmo.subrecords.push_back(std::move(bod2));
 					}
 					writer.AddRecord(newArmo);
 				}
