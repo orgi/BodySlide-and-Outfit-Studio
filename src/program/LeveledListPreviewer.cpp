@@ -850,6 +850,19 @@ void LeveledListPreviewer::ReconcileBodyAndOutfitShapes() {
 		}
 	}
 
+	// Also treat slots declared by the outfit ARMOs' BOD2 as covered, even when
+	// the bundled NIF shapes carry different partitions (common for high heels
+	// and gauntlets that paint themselves with partition 32 but whose ARMA BOD2
+	// explicitly claims slot 37 / 33). This matches game behaviour: the engine
+	// uses the ARMA slot mask to suppress race body shapes, not the NIF
+	// partitions. Example: Vin Valkyrie boots NIF shapes are tagged [32], but
+	// the ARMA declares slot 37 — without this union the race Feet shape would
+	// clip through the boots.
+	for (int slot : {32, 33, 37}) {
+		if (outfitDeclaredSlots.count(slot))
+			outfitCoveredSlots.insert(static_cast<uint16_t>(slot));
+	}
+
 	if (!outfitCoveredSlots.empty()) {
 		std::string covered;
 		for (uint16_t p : outfitCoveredSlots) {
