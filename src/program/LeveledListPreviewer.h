@@ -53,6 +53,11 @@ class LeveledListPreviewer : public wxFrame {
 	std::unordered_map<std::string, wxCheckBox*> meshCheckboxes; // shapeName → checkbox
 	std::unordered_map<std::string, std::string> shapeNifSource; // shapeName → source NIF path
 	std::unordered_map<std::string, std::string> shapeArmoName;	 // shapeName → ARMO display name
+	// shapeName → ARMO BOD2 slot list (e.g. {31} for hair, {32} for body).
+	// Used by ApplyRaceBodyPartVisibility to hide race body parts / hair only
+	// when a currently-visible outfit shape's piece actually claims that slot.
+	// Mirrors `OutfitPiece.bodySlots` for each loaded shape of the piece.
+	std::unordered_map<std::string, std::vector<int>> shapeArmoBodySlots;
 	// Resolved texture file paths (slot 0 = diffuse, ..., 9 = MAX) per shape,
 	// captured from BSShaderTextureSet + BGSM/BGEM + ESP TXST overrides at the
 	// moment AddNifShapeTextures built the GLMaterial. Used by
@@ -209,6 +214,12 @@ private:
 	// - Hide race body shapes whose dismember slot is already covered by an outfit shape.
 	// - Apply the NPC's WNAM/race skin TXST to outfit body shapes that occupy body slots.
 	void ReconcileBodyAndOutfitShapes();
+	// Show/hide race-loaded body parts (body, hands, feet) and the NPC hair
+	// based on which outfit shapes are CURRENTLY VISIBLE. Decisions follow
+	// what is shown — not what the outfit declares — so toggling an outfit
+	// piece's shape off via the overlay re-reveals the corresponding race
+	// body part (and toggling it back on re-hides it).
+	void ApplyRaceBodyPartVisibility();
 	void UpdateHeadVisibility();
 	void UpdateActiveSlotsAndVisibility();
 	void LoadPresetList();

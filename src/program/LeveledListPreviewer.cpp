@@ -838,7 +838,11 @@ void LeveledListPreviewer::ReconcileBodyAndOutfitShapes() {
 	if (outfitShapeNames.empty())
 		return;
 
-	// Set of dismember slot IDs that any outfit shape occupies.
+	// Set of dismember slot IDs that any outfit shape occupies. Used below
+	// only for choosing which race-shape textures to copy onto outfit body
+	// shapes (the visibility hide decision now lives in
+	// ApplyRaceBodyPartVisibility, which keys off currently-shown outfit
+	// shapes so per-shape overlay toggles can re-reveal hidden body parts).
 	std::set<uint16_t> outfitCoveredSlots;
 	std::set<std::string> outfitShapeSet(outfitShapeNames.begin(), outfitShapeNames.end());
 	for (auto& [name, partIds] : bodyShapePartMap) {
@@ -873,23 +877,10 @@ void LeveledListPreviewer::ReconcileBodyAndOutfitShapes() {
 		wxLogMessage("ReconcileBodyAndOutfitShapes: outfit covers body slots [%s]", covered);
 	}
 
-	// Hide race-loaded body shapes that duplicate outfit-bundled body parts.
-	for (auto& raceShape : bodyShapeNames) {
-		auto it = bodyShapePartMap.find(raceShape);
-		if (it == bodyShapePartMap.end())
-			continue;
-		bool overlap = false;
-		for (uint16_t p : it->second) {
-			if (outfitCoveredSlots.count(p)) {
-				overlap = true;
-				break;
-			}
-		}
-		if (overlap) {
-			wxLogMessage("  Hiding race body shape '%s' (covered by outfit)", raceShape);
-			gls.SetMeshVisibility(raceShape, false);
-		}
-	}
+	// Drive race body / hair visibility from the set of currently visible
+	// outfit shapes (mirrors the user's overlay state instead of the outfit's
+	// declared slot union).
+	ApplyRaceBodyPartVisibility();
 
 	// Apply NPC/race skin TXST (or, when no ESP TXST was found, the textures
 	// captured from the race body NIF's BSShaderTextureSet) to outfit body
@@ -1490,30 +1481,80 @@ void LeveledListPreviewer::OnHeadEntered(wxCommandEvent& WXUNUSED(event)) {
 // ---------------------------------------------------------------------------
 
 void LeveledListPreviewer::UpdateHeadVisibility() {
-	if (headShapeNames.empty())
+	// Hair (slot 31) and the race body parts (slots 32/33/37) are now driven
+	// by ApplyRaceBodyPartVisibility, which inspects currently visible outfit
+	// shapes rather than the outfit's declared-slot union.
+	ApplyRaceBodyPartVisibility();
+}
+
+void LeveledListPreviewer::ApplyRaceBodyPartVisibility() {
+	if (bodyShapeNames.empty() && headShapeNames.empty())
 		return;
 
-	// According to the user, ONLY slot 31 is the hair slot.
-	bool hideHair = outfitDeclaredSlots.count(31) != 0;
-
-	for (const auto& meshName : headShapeNames) {
-		Mesh* m = gls.GetMesh(meshName);
-		if (!m)
+	// Gather slot coverage from currently VISIBLE outfit shapes only. Slots
+	// 32/33/37 may be contributed by either NIF dismember partitions or by
+	// the piece's ARMO BOD2; slot 31 (hair) is BOD2-only because hair-
+	// covering pieces (hoods, helms) rarely paint partition 31 on their
+	// own geometry.
+	std::set<int> shownSlots;
+	for (auto& sn : outfitShapeNames) {
+		Mesh* m = gls.GetMesh(sn);
+		if (!m || !m->bVisible)
 			continue;
-
-		bool visible = true;
-		auto it = bodyShapePartMap.find(meshName);
-		if (it != bodyShapePartMap.end()) {
-			// ONLY hide if it's a hair slot (31) AND the outfit includes it (31).
-			if (it->second.count(31)) {
-				if (hideHair) {
-					visible = false;
-				}
+		auto pit = bodyShapePartMap.find(sn);
+		if (pit != bodyShapePartMap.end()) {
+			for (uint16_t p : pit->second) {
+				if (p == 32 || p == 33 || p == 37)
+					shownSlots.insert(static_cast<int>(p));
 			}
 		}
+		auto sit = shapeArmoBodySlots.find(sn);
+		if (sit != shapeArmoBodySlots.end()) {
+			for (int s : sit->second) {
+				if (s == 31 || s == 32 || s == 33 || s == 37)
+					shownSlots.insert(s);
+			}
+		}
+	}
 
-		if (m->bVisible != visible) {
-			m->bVisible = visible;
+	// Race body parts (32/33/37): hide if a visible outfit shape covers the
+	// slot. Honour the global `showBody` toggle as an upper bound.
+	for (auto& raceShape : bodyShapeNames) {
+		auto it = bodyShapePartMap.find(raceShape);
+		if (it == bodyShapePartMap.end())
+			continue;
+		bool overlap = false;
+		for (uint16_t p : it->second) {
+			if ((p == 32 || p == 33 || p == 37) && shownSlots.count(static_cast<int>(p))) {
+				overlap = true;
+				break;
+			}
+		}
+		bool desired = showBody && !overlap;
+		Mesh* m = gls.GetMesh(raceShape);
+		if (m && m->bVisible != desired) {
+			gls.SetMeshVisibility(raceShape, desired);
+			wxLogMessage("ApplyRaceBodyPartVisibility: race body shape '%s' -> %s", raceShape, desired ? "show" : "hide");
+			auto cbIt = meshCheckboxes.find(raceShape);
+			if (cbIt != meshCheckboxes.end() && cbIt->second)
+				cbIt->second->SetValue(desired);
+		}
+	}
+
+	// Hair (slot 31): only the head shapes that carry partition 31.
+	bool hideHair = shownSlots.count(31) != 0;
+	for (const auto& meshName : headShapeNames) {
+		auto it = bodyShapePartMap.find(meshName);
+		if (it == bodyShapePartMap.end() || !it->second.count(31))
+			continue;
+		bool desired = !hideHair;
+		Mesh* m = gls.GetMesh(meshName);
+		if (m && m->bVisible != desired) {
+			gls.SetMeshVisibility(meshName, desired);
+			wxLogMessage("ApplyRaceBodyPartVisibility: hair shape '%s' -> %s", meshName, desired ? "show" : "hide");
+			auto cbIt = meshCheckboxes.find(meshName);
+			if (cbIt != meshCheckboxes.end() && cbIt->second)
+				cbIt->second->SetValue(desired);
 		}
 	}
 }
@@ -1890,6 +1931,12 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 			else
 				++it;
 		}
+		for (auto it = shapeArmoBodySlots.begin(); it != shapeArmoBodySlots.end();) {
+			if (isNotHead(it->first))
+				it = shapeArmoBodySlots.erase(it);
+			else
+				++it;
+		}
 
 		untexturedShapes.erase(std::remove_if(untexturedShapes.begin(), untexturedShapes.end(), isNotHead), untexturedShapes.end());
 
@@ -2179,6 +2226,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 				outfitShapeNames.push_back(m->shapeName);
 			shapeNifSource[m->shapeName] = piecePath;
 			shapeArmoName[m->shapeName] = piece.name;
+			shapeArmoBodySlots[m->shapeName] = piece.bodySlots;
 			psi.shapeNames.push_back(m->shapeName);
 			++loadedCount;
 
@@ -2345,6 +2393,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 							shapeNifSource.erase(name);
 							shapeMaterials.erase(name);
 							shapeArmoName.erase(name);
+							shapeArmoBodySlots.erase(name);
 							bodyShapePartMap.erase(name);
 							shapeTexFiles.erase(name);
 						}
@@ -2817,6 +2866,10 @@ void LeveledListPreviewer::RefreshMeshOverlay() {
 					if (cbIt != meshCheckboxes.end() && cbIt->second)
 						cbIt->second->SetValue(vis);
 				}
+				// Re-evaluate race body / hair coverage now that the visible
+				// outfit shape set changed (per-shape toggle may have just
+				// uncovered or covered slots 31/32/33/37).
+				ApplyRaceBodyPartVisibility();
 				gls.RenderOneFrame();
 			});
 			grpSizer->Add(grpCb, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 2);
@@ -2831,6 +2884,9 @@ void LeveledListPreviewer::RefreshMeshOverlay() {
 					std::string nifKey = grp.nifPath;
 					cb->Bind(wxEVT_CHECKBOX, [this, shapeName, nifKey](wxCommandEvent& ev) {
 						gls.SetMeshVisibility(shapeName, ev.IsChecked());
+						// Re-evaluate race body / hair visibility based on the
+						// new set of visible outfit shapes.
+						ApplyRaceBodyPartVisibility();
 						gls.RenderOneFrame();
 					});
 					sizer->Add(cb, 0, wxLEFT | wxBOTTOM, 28);
@@ -2901,6 +2957,8 @@ void LeveledListPreviewer::OnToggleBody(wxCommandEvent& event) {
 	showBody = event.IsChecked();
 	for (auto& name : bodyShapeNames)
 		gls.SetMeshVisibility(name, showBody);
+	// Re-hide race shapes covered by the currently visible outfit.
+	ApplyRaceBodyPartVisibility();
 	SyncMeshOverlayStates();
 	gls.RenderOneFrame();
 }
