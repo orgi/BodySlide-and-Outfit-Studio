@@ -60,7 +60,7 @@ class LeveledListPreviewer : public wxFrame {
 	// outfit-bundled body shapes when the outfit's NIF would otherwise use
 	// vanilla / wrong textures.
 	std::unordered_map<std::string, std::vector<std::string>> shapeTexFiles;
-	std::set<std::string> expandedNifGroups;					 // NIF paths currently expanded in overlay
+	std::set<std::string> expandedNifGroups; // NIF paths currently expanded in overlay
 
 	// "Use Any" variant groups: only one variant per group is shown at a time
 	struct UseAnyVariant {
@@ -98,6 +98,13 @@ class LeveledListPreviewer : public wxFrame {
 	wxString lastESPDirectory;
 	std::string lastESPFilepath;
 	std::unique_ptr<wxFileSystemWatcher> fsWatcher;
+	// Re-entry guard: wxFileSystemWatcher can fire multiple events for a single
+	// ESP rewrite, and wxLog::FlushActive() inside LoadOutfitMeshes pumps the
+	// event loop. Without this guard a queued CallAfter could re-enter
+	// LoadESPFile while LoadOutfitMeshes is still using the old OutfitEntry,
+	// corrupting body/outfit shape state and hiding hands/feet.
+	bool isLoadingESP_ = false;
+	bool reloadPending_ = false;
 
 	// NPC head
 	std::unordered_map<std::string, size_t> npcByDisplay; // displayName → index in data.GetNPCs()

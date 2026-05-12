@@ -287,6 +287,30 @@ void LeveledListPreviewer::OnLoadESP(wxCommandEvent& WXUNUSED(event)) {
 }
 
 void LeveledListPreviewer::LoadESPFile(const std::string& filepath) {
+	// Re-entry guard: wxLog::FlushActive() inside LoadOutfitMeshes can pump
+	// the event loop and dispatch a queued CallAfter from OnFileChanged while
+	// we are still mid-load. Re-entering data.LoadESP() invalidates the
+	// OutfitEntry pointers the outer call is still using.
+	if (isLoadingESP_) {
+		wxLogMessage("LoadESPFile: reentry detected (already loading), deferring '%s'", filepath.c_str());
+		if (!reloadPending_) {
+			reloadPending_ = true;
+			CallAfter([this, filepath]() {
+				reloadPending_ = false;
+				if (!isLoadingESP_)
+					LoadESPFile(filepath);
+			});
+		}
+		return;
+	}
+	isLoadingESP_ = true;
+	struct LoadingGuard {
+		bool& flag;
+		~LoadingGuard() { flag = false; }
+	} loadingGuard{isLoadingESP_};
+
+	wxLogMessage("LoadESPFile: loading '%s'", filepath.c_str());
+
 	std::string baseGamePath = Config["GameDataPath"];
 	if (!baseGamePath.empty() && baseGamePath.back() != '/' && baseGamePath.back() != '\\')
 		baseGamePath += '/';
@@ -383,11 +407,24 @@ void LeveledListPreviewer::OnFileChanged(wxFileSystemWatcherEvent& event) {
 	if (!eventFile.GetFullName().IsSameAs(espFile.GetFullName(), false))
 		return;
 
+	// Coalesce multiple watcher events from a single ESP rewrite (xEdit /
+	// Python scripts typically emit several MODIFY+RENAME events) and skip
+	// while a load is in progress to avoid re-entering data.LoadESP() while
+	// LoadOutfitMeshes is still using OutfitEntry pointers.
+	if (reloadPending_ || isLoadingESP_)
+		return;
+	reloadPending_ = true;
+
 	// Use CallAfter so the event handler returns quickly and the file has
 	// finished being written before we reload.
 	CallAfter([this]() {
-		if (!lastESPFilepath.empty())
+		reloadPending_ = false;
+		if (isLoadingESP_)
+			return;
+		if (!lastESPFilepath.empty()) {
+			wxLogMessage("OnFileChanged: auto-reloading ESP '%s'", lastESPFilepath.c_str());
 			LoadESPFile(lastESPFilepath);
+		}
 	});
 }
 
@@ -1779,6 +1816,8 @@ void LeveledListPreviewer::OnOutfitSelected(wxListEvent& event) {
 	if (sel < 0 || sel >= static_cast<long>(filteredOutfits.size()))
 		return;
 
+	wxLogMessage("OnOutfitSelected: index=%ld name='%s' isLoadingESP=%d", sel, filteredOutfits[sel]->name.c_str(), isLoadingESP_ ? 1 : 0);
+
 	// Persist for reloads/filtering
 	Config.SetValue("LLPreviewer/LastOutfit", filteredOutfits[sel]->name);
 
@@ -1786,6 +1825,7 @@ void LeveledListPreviewer::OnOutfitSelected(wxListEvent& event) {
 }
 
 void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
+	wxLogMessage("LoadOutfitMeshes: outfit='%s' pieces=%zu showBody=%d", outfit.name.c_str(), outfit.pieces.size(), showBody ? 1 : 0);
 	currentOutfit = &outfit;
 	// Stop any running SMP simulation
 	StopSmpSimulation();

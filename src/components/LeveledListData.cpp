@@ -763,6 +763,13 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 	headPartCache.clear();
 	npcSkinOverrides.clear();
 	npcSkinsScanned = false;
+	// dynamicMasters MUST be cleared too: it tracks which plugins were
+	// loaded into raceCache/armoCache via EnsureDynamicMaster. If left
+	// populated across reloads, EnsureDynamicMaster() short-circuits and
+	// returns the cached synthetic index without re-loading the records
+	// into the just-cleared caches, leaving NPC race/skin overrides
+	// unresolvable (e.g. body/hands/feet NIFs disappear after ESP reload).
+	dynamicMasters.clear();
 	espMasters.clear();
 	loadInfo.clear();
 
