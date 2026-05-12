@@ -20,6 +20,7 @@
 #include <wx/combobox.h>
 #include <wx/fswatcher.h>
 #include <wx/listctrl.h>
+#include <wx/notebook.h>
 #include <wx/spinctrl.h>
 #include <wx/splitter.h>
 #include <wx/srchctrl.h>
@@ -95,6 +96,16 @@ class LeveledListPreviewer : public wxFrame {
 	wxComboBox* presetCombo = nullptr;	   // BodySlide preset selector
 	wxCheckBox* highWeightCheck = nullptr; // high (_1) vs low (_0) weight
 	wxListCtrl* outfitList = nullptr;
+	// NPC mode (second notebook tab). The NPC list is sorted by displayName
+	// and lets the user pick any NPC; the selected NPC's default outfit
+	// (DOFT) is rendered alongside the NPC's body / head.
+	wxNotebook* viewNotebook = nullptr;
+	wxListCtrl* npcList = nullptr;
+	wxSearchCtrl* npcSearchCtrl = nullptr;
+	wxButton* loadAllNpcsBtn = nullptr;
+	wxCheckBox* npcHumanoidOnlyCheck = nullptr;
+	wxCheckBox* npcFemaleOnlyCheck = nullptr;
+	std::vector<size_t> filteredNpcIndices; // indices into data.GetNPCs()
 
 	// Data
 	lldata::LeveledListData data;
@@ -173,6 +184,12 @@ public:
 	void OnLevelChanged(wxSpinEvent& event);
 	void OnOutfitSelected(wxListEvent& event);
 
+	// NPC mode events
+	void OnNpcSearchChanged(wxCommandEvent& event);
+	void OnNpcSelected(wxListEvent& event);
+	void OnLoadAllNpcs(wxCommandEvent& event);
+	void OnViewTabChanged(wxBookCtrlEvent& event);
+
 	// Head NPC and preset events
 	void OnHeadEntered(wxCommandEvent& event);
 	void OnPresetChanged(wxCommandEvent& event);
@@ -204,6 +221,12 @@ public:
 private:
 	void LoadESPFile(const std::string& filepath);
 	void RefreshOutfitList();
+	void RefreshNpcList();
+	// Apply an NPC's head + body skin + (optionally) default outfit. Shared
+	// between OnNpcSelected and OnHeadEntered; the legacy head-selector path
+	// passes loadDefaultOutfit=false because in Outfit mode the outfit is
+	// driven by the outfit list, not by the NPC.
+	void SelectNpc(const lldata::NPCEntry& npc, bool loadDefaultOutfit);
 	void LoadOutfitMeshes(const lldata::OutfitEntry& outfit);
 	bool AddNifShapeTextures(nifly::NifFile* nif, const std::string& shapeName, const std::vector<lldata::TextureOverride>* overrides = nullptr, const std::string& meshName = {});
 	bool LoadNifFromPath(const std::string& relativePath, const std::string& prefix = "");
@@ -249,6 +272,12 @@ private:
 		ID_HighWeight,
 		ID_ToggleSmp,
 		ID_SmpTimer,
+		ID_NpcList,
+		ID_NpcSearch,
+		ID_LoadAllNpcs,
+		ID_NpcHumanoidOnly,
+		ID_NpcFemaleOnly,
+		ID_ViewNotebook,
 	};
 };
 

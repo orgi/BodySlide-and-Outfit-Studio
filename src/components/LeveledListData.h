@@ -26,6 +26,7 @@ struct NPCEntry {
 	std::string plugin;		  // e.g. "Skyrim.esm" — NATIVE plugin (defining record)
 	uint32_t wnamFormId = 0;  // WNAM: skin/worn armor FormID (0 = use race default)
 	std::string raceEditorId; // RACE editor id (resolved from RNAM via source plugin)
+	bool isFemale = false;	  // ACBS flag bit 0 (last-writer-wins across overrides)
 	// QNAM — face tint color (sRGB) for skin tinting. Zero = no tint / use defaults.
 	uint8_t tintR = 0;
 	uint8_t tintG = 0;
@@ -38,6 +39,19 @@ struct NPCEntry {
 	// modified the face, so the winning plugin drives the FaceGen NIF path.
 	std::vector<std::pair<std::string, uint32_t>> overrides;
 	std::vector<uint32_t> headParts; // HDPT FormIDs (remapped to main-ESP space)
+	// Default outfit (DOFT subrecord). Raw FormID in `defaultOutfitSourcePlugin`'s
+	// own FormID space (top byte = its master index or selfIndex). 0 = none.
+	// `defaultOutfitSourcePlugin` is the plugin whose NPC_ record we adopted DOFT
+	// from (the last override seen wins, mirroring engine "last writer wins"
+	// semantics for this field). Resolution to OTFT happens lazily in the
+	// previewer when an NPC is selected (see ResolveDefaultOutfit).
+	uint32_t defaultOutfitFormIdRaw = 0;
+	std::string defaultOutfitSourcePlugin;
+	// DOFT remapped into main-ESP master space if the source plugin's masters are
+	// all present in espMasters. 0 = unresolved (e.g. source plugin not loaded as
+	// a master of the currently loaded ESP) — caller may then call
+	// LoadDynamicNpcOutfitChain() to lazy-load the source plugin's records.
+	uint32_t defaultOutfitFormId = 0;
 };
 
 /// Per-shape texture override from ARMA MO3S alternate textures.
@@ -48,6 +62,7 @@ struct TextureOverride {
 
 struct OutfitPiece {
 	std::string name;	   // ARMO full name
+	std::string editorId;  // ARMO editor ID (fallback when FULL is empty)
 	uint32_t formId = 0;   // ARMO FormID
 	std::string nifPath;   // MOD2 (female model) path, relative to Data/
 	std::string armorType; // "Light Armor", "Heavy Armor", "Clothing"
@@ -199,6 +214,20 @@ public:
 	/// Get NPC skin overrides map (editorId -> skin info from all plugins).
 	const std::unordered_map<std::string, NpcSkinInfo>& GetNpcSkinOverrides() const { return npcSkinOverrides; }
 
+	/// Resolve an NPC's default outfit (DOFT) into an OutfitEntry suitable for
+	/// the previewer's existing render pipeline. Returns nullptr if the NPC has
+	/// no DOFT, the OTFT could not be remapped into our caches, or the OTFT is
+	/// unknown. The returned pointer is owned by an internal cache keyed by
+	/// NPC editorId and is valid until the next LoadESP() or LoadNPCs() call.
+	const OutfitEntry* ResolveNpcDefaultOutfit(const NPCEntry& npc);
+
+	/// Scan every ESP/ESM in baseDataPath for natively-defined NPC_ records
+	/// and append them to the NPC list (in addition to the vanilla NPCs loaded
+	/// by LoadNPCs). Duplicates are skipped via the same (nativePlugin,
+	/// baseFormId) key LoadNPCs uses. Called on demand from the previewer's
+	/// "Load all NPCs" action because scanning every mod plugin is slow.
+	void LoadAllPluginNativeNPCs();
+
 private:
 	/// Load records from a single ESP/ESM into the caches.
 	/// masterIndex: the index of this file in the main ESP's master list.
@@ -230,6 +259,14 @@ private:
 	/// Create a stub piece for an unresolved ARMO FormID.
 	static OutfitPiece MakeStubPiece(uint32_t formId);
 
+	/// Build an OutfitEntry from a cached OTFT FormID, resolving INAM entries
+	/// (direct ARMO refs and LVLI chains with Use Any group tracking). Used by
+	/// LoadESP() to build the regular outfit list and by ResolveNpcDefaultOutfit
+	/// to build a per-NPC outfit. `groupCounter` must be the same counter used
+	/// across all builds in a single LoadESP cycle so Use Any group IDs are
+	/// globally unique; `outPieces` / `outUnresolved` receive build statistics.
+	OutfitEntry BuildOutfitFromOtft(uint32_t otftId, int& groupCounter, int* outPieces = nullptr, int* outUnresolved = nullptr) const;
+
 	std::vector<OutfitEntry> outfits;
 	std::vector<NPCEntry> npcs;
 	std::string baseDataPath;
@@ -254,6 +291,11 @@ private:
 	// 0xFE/0xFF since the engine reserves them for ESL-related bookkeeping.
 	std::vector<std::string> dynamicMasters;
 	bool npcSkinsScanned = false;
+
+	// Per-NPC default-outfit cache populated lazily by ResolveNpcDefaultOutfit.
+	// Keyed by NPC editorId. Cleared in LoadESP / LoadNPCs because OTFT FormIDs
+	// remapped into otftCache become stale on reload.
+	mutable std::unordered_map<std::string, OutfitEntry> npcOutfitCache;
 };
 
 // Internal cache structs (defined in .cpp)

@@ -73,34 +73,14 @@ LeveledListPreviewer::LeveledListPreviewer(wxEvtHandler* handler)
 	wxPanel* leftPanel = new wxPanel(splitter);
 	wxBoxSizer* leftSizer = new wxBoxSizer(wxVERTICAL);
 
-	// Search bar
-	searchCtrl = new wxSearchCtrl(leftPanel, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
-	searchCtrl->SetDescriptiveText(_("Search outfits..."));
-	searchCtrl->Bind(wxEVT_SEARCHCTRL_SEARCH_BTN, &LeveledListPreviewer::OnSearchChanged, this);
-	searchCtrl->Bind(wxEVT_TEXT, &LeveledListPreviewer::OnSearchChanged, this);
-	leftSizer->Add(searchCtrl, 0, wxEXPAND | wxALL, 5);
-
-	// Level range controls
-	wxBoxSizer* levelSizer = new wxBoxSizer(wxHORIZONTAL);
-	levelSizer->Add(new wxStaticText(leftPanel, wxID_ANY, _("Level:")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
-	levelMinSpin = new wxSpinCtrl(leftPanel, wxID_ANY, "1", wxDefaultPosition, wxSize(60, -1), wxSP_ARROW_KEYS, 1, 100, 1);
-	levelMaxSpin = new wxSpinCtrl(leftPanel, wxID_ANY, "100", wxDefaultPosition, wxSize(60, -1), wxSP_ARROW_KEYS, 1, 100, 100);
-	levelSizer->Add(levelMinSpin, 0, wxRIGHT, 5);
-	levelSizer->Add(new wxStaticText(leftPanel, wxID_ANY, _("-")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
-	levelSizer->Add(levelMaxSpin, 0);
-
-	levelMinSpin->Bind(wxEVT_SPINCTRL, &LeveledListPreviewer::OnLevelChanged, this);
-	levelMaxSpin->Bind(wxEVT_SPINCTRL, &LeveledListPreviewer::OnLevelChanged, this);
-
-	leftSizer->Add(levelSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
-
-	// NPC head selector
+	// NPC head selector (shared between modes; the head ties Outfit-mode body
+	// skin and is also the NPC selected in NPC mode).
 	wxBoxSizer* headSizer = new wxBoxSizer(wxHORIZONTAL);
 	headSizer->Add(new wxStaticText(leftPanel, wxID_ANY, _("Head:")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
 	headCtrl = new wxTextCtrl(leftPanel, ID_HeadNPC, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
 	headCtrl->SetToolTip(_("Type an NPC editor ID or name and press Enter"));
 	headSizer->Add(headCtrl, 1);
-	leftSizer->Add(headSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
+	leftSizer->Add(headSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP | wxBOTTOM, 5);
 
 	// Preset selector + high/low weight checkbox
 	wxBoxSizer* presetSizer = new wxBoxSizer(wxHORIZONTAL);
@@ -122,9 +102,32 @@ LeveledListPreviewer::LeveledListPreviewer(wxEvtHandler* handler)
 	smpSizer->Add(smpToggle_, 0, wxALIGN_CENTER_VERTICAL);
 	leftSizer->Add(smpSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
 
+	// Notebook: tab 0 = Outfits (LVLI/OTFT from the loaded ESP), tab 1 = NPCs.
+	// Each tab owns its own list, search box and filters.
+	viewNotebook = new wxNotebook(leftPanel, ID_ViewNotebook);
 
-	// Outfit list
-	outfitList = new wxListCtrl(leftPanel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT | wxLC_SINGLE_SEL);
+	// --- Outfits tab ---
+	wxPanel* outfitsTab = new wxPanel(viewNotebook);
+	wxBoxSizer* outfitsSizer = new wxBoxSizer(wxVERTICAL);
+
+	searchCtrl = new wxSearchCtrl(outfitsTab, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
+	searchCtrl->SetDescriptiveText(_("Search outfits..."));
+	searchCtrl->Bind(wxEVT_SEARCHCTRL_SEARCH_BTN, &LeveledListPreviewer::OnSearchChanged, this);
+	searchCtrl->Bind(wxEVT_TEXT, &LeveledListPreviewer::OnSearchChanged, this);
+	outfitsSizer->Add(searchCtrl, 0, wxEXPAND | wxALL, 5);
+
+	wxBoxSizer* levelSizer = new wxBoxSizer(wxHORIZONTAL);
+	levelSizer->Add(new wxStaticText(outfitsTab, wxID_ANY, _("Level:")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+	levelMinSpin = new wxSpinCtrl(outfitsTab, wxID_ANY, "1", wxDefaultPosition, wxSize(60, -1), wxSP_ARROW_KEYS, 1, 100, 1);
+	levelMaxSpin = new wxSpinCtrl(outfitsTab, wxID_ANY, "100", wxDefaultPosition, wxSize(60, -1), wxSP_ARROW_KEYS, 1, 100, 100);
+	levelSizer->Add(levelMinSpin, 0, wxRIGHT, 5);
+	levelSizer->Add(new wxStaticText(outfitsTab, wxID_ANY, _("-")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+	levelSizer->Add(levelMaxSpin, 0);
+	levelMinSpin->Bind(wxEVT_SPINCTRL, &LeveledListPreviewer::OnLevelChanged, this);
+	levelMaxSpin->Bind(wxEVT_SPINCTRL, &LeveledListPreviewer::OnLevelChanged, this);
+	outfitsSizer->Add(levelSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
+
+	outfitList = new wxListCtrl(outfitsTab, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT | wxLC_SINGLE_SEL);
 	{
 		int w0 = Config.GetIntValue("LLPreviewer/ColW0");
 		int w1 = Config.GetIntValue("LLPreviewer/ColW1");
@@ -134,7 +137,74 @@ LeveledListPreviewer::LeveledListPreviewer(wxEvtHandler* handler)
 		outfitList->AppendColumn(_("Pieces"), wxLIST_FORMAT_RIGHT, w2 > 0 ? w2 : 50);
 	}
 	outfitList->Bind(wxEVT_LIST_ITEM_SELECTED, &LeveledListPreviewer::OnOutfitSelected, this);
-	leftSizer->Add(outfitList, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
+	outfitsSizer->Add(outfitList, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
+
+	outfitsTab->SetSizer(outfitsSizer);
+	viewNotebook->AddPage(outfitsTab, _("Outfits"));
+
+	// --- NPCs tab ---
+	wxPanel* npcsTab = new wxPanel(viewNotebook);
+	wxBoxSizer* npcsSizer = new wxBoxSizer(wxVERTICAL);
+
+	npcSearchCtrl = new wxSearchCtrl(npcsTab, ID_NpcSearch, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
+	npcSearchCtrl->SetDescriptiveText(_("Search NPCs..."));
+	npcSearchCtrl->Bind(wxEVT_SEARCHCTRL_SEARCH_BTN, &LeveledListPreviewer::OnNpcSearchChanged, this);
+	npcSearchCtrl->Bind(wxEVT_TEXT, &LeveledListPreviewer::OnNpcSearchChanged, this);
+	npcsSizer->Add(npcSearchCtrl, 0, wxEXPAND | wxALL, 5);
+
+	loadAllNpcsBtn = new wxButton(npcsTab, ID_LoadAllNpcs, _("Load all NPCs (incl. mod-native)"));
+	loadAllNpcsBtn->SetToolTip(_("Scan every plugin in Data/ for natively-defined NPC_ records and add them to the list. May be slow on large mod setups."));
+	loadAllNpcsBtn->Bind(wxEVT_BUTTON, &LeveledListPreviewer::OnLoadAllNpcs, this);
+	npcsSizer->Add(loadAllNpcsBtn, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
+
+	// Humanoid-only filter — hides creatures (Ice Wraith, Wolf, Dragon, etc.).
+	// A race counts as humanoid when its effective armor-race set includes
+	// DefaultRace (0x19), i.e. it can wear DefaultRace-targeted ARMA worn meshes.
+	npcHumanoidOnlyCheck = new wxCheckBox(npcsTab, ID_NpcHumanoidOnly, _("Humanoid NPCs only"));
+	npcHumanoidOnlyCheck->SetToolTip(_("Hide creatures (Ice Wraith, Wolf, Dragon, etc.) and only list NPCs whose race shares humanoid armor compatibility with DefaultRace."));
+	npcHumanoidOnlyCheck->SetValue(Config.GetIntValue("LLPreviewer/NpcHumanoidOnly") != 0);
+	npcHumanoidOnlyCheck->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
+		Config.SetValue("LLPreviewer/NpcHumanoidOnly", npcHumanoidOnlyCheck->GetValue() ? 1 : 0);
+		RefreshNpcList();
+	});
+	npcsSizer->Add(npcHumanoidOnlyCheck, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
+
+	// Female-only filter — gated on the NPC's ACBS female flag. Since BodySlide
+	// is a female-body utility, the rendered body/outfit only really makes sense
+	// for female NPCs; checking this hides every male NPC.
+	npcFemaleOnlyCheck = new wxCheckBox(npcsTab, ID_NpcFemaleOnly, _("Female NPCs only"));
+	npcFemaleOnlyCheck->SetToolTip(_("Hide male NPCs (ACBS female flag = 0). BodySlide renders female bodies/outfits, so male NPCs will appear with a female body unless filtered out."));
+	npcFemaleOnlyCheck->SetValue(Config.GetIntValue("LLPreviewer/NpcFemaleOnly") != 0);
+	npcFemaleOnlyCheck->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
+		Config.SetValue("LLPreviewer/NpcFemaleOnly", npcFemaleOnlyCheck->GetValue() ? 1 : 0);
+		RefreshNpcList();
+	});
+	npcsSizer->Add(npcFemaleOnlyCheck, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
+
+	npcList = new wxListCtrl(npcsTab, ID_NpcList, wxDefaultPosition, wxDefaultSize, wxLC_REPORT | wxLC_SINGLE_SEL);
+	{
+		int wN = Config.GetIntValue("LLPreviewer/NpcColW0");
+		int wP = Config.GetIntValue("LLPreviewer/NpcColW1");
+		npcList->AppendColumn(_("NPC"), wxLIST_FORMAT_LEFT, wN > 0 ? wN : 220);
+		npcList->AppendColumn(_("Plugin"), wxLIST_FORMAT_LEFT, wP > 0 ? wP : 100);
+	}
+	npcList->Bind(wxEVT_LIST_ITEM_SELECTED, &LeveledListPreviewer::OnNpcSelected, this);
+	npcsSizer->Add(npcList, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
+
+	npcsTab->SetSizer(npcsSizer);
+	viewNotebook->AddPage(npcsTab, _("NPCs"));
+
+	viewNotebook->Bind(wxEVT_NOTEBOOK_PAGE_CHANGED, &LeveledListPreviewer::OnViewTabChanged, this);
+
+	// Restore the last-active tab. Page 0 = Outfits, Page 1 = NPCs. Default to
+	// Outfits when no preference has been stored yet.
+	{
+		int storedTab = Config.GetIntValue("LLPreviewer/ActiveTab");
+		if (storedTab >= 0 && storedTab < static_cast<int>(viewNotebook->GetPageCount()))
+			viewNotebook->ChangeSelection(storedTab);
+	}
+
+	leftSizer->Add(viewNotebook, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
 
 	leftPanel->SetSizer(leftSizer);
 
@@ -370,6 +440,7 @@ void LeveledListPreviewer::LoadESPFile(const std::string& filepath) {
 
 	SetStatusText(wxString::Format(_("Loaded %s — %s"), data.GetFilename(), data.GetLoadInfo()));
 	RefreshOutfitList();
+	RefreshNpcList();
 
 	// Re-select the last outfit if one was persisted
 	{
@@ -464,6 +535,128 @@ void LeveledListPreviewer::RefreshOutfitList() {
 		outfitList->SetItem(idx, 1, wxString::Format("%d", entry->minLevel));
 		outfitList->SetItem(idx, 2, wxString::Format("%zu", entry->pieces.size()));
 	}
+}
+
+// ---------------------------------------------------------------------------
+// NPC list / NPC mode
+// ---------------------------------------------------------------------------
+
+void LeveledListPreviewer::RefreshNpcList() {
+	if (!npcList)
+		return;
+	npcList->DeleteAllItems();
+	filteredNpcIndices.clear();
+
+	std::string query = npcSearchCtrl ? npcSearchCtrl->GetValue().ToStdString() : "";
+	std::string queryLower = query;
+	std::transform(queryLower.begin(), queryLower.end(), queryLower.begin(), [](unsigned char c) { return std::tolower(c); });
+
+	bool humanoidOnly = npcHumanoidOnlyCheck && npcHumanoidOnlyCheck->GetValue();
+	bool femaleOnly = npcFemaleOnlyCheck && npcFemaleOnlyCheck->GetValue();
+	// Cache "is humanoid?" per race id across this refresh so we don't walk
+	// the skin-ARMO chain once per NPC. A race counts as humanoid when its
+	// effective armor-race set includes DefaultRace (0x19) — i.e. it can wear
+	// the same ARMA worn meshes as a default human.
+	constexpr uint32_t DEFAULT_RACE_FID = 0x00000019;
+	std::unordered_map<uint32_t, bool> raceIsHumanoid;
+	auto checkHumanoid = [&](uint32_t raceFid) -> bool {
+		if (raceFid == 0)
+			return false;
+		auto it = raceIsHumanoid.find(raceFid);
+		if (it != raceIsHumanoid.end())
+			return it->second;
+		auto effRaces = data.GetEffectiveArmorRaces(raceFid);
+		bool human = effRaces.count(DEFAULT_RACE_FID) != 0;
+		raceIsHumanoid[raceFid] = human;
+		return human;
+	};
+
+	auto& npcs = data.GetNPCs();
+	long row = 0;
+	long selectedRow = -1;
+	for (size_t i = 0; i < npcs.size(); ++i) {
+		const auto& n = npcs[i];
+		if (!queryLower.empty()) {
+			std::string hay = n.displayName + " " + n.editorId + " " + n.fullName;
+			std::transform(hay.begin(), hay.end(), hay.begin(), [](unsigned char c) { return std::tolower(c); });
+			if (hay.find(queryLower) == std::string::npos)
+				continue;
+		}
+		if (humanoidOnly) {
+			auto effRace = data.GetEffectiveNpcRace(n.editorId);
+			if (!checkHumanoid(effRace.formId))
+				continue;
+		}
+		if (femaleOnly && !n.isFemale)
+			continue;
+		filteredNpcIndices.push_back(i);
+		// Display: prefer full name, else editor id. Plugin column shows the
+		// native plugin so the user can tell duplicates apart.
+		std::string label = !n.fullName.empty() ? n.fullName + " (" + n.editorId + ")" : n.editorId;
+		long idx = npcList->InsertItem(row, wxString::FromUTF8(label));
+		npcList->SetItem(idx, 1, wxString::FromUTF8(n.plugin));
+		if (!currentHeadEditorId.empty() && n.editorId == currentHeadEditorId)
+			selectedRow = row;
+		++row;
+	}
+
+	if (selectedRow >= 0) {
+		npcList->SetItemState(selectedRow, wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED, wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED);
+		npcList->EnsureVisible(selectedRow);
+	}
+}
+
+void LeveledListPreviewer::OnNpcSearchChanged(wxCommandEvent& WXUNUSED(event)) {
+	RefreshNpcList();
+}
+
+void LeveledListPreviewer::OnNpcSelected(wxListEvent& event) {
+	long sel = event.GetIndex();
+	if (sel < 0 || sel >= static_cast<long>(filteredNpcIndices.size()))
+		return;
+	size_t idx = filteredNpcIndices[sel];
+	auto& npcs = data.GetNPCs();
+	if (idx >= npcs.size())
+		return;
+	SelectNpc(npcs[idx], /*loadDefaultOutfit*/ true);
+}
+
+void LeveledListPreviewer::OnLoadAllNpcs(wxCommandEvent& WXUNUSED(event)) {
+	wxBusyCursor wait;
+	SetStatusText(_("Scanning all plugins for NPC_ records..."));
+	wxYield();
+	size_t before = data.GetNPCs().size();
+	data.LoadAllPluginNativeNPCs();
+	size_t after = data.GetNPCs().size();
+
+	// Rebuild the autocomplete map and refresh the NPC list.
+	npcByDisplay.clear();
+	wxArrayString npcNames;
+	auto& all = data.GetNPCs();
+	npcNames.reserve(all.size());
+	for (size_t i = 0; i < all.size(); ++i) {
+		npcByDisplay[all[i].displayName] = i;
+		npcNames.push_back(wxString::FromUTF8(all[i].displayName));
+	}
+	if (headCtrl)
+		headCtrl->AutoComplete(npcNames);
+	RefreshNpcList();
+
+	SetStatusText(wxString::Format(_("Loaded %zu additional mod-native NPCs (total %zu)"), after - before, after));
+}
+
+void LeveledListPreviewer::OnViewTabChanged(wxBookCtrlEvent& event) {
+	// Persist the active tab so the previewer reopens on whichever view (Outfits
+	// or NPCs) the user was last using.
+	Config.SetValue("LLPreviewer/ActiveTab", event.GetSelection());
+
+	// Re-sync the NPC list when switching INTO the NPCs tab so the currently
+	// selected NPC (driven by Outfit-mode head selector or vice versa) is
+	// highlighted. Refresh is also responsible for re-applying the search
+	// filter the user typed last time.
+	if (event.GetSelection() == 1)
+		RefreshNpcList();
+	event.Skip();
 }
 
 // ---------------------------------------------------------------------------
@@ -1426,7 +1619,16 @@ void LeveledListPreviewer::OnHeadEntered(wxCommandEvent& WXUNUSED(event)) {
 	}
 
 	auto& npc = data.GetNPCs()[it->second];
+	SelectNpc(npc, /*loadDefaultOutfit*/ false);
+}
+
+// ---------------------------------------------------------------------------
+// SelectNpc — shared head + body + skin texture wiring for both modes
+// ---------------------------------------------------------------------------
+
+void LeveledListPreviewer::SelectNpc(const lldata::NPCEntry& npc, bool loadDefaultOutfit) {
 	currentHeadEditorId = npc.editorId;
+	Config.SetValue("LLPreviewer/HeadEditorId", npc.editorId);
 	LoadHeadMesh(npc);
 
 	// Show the display name (full in-game name) in the text box, not the editor ID.
@@ -1454,7 +1656,7 @@ void LeveledListPreviewer::OnHeadEntered(wxCommandEvent& WXUNUSED(event)) {
 		npcTintR = npc.tintR / 255.0f;
 		npcTintG = npc.tintG / 255.0f;
 		npcTintB = npc.tintB / 255.0f;
-		wxLogMessage("LeveledListPreviewer: NPC '%s' tint RGB=(%u,%u,%u)", logName, npc.tintR, npc.tintG, npc.tintB);
+		wxLogMessage("LeveledListPreviewer: NPC '%s' tint RGB=(%u,%u,%u)", logName.c_str(), npc.tintR, npc.tintG, npc.tintB);
 	}
 
 	// Always reload body meshes when NPC changes — the body mesh paths themselves
@@ -1473,7 +1675,36 @@ void LeveledListPreviewer::OnHeadEntered(wxCommandEvent& WXUNUSED(event)) {
 		ReconcileBodyAndOutfitShapes();
 	}
 
+	if (loadDefaultOutfit) {
+		const lldata::OutfitEntry* outfit = data.ResolveNpcDefaultOutfit(npc);
+		if (outfit) {
+			wxLogMessage("SelectNpc: rendering default outfit '%s' for NPC '%s'", outfit->name.c_str(), npc.editorId.c_str());
+			LoadOutfitMeshes(*outfit);
+		}
+		else {
+			// No default outfit known — drop any previously loaded outfit pieces
+			// so the NPC stands in just race body + head.
+			if (canvas && context)
+				canvas->SetCurrent(*context);
+			for (auto& name : outfitShapeNames)
+				gls.DeleteMesh(name);
+			outfitShapeNames.clear();
+			outfitGameVerts.clear();
+			shapeArmoBodySlots.clear();
+			useAnyGroups_.clear();
+			shapeToVariantGroup_.clear();
+			currentOutfit = nullptr;
+			// Distinguish "no DOFT defined" (normal for creatures) from "DOFT exists
+			// but couldn't be resolved" (mod outfit chain not loaded).
+			if (npc.defaultOutfitFormIdRaw == 0)
+				SetStatusText(wxString::Format(_("NPC '%s' has no default outfit"), wxString::FromUTF8(logName)));
+			else
+				SetStatusText(wxString::Format(_("NPC '%s' default outfit unresolvable (defined in '%s')"), wxString::FromUTF8(logName), wxString::FromUTF8(npc.defaultOutfitSourcePlugin)));
+		}
+	}
+
 	RefreshMeshOverlay();
+	gls.RenderOneFrame();
 }
 
 // ---------------------------------------------------------------------------
@@ -1968,6 +2199,8 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 		int useAnyGroup;
 		int useAnyVariant;
 		std::string pieceName;
+		std::string pieceEditorId;
+		uint32_t pieceFormId = 0;
 		std::vector<std::string> shapeNames;
 	};
 	std::vector<PieceShapeInfo> pieceInfos;
@@ -1998,53 +2231,78 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	}
 
 	// Build the set of piece indices (into outfit.pieces) we will actually
-	// render. For each ARMO (grouped by formId), if any of its ARMA-derived
-	// pieces matches the NPC's race we keep only the race-matching ones; if
-	// none match (or no NPC race is known) we keep all — this preserves the
-	// current behavior when race info is missing.
+	// render. For each ARMO we pick the ARMA tier that best matches the NPC's
+	// race, using the same priority the engine uses:
+	//   1. ARMAs whose race (primary or additional) is exactly the NPC's race
+	//   2. ARMAs whose race (primary or additional) is DefaultRace (0x19) —
+	//      these are the catch-all human variants used when no race-specific
+	//      ARMA exists
+	//   3. ARMAs whose race is reachable via the NPC race's skin-ARMO chain
+	//      (covers custom child / variant races that inherit armor
+	//      compatibility from a parent race)
+	//   4. Fallback: keep everything (no race info available at all)
+	// This prevents e.g. the Argonian / Khajiit gauntlet variants from being
+	// rendered on a Redguard NPC just because they share the broad humanoid
+	// effective-race set.
+	constexpr uint32_t DEFAULT_RACE_FID = 0x00000019;
 	std::set<size_t> renderPieceIdx;
 	{
-		auto pieceMatchesRace = [&](const lldata::OutfitPiece& p) -> bool {
-			if (effectiveArmorRaces.empty())
-				return false;
-			if (effectiveArmorRaces.count(p.armaRaceFormId))
+		auto pieceMatchesAny = [](const lldata::OutfitPiece& p, const std::set<uint32_t>& set) -> bool {
+			if (set.count(p.armaRaceFormId))
 				return true;
 			for (uint32_t r : p.armaAdditionalRaceFormIds) {
-				if (effectiveArmorRaces.count(r))
+				if (set.count(r))
 					return true;
 			}
 			return false;
 		};
+
+		std::set<uint32_t> exactRaceSet;
+		if (npcRaceFid != 0)
+			exactRaceSet.insert(npcRaceFid);
+		std::set<uint32_t> defaultRaceSet{DEFAULT_RACE_FID};
 
 		std::map<uint32_t, std::vector<size_t>> byArmo;
 		for (size_t i = 0; i < outfit.pieces.size(); ++i)
 			byArmo[outfit.pieces[i].formId].push_back(i);
 
 		for (auto& [armoId, indices] : byArmo) {
-			bool anyMatch = false;
-			if (!effectiveArmorRaces.empty()) {
+			// Try each tier in priority order; first tier that finds a match
+			// wins for this ARMO and all non-matching ARMA variants get hidden.
+			auto tryTier = [&](const std::set<uint32_t>& tierSet, const char* tierLabel) -> bool {
+				if (tierSet.empty())
+					return false;
+				bool anyMatch = false;
 				for (size_t i : indices) {
-					if (pieceMatchesRace(outfit.pieces[i])) {
+					if (pieceMatchesAny(outfit.pieces[i], tierSet)) {
 						anyMatch = true;
 						break;
 					}
 				}
-			}
-			if (anyMatch) {
+				if (!anyMatch)
+					return false;
 				for (size_t i : indices) {
-					if (pieceMatchesRace(outfit.pieces[i]))
+					if (pieceMatchesAny(outfit.pieces[i], tierSet))
 						renderPieceIdx.insert(i);
 					else
-						wxLogMessage("  Hiding ARMA variant of piece '%s' [%08X]: ARMA race %08X not in NPC effective race set",
+						wxLogMessage("  Hiding ARMA variant of piece '%s' [%08X]: ARMA race %08X not in %s tier",
 									 outfit.pieces[i].name,
 									 outfit.pieces[i].formId,
-									 outfit.pieces[i].armaRaceFormId);
+									 outfit.pieces[i].armaRaceFormId,
+									 tierLabel);
 				}
-			}
-			else {
-				for (size_t i : indices)
-					renderPieceIdx.insert(i);
-			}
+				return true;
+			};
+
+			if (tryTier(exactRaceSet, "exact NPC race"))
+				continue;
+			if (tryTier(defaultRaceSet, "DefaultRace"))
+				continue;
+			if (tryTier(effectiveArmorRaces, "skin-ARMO race chain"))
+				continue;
+			// No tier matched (or no race info): keep everything.
+			for (size_t i : indices)
+				renderPieceIdx.insert(i);
 		}
 	}
 
@@ -2135,6 +2393,8 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 		psi.useAnyGroup = piece.useAnyGroup;
 		psi.useAnyVariant = piece.useAnyVariant;
 		psi.pieceName = piece.name;
+		psi.pieceEditorId = piece.editorId;
+		psi.pieceFormId = piece.formId;
 
 		for (auto& shapeName : nif.GetShapeNames()) {
 			std::string displayName = piecePrefix + shapeName;
@@ -2298,9 +2558,24 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 			for (auto& [variantIdx, pieces] : variantMap) {
 				UseAnyVariant variant;
 				variant.variantIdx = variantIdx;
-				// Build label from piece names (use first piece's name, or combine)
-				if (!pieces.empty())
-					variant.label = pieces[0]->pieceName;
+				// Variant label preference: ARMO display name (FULL) → ARMO editor
+				// id → "[FormID]" → "Variant N". Many ARMO records (especially mod
+				// armor variants) ship without a FULL subrecord, so the editor id
+				// is the most useful human-readable fallback.
+				if (!pieces.empty()) {
+					auto* lead = pieces[0];
+					if (!lead->pieceName.empty())
+						variant.label = lead->pieceName;
+					else if (!lead->pieceEditorId.empty())
+						variant.label = lead->pieceEditorId;
+					else {
+						char buf[16];
+						std::snprintf(buf, sizeof(buf), "[%08X]", lead->pieceFormId);
+						variant.label = buf;
+					}
+				}
+				if (variant.label.empty())
+					variant.label = "Variant " + std::to_string(variantIdx);
 				if (pieces.size() > 1)
 					variant.label += " (+" + std::to_string(pieces.size() - 1) + ")";
 

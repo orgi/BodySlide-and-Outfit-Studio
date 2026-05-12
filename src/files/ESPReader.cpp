@@ -596,6 +596,14 @@ static NPCRecord ParseNPC(const Record& rec) {
 	npc.editorId = rec.EditorId();
 	npc.fullName = rec.FullName();
 
+	// ACBS: Actor Base Stats. First 4 bytes are flags; bit 0 (0x01) = Female.
+	if (auto* acbs = rec.GetSubrecord("ACBS")) {
+		if (acbs->data.size() >= 4) {
+			uint32_t acbsFlags = ReadLE<uint32_t>(acbs->data.data());
+			npc.isFemale = (acbsFlags & 0x00000001) != 0;
+		}
+	}
+
 	// WNAM: skin/worn armor FormID
 	if (auto* wnam = rec.GetSubrecord("WNAM")) {
 		if (wnam->data.size() >= 4)
@@ -606,6 +614,12 @@ static NPCRecord ParseNPC(const Record& rec) {
 	if (auto* rnam = rec.GetSubrecord("RNAM")) {
 		if (rnam->data.size() >= 4)
 			npc.raceFormId = ReadLE<uint32_t>(rnam->data.data());
+	}
+
+	// DOFT: default outfit FormID (OTFT)
+	if (auto* doft = rec.GetSubrecord("DOFT")) {
+		if (doft->data.size() >= 4)
+			npc.defaultOutfitFormId = ReadLE<uint32_t>(doft->data.data());
 	}
 
 	// QNAM: 3 floats (R, G, B) — texture lighting / face tint color

@@ -133,8 +133,10 @@ struct NPCRecord {
 	uint32_t formId = 0;
 	std::string editorId;
 	std::string fullName;
-	uint32_t wnamFormId = 0; // WNAM: skin/worn armor FormID (0 = use race default)
-	uint32_t raceFormId = 0; // RNAM: race FormID
+	uint32_t wnamFormId = 0;  // WNAM: skin/worn armor FormID (0 = use race default)
+	uint32_t raceFormId = 0;  // RNAM: race FormID
+	uint32_t defaultOutfitFormId = 0; // DOFT: default outfit (OTFT FormID; 0 = none)
+	bool isFemale = false;			  // ACBS flags bit 0 — set when NPC is female
 	// QNAM — 3 floats (R,G,B) texture lighting / face tint color
 	bool hasQnam = false;
 	float qnamR = 1.0f;
