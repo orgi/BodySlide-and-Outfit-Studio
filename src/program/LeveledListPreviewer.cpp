@@ -443,10 +443,14 @@ void LeveledListPreviewer::LoadESPFile(const std::string& filepath) {
 	RefreshOutfitList();
 	RefreshNpcList();
 
-	// Re-select the last outfit if one was persisted
+	// Re-select the last outfit if one was persisted. Skip this when the NPC
+	// tab is the active one: RefreshNpcList already restored the NPC selection
+	// (which triggers SelectNpc → default-outfit render), and overlaying the
+	// last leveled-list outfit on top would clobber the NPC's chosen outfit.
 	{
 		std::string lastOutfit = Config["LLPreviewer/LastOutfit"];
-		if (!lastOutfit.empty()) {
+		bool npcTabActive = viewNotebook && viewNotebook->GetSelection() == 1;
+		if (!lastOutfit.empty() && !npcTabActive) {
 			for (long i = 0; i < outfitList->GetItemCount(); ++i) {
 				if (outfitList->GetItemText(i).ToStdString() == lastOutfit) {
 					outfitList->SetItemState(i, wxLIST_STATE_SELECTED, wxLIST_STATE_SELECTED);
