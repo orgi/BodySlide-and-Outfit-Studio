@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <functional>
 #include <map>
 #include <regex>
 #include <sstream>
@@ -16,12 +17,33 @@
 #include <ExtraData.hpp>
 #include <wx/dir.h>
 #include <wx/filename.h>
+#include <wx/treectrl.h>
 
 using namespace nifly;
 
 wxDEFINE_EVENT(wxEVT_LEVELEDLIST_CLOSED, wxCommandEvent);
 
 extern ConfigurationManager Config;
+
+// ---------------------------------------------------------------------------
+// Tree item data
+// ---------------------------------------------------------------------------
+// Single payload type used by both the outfit and NPC trees.
+//   kind == Outfit / Npc → `topIndex` is an index into filteredOutfits or
+//                          filteredNpcIndices. groupId / variantIdx are -1.
+//   kind == Group        → variant gate-group node. Only `groupId` is set.
+//   kind == Variant      → variant slot node. `groupId` and `variantIdx` set.
+//   `unavailable` true   → render greyed-out + serve a tooltip explaining why.
+class LLTreeItemData : public wxTreeItemData {
+public:
+	enum class Kind { Outfit, Npc, Group, Variant };
+	Kind kind = Kind::Outfit;
+	int topIndex = -1;
+	int groupId = -1;
+	int variantIdx = -1;
+	bool unavailable = false;
+	std::string tooltip;
+};
 
 // ---------------------------------------------------------------------------
 // Event tables
@@ -127,16 +149,10 @@ LeveledListPreviewer::LeveledListPreviewer(wxEvtHandler* handler)
 	levelMaxSpin->Bind(wxEVT_SPINCTRL, &LeveledListPreviewer::OnLevelChanged, this);
 	outfitsSizer->Add(levelSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
 
-	outfitList = new wxListCtrl(outfitsTab, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT | wxLC_SINGLE_SEL);
-	{
-		int w0 = Config.GetIntValue("LLPreviewer/ColW0");
-		int w1 = Config.GetIntValue("LLPreviewer/ColW1");
-		int w2 = Config.GetIntValue("LLPreviewer/ColW2");
-		outfitList->AppendColumn(_("Name"), wxLIST_FORMAT_LEFT, w0 > 0 ? w0 : 200);
-		outfitList->AppendColumn(_("Level"), wxLIST_FORMAT_RIGHT, w1 > 0 ? w1 : 50);
-		outfitList->AppendColumn(_("Pieces"), wxLIST_FORMAT_RIGHT, w2 > 0 ? w2 : 50);
-	}
-	outfitList->Bind(wxEVT_LIST_ITEM_SELECTED, &LeveledListPreviewer::OnOutfitSelected, this);
+	outfitList = new wxTreeCtrl(outfitsTab, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTR_HAS_BUTTONS | wxTR_HIDE_ROOT | wxTR_SINGLE | wxTR_FULL_ROW_HIGHLIGHT);
+	outfitList->AddRoot(wxT("outfits-root"));
+	outfitList->Bind(wxEVT_TREE_SEL_CHANGED, &LeveledListPreviewer::OnOutfitSelected, this);
+	outfitList->Bind(wxEVT_TREE_ITEM_GETTOOLTIP, &LeveledListPreviewer::OnTreeItemTooltip, this);
 	outfitsSizer->Add(outfitList, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
 
 	outfitsTab->SetSizer(outfitsSizer);
@@ -182,14 +198,10 @@ LeveledListPreviewer::LeveledListPreviewer(wxEvtHandler* handler)
 	});
 	npcsSizer->Add(npcFemaleOnlyCheck, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
 
-	npcList = new wxListCtrl(npcsTab, ID_NpcList, wxDefaultPosition, wxDefaultSize, wxLC_REPORT | wxLC_SINGLE_SEL);
-	{
-		int wN = Config.GetIntValue("LLPreviewer/NpcColW0");
-		int wP = Config.GetIntValue("LLPreviewer/NpcColW1");
-		npcList->AppendColumn(_("NPC"), wxLIST_FORMAT_LEFT, wN > 0 ? wN : 220);
-		npcList->AppendColumn(_("Plugin"), wxLIST_FORMAT_LEFT, wP > 0 ? wP : 100);
-	}
-	npcList->Bind(wxEVT_LIST_ITEM_SELECTED, &LeveledListPreviewer::OnNpcSelected, this);
+	npcList = new wxTreeCtrl(npcsTab, ID_NpcList, wxDefaultPosition, wxDefaultSize, wxTR_HAS_BUTTONS | wxTR_HIDE_ROOT | wxTR_SINGLE | wxTR_FULL_ROW_HIGHLIGHT);
+	npcList->AddRoot(wxT("npcs-root"));
+	npcList->Bind(wxEVT_TREE_SEL_CHANGED, &LeveledListPreviewer::OnNpcSelected, this);
+	npcList->Bind(wxEVT_TREE_ITEM_GETTOOLTIP, &LeveledListPreviewer::OnTreeItemTooltip, this);
 	npcsSizer->Add(npcList, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
 
 	npcsTab->SetSizer(npcsSizer);
@@ -451,10 +463,19 @@ void LeveledListPreviewer::LoadESPFile(const std::string& filepath) {
 		std::string lastOutfit = Config["LLPreviewer/LastOutfit"];
 		bool npcTabActive = viewNotebook && viewNotebook->GetSelection() == 1;
 		if (!lastOutfit.empty() && !npcTabActive) {
-			for (long i = 0; i < outfitList->GetItemCount(); ++i) {
-				if (outfitList->GetItemText(i).ToStdString() == lastOutfit) {
-					outfitList->SetItemState(i, wxLIST_STATE_SELECTED, wxLIST_STATE_SELECTED);
-					outfitList->EnsureVisible(i);
+			// Walk the outfit tree's top-level children to find the entry
+			// whose underlying OutfitEntry::name matches the persisted one.
+			wxTreeItemId root = outfitList->GetRootItem();
+			wxTreeItemIdValue cookie;
+			for (wxTreeItemId child = outfitList->GetFirstChild(root, cookie); child.IsOk(); child = outfitList->GetNextChild(root, cookie)) {
+				auto* d = dynamic_cast<LLTreeItemData*>(outfitList->GetItemData(child));
+				if (!d || d->kind != LLTreeItemData::Kind::Outfit)
+					continue;
+				if (d->topIndex < 0 || d->topIndex >= static_cast<int>(filteredOutfits.size()))
+					continue;
+				if (filteredOutfits[d->topIndex]->name == lastOutfit) {
+					outfitList->SelectItem(child);
+					outfitList->EnsureVisible(child);
 					break;
 				}
 			}
@@ -518,6 +539,7 @@ void LeveledListPreviewer::OnLevelChanged(wxSpinEvent& WXUNUSED(event)) {
 
 void LeveledListPreviewer::RefreshOutfitList() {
 	outfitList->DeleteAllItems();
+	wxTreeItemId root = outfitList->AddRoot(wxT("outfits-root"));
 	filteredOutfits.clear();
 
 	std::string query = searchCtrl->GetValue().ToStdString();
@@ -533,12 +555,21 @@ void LeveledListPreviewer::RefreshOutfitList() {
 			filteredOutfits.push_back(entry);
 	}
 
-	// Populate list control
+	// Populate tree: one top-level node per outfit. Variant subtree is added
+	// lazily after the outfit is loaded (see PopulateVariantSubtree).
 	for (size_t i = 0; i < filteredOutfits.size(); ++i) {
 		auto* entry = filteredOutfits[i];
-		long idx = outfitList->InsertItem(static_cast<long>(i), wxString::FromUTF8(entry->name));
-		outfitList->SetItem(idx, 1, wxString::Format("%d", entry->minLevel));
-		outfitList->SetItem(idx, 2, wxString::Format("%zu", entry->pieces.size()));
+		wxString label = wxString::Format("%s  (L%d, %zu)", wxString::FromUTF8(entry->name), entry->minLevel, entry->pieces.size());
+		auto* d = new LLTreeItemData();
+		d->kind = LLTreeItemData::Kind::Outfit;
+		d->topIndex = static_cast<int>(i);
+		if (entry->pieces.empty()) {
+			d->unavailable = true;
+			d->tooltip = "This outfit has no resolvable pieces (likely an unresolved ARMO/LVLI reference or empty leveled list).";
+		}
+		wxTreeItemId item = outfitList->AppendItem(root, label, -1, -1, d);
+		if (d->unavailable)
+			outfitList->SetItemTextColour(item, wxColour(150, 150, 150));
 	}
 }
 
@@ -577,8 +608,8 @@ void LeveledListPreviewer::RefreshNpcList() {
 	};
 
 	auto& npcs = data.GetNPCs();
-	long row = 0;
-	long selectedRow = -1;
+	wxTreeItemId root = npcList->AddRoot(wxT("npcs-root"));
+	wxTreeItemId selectedNode;
 	for (size_t i = 0; i < npcs.size(); ++i) {
 		const auto& n = npcs[i];
 		if (!queryLower.empty()) {
@@ -595,19 +626,21 @@ void LeveledListPreviewer::RefreshNpcList() {
 		if (femaleOnly && !n.isFemale)
 			continue;
 		filteredNpcIndices.push_back(i);
-		// Display: prefer full name, else editor id. Plugin column shows the
-		// native plugin so the user can tell duplicates apart.
+
 		std::string label = !n.fullName.empty() ? n.fullName + " (" + n.editorId + ")" : n.editorId;
-		long idx = npcList->InsertItem(row, wxString::FromUTF8(label));
-		npcList->SetItem(idx, 1, wxString::FromUTF8(n.plugin));
+		if (!n.plugin.empty())
+			label += "  [" + n.plugin + "]";
+		auto* d = new LLTreeItemData();
+		d->kind = LLTreeItemData::Kind::Npc;
+		d->topIndex = static_cast<int>(filteredNpcIndices.size() - 1);
+		wxTreeItemId item = npcList->AppendItem(root, wxString::FromUTF8(label), -1, -1, d);
 		if (!currentHeadEditorId.empty() && n.editorId == currentHeadEditorId)
-			selectedRow = row;
-		++row;
+			selectedNode = item;
 	}
 
-	if (selectedRow >= 0) {
-		npcList->SetItemState(selectedRow, wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED, wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED);
-		npcList->EnsureVisible(selectedRow);
+	if (selectedNode.IsOk()) {
+		npcList->SelectItem(selectedNode);
+		npcList->EnsureVisible(selectedNode);
 	}
 }
 
@@ -615,15 +648,45 @@ void LeveledListPreviewer::OnNpcSearchChanged(wxCommandEvent& WXUNUSED(event)) {
 	RefreshNpcList();
 }
 
-void LeveledListPreviewer::OnNpcSelected(wxListEvent& event) {
-	long sel = event.GetIndex();
-	if (sel < 0 || sel >= static_cast<long>(filteredNpcIndices.size()))
+void LeveledListPreviewer::OnNpcSelected(wxTreeEvent& event) {
+	wxTreeItemId id = event.GetItem();
+	if (!id.IsOk())
 		return;
-	size_t idx = filteredNpcIndices[sel];
-	auto& npcs = data.GetNPCs();
-	if (idx >= npcs.size())
+	auto* d = dynamic_cast<LLTreeItemData*>(npcList->GetItemData(id));
+	if (!d)
 		return;
-	SelectNpc(npcs[idx], /*loadDefaultOutfit*/ true);
+
+	if (d->kind == LLTreeItemData::Kind::Npc) {
+		if (d->topIndex < 0 || d->topIndex >= static_cast<int>(filteredNpcIndices.size()))
+			return;
+		size_t idx = filteredNpcIndices[d->topIndex];
+		auto& npcs = data.GetNPCs();
+		if (idx >= npcs.size())
+			return;
+		SelectNpc(npcs[idx], /*loadDefaultOutfit*/ true);
+		// After the outfit loads, refresh this NPC node's variant subtree.
+		PopulateVariantSubtree(npcList, id);
+		npcList->Expand(id);
+		return;
+	}
+
+	if (d->kind == LLTreeItemData::Kind::Variant) {
+		if (d->unavailable)
+			return;
+		ActivateVariantChain(d->groupId, d->variantIdx, /*descend*/ true);
+		return;
+	}
+
+	if (d->kind == LLTreeItemData::Kind::Group) {
+		// Selecting a gate group node activates its first variant.
+		for (auto& g : useAnyGroups_) {
+			if (g.groupId == d->groupId) {
+				if (!g.variants.empty())
+					ActivateVariantChain(d->groupId, g.variants.front().variantIdx, /*descend*/ true);
+				break;
+			}
+		}
+	}
 }
 
 void LeveledListPreviewer::OnLoadAllNpcs(wxCommandEvent& WXUNUSED(event)) {
@@ -2073,13 +2136,15 @@ void LeveledListPreviewer::OnHighWeightChanged(wxCommandEvent& event) {
 
 	// No preset active (or no morph maps) — full reload of body and outfit needed
 	// for correct weight variant NIFs.
-	{
-		long sel = outfitList ? outfitList->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED) : -1;
-		if (sel >= 0 && sel < static_cast<long>(filteredOutfits.size())) {
-			// Reload entire outfit (which also reloads body); RefreshMeshOverlay called inside
-			LoadOutfitMeshes(*filteredOutfits[sel]);
-			gls.RenderOneFrame();
-			return;
+	if (outfitList) {
+		wxTreeItemId selId = outfitList->GetSelection();
+		if (selId.IsOk()) {
+			auto* d = dynamic_cast<LLTreeItemData*>(outfitList->GetItemData(selId));
+			if (d && d->kind == LLTreeItemData::Kind::Outfit && d->topIndex >= 0 && d->topIndex < static_cast<int>(filteredOutfits.size())) {
+				LoadOutfitMeshes(*filteredOutfits[d->topIndex]);
+				gls.RenderOneFrame();
+				return;
+			}
 		}
 	}
 
@@ -2099,17 +2164,44 @@ void LeveledListPreviewer::OnHighWeightChanged(wxCommandEvent& event) {
 // Outfit selection → 3D preview
 // ---------------------------------------------------------------------------
 
-void LeveledListPreviewer::OnOutfitSelected(wxListEvent& event) {
-	long sel = event.GetIndex();
-	if (sel < 0 || sel >= static_cast<long>(filteredOutfits.size()))
+void LeveledListPreviewer::OnOutfitSelected(wxTreeEvent& event) {
+	wxTreeItemId id = event.GetItem();
+	if (!id.IsOk())
+		return;
+	auto* d = dynamic_cast<LLTreeItemData*>(outfitList->GetItemData(id));
+	if (!d)
 		return;
 
-	wxLogMessage("OnOutfitSelected: index=%ld name='%s' isLoadingESP=%d", sel, filteredOutfits[sel]->name.c_str(), isLoadingESP_ ? 1 : 0);
+	if (d->kind == LLTreeItemData::Kind::Outfit) {
+		if (d->topIndex < 0 || d->topIndex >= static_cast<int>(filteredOutfits.size()))
+			return;
+		if (d->unavailable)
+			return;
+		wxLogMessage("OnOutfitSelected: index=%d name='%s' isLoadingESP=%d", d->topIndex, filteredOutfits[d->topIndex]->name.c_str(), isLoadingESP_ ? 1 : 0);
+		Config.SetValue("LLPreviewer/LastOutfit", filteredOutfits[d->topIndex]->name);
+		LoadOutfitMeshes(*filteredOutfits[d->topIndex]);
+		// After the outfit loads, surface its variant gate tree as children.
+		PopulateVariantSubtree(outfitList, id);
+		outfitList->Expand(id);
+		return;
+	}
 
-	// Persist for reloads/filtering
-	Config.SetValue("LLPreviewer/LastOutfit", filteredOutfits[sel]->name);
+	if (d->kind == LLTreeItemData::Kind::Variant) {
+		if (d->unavailable)
+			return;
+		ActivateVariantChain(d->groupId, d->variantIdx, /*descend*/ true);
+		return;
+	}
 
-	LoadOutfitMeshes(*filteredOutfits[sel]);
+	if (d->kind == LLTreeItemData::Kind::Group) {
+		for (auto& g : useAnyGroups_) {
+			if (g.groupId == d->groupId) {
+				if (!g.variants.empty())
+					ActivateVariantChain(d->groupId, g.variants.front().variantIdx, /*descend*/ true);
+				break;
+			}
+		}
+	}
 }
 
 void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
@@ -2542,127 +2634,28 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	}
 
 
-	// Build "Use Any" variant groups from each piece's gating path. Nested
-	// non-Use-All LVLIs produce paths of depth > 1; we group pieces by their
-	// DEEPEST gate (last entry in the path) and record the parent gate so the
-	// previewer can show the dependency in the variant overlay and gate-AND
-	// visibility correctly. The legacy flat grouping flattened nested gates
-	// into independent flat groups, which is why several armors could appear
-	// at once when a Use Any wrapped another Use Any.
+	// Build "Use Any" variant groups from the OutfitEntry's pre-built gate
+	// tree. ResolveLVLIGrouped records every variant slot of every "Use Any"
+	// LVLI, including ones that resolve to stubs / unresolved refs / empty
+	// records — so the tree UI displays the complete leveled-list structure
+	// verbatim (no missing variant indices). Earlier inference-from-pieces
+	// logic silently dropped variants whose entries produced no pieces.
 	{
-		// (groupId, variantIdx) → pieces whose deepest gate is this variant.
-		std::map<int, std::map<int, std::vector<PieceShapeInfo*>>> groupMap;
-		// groupId → (parentGroupId, parentVariantIdx) inherited from the first
-		// piece encountered (consistent across all pieces of the same group by
-		// construction in ResolveLVLIGrouped).
-		std::map<int, std::pair<int, int>> groupParent;
-		for (auto& psi : pieceInfos) {
-			if (psi.useAnyPath.empty())
-				continue;
-			auto& deepest = psi.useAnyPath.back();
-			groupMap[deepest.first][deepest.second].push_back(&psi);
-			if (psi.useAnyPath.size() >= 2) {
-				auto& parent = psi.useAnyPath[psi.useAnyPath.size() - 2];
-				groupParent.emplace(deepest.first, std::make_pair(parent.first, parent.second));
-			}
-			else {
-				groupParent.emplace(deepest.first, std::make_pair(-1, -1));
-			}
-		}
-
-		// LVLI editor id labels (best-effort: same group id is consistent across
-		// pieces, picked up from the outfit's accumulated map).
-		const auto& groupLvliNames = outfit.useAnyGroupNames;
-
-		for (auto& [groupId, variantMap] : groupMap) {
+		useAnyGroups_.clear();
+		for (auto& gi : outfit.useAnyGroups) {
 			UseAnyGroup group;
-			group.groupId = groupId;
+			group.groupId = gi.groupId;
 			group.activeIndex = 0;
-			auto pit = groupParent.find(groupId);
-			if (pit != groupParent.end()) {
-				group.parentGroupId = pit->second.first;
-				group.parentVariantIdx = pit->second.second;
-			}
-			auto nit = groupLvliNames.find(groupId);
-			if (nit != groupLvliNames.end())
-				group.label = nit->second;
-
-			for (auto& [variantIdx, pieces] : variantMap) {
+			group.label = gi.label;
+			group.parentGroupId = gi.parentGroupId;
+			group.parentVariantIdx = gi.parentVariantIdx;
+			for (auto& vi : gi.variants) {
 				UseAnyVariant variant;
-				variant.variantIdx = variantIdx;
-				// Variant label preference: ARMO display name (FULL) → ARMO editor
-				// id → "[FormID]" → "Variant N". Many ARMO records (especially mod
-				// armor variants) ship without a FULL subrecord, so the editor id
-				// is the most useful human-readable fallback.
-				if (!pieces.empty()) {
-					auto* lead = pieces[0];
-					if (!lead->pieceName.empty())
-						variant.label = lead->pieceName;
-					else if (!lead->pieceEditorId.empty())
-						variant.label = lead->pieceEditorId;
-					else {
-						char buf[16];
-						std::snprintf(buf, sizeof(buf), "[%08X]", lead->pieceFormId);
-						variant.label = buf;
-					}
-				}
-				if (variant.label.empty())
-					variant.label = "Variant " + std::to_string(variantIdx);
-				if (pieces.size() > 1)
-					variant.label += " (+" + std::to_string(pieces.size() - 1) + ")";
-
-				for (auto* p : pieces) {
-					for (auto& sn : p->shapeNames)
-						variant.shapeNames.push_back(sn);
-				}
+				variant.variantIdx = vi.variantIdx;
+				variant.label = !vi.label.empty() ? vi.label : ("Variant " + std::to_string(vi.variantIdx));
 				group.variants.push_back(std::move(variant));
 			}
-
 			useAnyGroups_.push_back(std::move(group));
-		}
-
-		// Ensure every parent group exposes a variant slot for each of its
-		// children's parentVariantIdx. A parent LVLI entry that branches to a
-		// sub-LVLI never produces a direct piece, so that variant slot is
-		// missing from groupMap and the child group becomes unreachable. We
-		// inject placeholder variants labeled with the child LVLI editor id.
-		auto findGroupByIdMut = [this](int gid) -> UseAnyGroup* {
-			for (auto& g : useAnyGroups_)
-				if (g.groupId == gid)
-					return &g;
-			return nullptr;
-		};
-		// Snapshot child→parent links before mutating.
-		std::vector<std::tuple<int, int, int>> childLinks; // (childId, parentId, parentVariantIdx)
-		for (auto& g : useAnyGroups_) {
-			if (g.parentGroupId >= 0)
-				childLinks.emplace_back(g.groupId, g.parentGroupId, g.parentVariantIdx);
-		}
-		for (auto& [childId, parentId, parentVarIdx] : childLinks) {
-			UseAnyGroup* parent = findGroupByIdMut(parentId);
-			if (!parent)
-				continue;
-			bool has = false;
-			for (auto& v : parent->variants)
-				if (v.variantIdx == parentVarIdx) {
-					has = true;
-					break;
-				}
-			if (has)
-				continue;
-			UseAnyVariant ph;
-			ph.variantIdx = parentVarIdx;
-			auto nit = groupLvliNames.find(childId);
-			if (nit != groupLvliNames.end() && !nit->second.empty())
-				ph.label = nit->second;
-			else
-				ph.label = "Variant " + std::to_string(parentVarIdx);
-			parent->variants.push_back(std::move(ph));
-		}
-		// Re-sort each group's variants by variantIdx so the dropdown order
-		// matches the LVLI entry order.
-		for (auto& g : useAnyGroups_) {
-			std::sort(g.variants.begin(), g.variants.end(), [](const UseAnyVariant& a, const UseAnyVariant& b) { return a.variantIdx < b.variantIdx; });
 		}
 
 		// Register every gated shape's full path so visibility can be evaluated
@@ -3000,6 +2993,185 @@ void LeveledListPreviewer::SwitchUseAnyVariant(size_t groupIdx, int newVariantId
 	RefreshMeshOverlay();
 }
 
+void LeveledListPreviewer::ActivateVariantChain(int groupId, int variantIdx, bool descend) {
+	// Walk up ancestors activating the variant slot that gates each group.
+	// `seen` guards against malformed cycles.
+	std::set<int> seen;
+	int curGid = groupId;
+	int curVid = variantIdx;
+	while (curGid >= 0 && seen.insert(curGid).second) {
+		// Find group by id.
+		size_t gi = 0;
+		for (; gi < useAnyGroups_.size(); ++gi)
+			if (useAnyGroups_[gi].groupId == curGid)
+				break;
+		if (gi >= useAnyGroups_.size())
+			break;
+		auto& group = useAnyGroups_[gi];
+		// Translate variantIdx → index into group.variants vector.
+		int newIdx = -1;
+		for (size_t i = 0; i < group.variants.size(); ++i) {
+			if (group.variants[i].variantIdx == curVid) {
+				newIdx = static_cast<int>(i);
+				break;
+			}
+		}
+		if (newIdx >= 0 && newIdx != group.activeIndex) {
+			group.activeIndex = newIdx;
+			wxLogMessage("  Tree activated group %d variant %d ('%s')", group.groupId, curVid, group.variants[newIdx].label);
+		}
+		// Step up.
+		curGid = group.parentGroupId;
+		curVid = group.parentVariantIdx;
+	}
+
+	if (descend) {
+		// For every group whose parent variant is now active, ensure its
+		// activeIndex stays at a valid slot (default to 0 if unset).
+		// Iterate to a fixed point — a newly activated child may itself enable
+		// further descendants.
+		bool changed = true;
+		int guard = 0;
+		while (changed && guard++ < 64) {
+			changed = false;
+			for (auto& g : useAnyGroups_) {
+				if (g.parentGroupId < 0)
+					continue;
+				// Find parent group.
+				const UseAnyGroup* parent = nullptr;
+				for (auto& cand : useAnyGroups_) {
+					if (cand.groupId == g.parentGroupId) {
+						parent = &cand;
+						break;
+					}
+				}
+				if (!parent)
+					continue;
+				if (parent->activeIndex < 0 || parent->activeIndex >= static_cast<int>(parent->variants.size()))
+					continue;
+				if (parent->variants[parent->activeIndex].variantIdx != g.parentVariantIdx)
+					continue;
+				// This child group is reachable. If activeIndex is out of
+				// range or currently 0 and that's also valid, nothing to do.
+				if (g.activeIndex < 0 || g.activeIndex >= static_cast<int>(g.variants.size())) {
+					if (!g.variants.empty()) {
+						g.activeIndex = 0;
+						changed = true;
+					}
+				}
+			}
+		}
+	}
+
+	ApplyUseAnyVisibility();
+	UpdateActiveSlotsAndVisibility();
+	gls.RenderOneFrame();
+	RefreshMeshOverlay();
+}
+
+void LeveledListPreviewer::PopulateVariantSubtree(wxTreeCtrl* tree, wxTreeItemId parent) {
+	if (!tree || !parent.IsOk())
+		return;
+
+	// Remove any previously-built variant children so repeated selects re-sync
+	// with the freshly-loaded outfit.
+	tree->DeleteChildren(parent);
+	if (useAnyGroups_.empty())
+		return;
+
+	// Precompute "does any visible-eligible shape exist on this gate slot?"
+	// to drive the greyed-out status. A variant slot counts as available when
+	// at least one shape's gating path passes through (groupId, variantIdx).
+	std::set<std::pair<int, int>> slotsWithShapes;
+	for (auto& [shape, path] : shapeUseAnyPath_)
+		for (auto& step : path)
+			slotsWithShapes.insert(step);
+
+	// Build adjacency: children of each (groupId, variantIdx) slot.
+	std::map<std::pair<int, int>, std::vector<const UseAnyGroup*>> childrenByGateSlot;
+	std::vector<const UseAnyGroup*> topLevel;
+	for (auto& g : useAnyGroups_) {
+		if (g.parentGroupId < 0)
+			topLevel.push_back(&g);
+		else
+			childrenByGateSlot[{g.parentGroupId, g.parentVariantIdx}].push_back(&g);
+	}
+
+	std::function<void(wxTreeItemId, const UseAnyGroup*)> addGroup;
+	addGroup = [&](wxTreeItemId parentNode, const UseAnyGroup* g) {
+		std::string groupLabel = !g->label.empty() ? g->label : ("Group " + std::to_string(g->groupId));
+		auto* gdata = new LLTreeItemData();
+		gdata->kind = LLTreeItemData::Kind::Group;
+		gdata->groupId = g->groupId;
+		wxTreeItemId groupNode = tree->AppendItem(parentNode, wxString::FromUTF8(groupLabel), -1, -1, gdata);
+
+		for (size_t vi = 0; vi < g->variants.size(); ++vi) {
+			auto& v = g->variants[vi];
+			auto* vdata = new LLTreeItemData();
+			vdata->kind = LLTreeItemData::Kind::Variant;
+			vdata->groupId = g->groupId;
+			vdata->variantIdx = v.variantIdx;
+
+			// Renderability: variant is unavailable when no piece in the
+			// resolved outfit walks through this gate slot. Sub-LVLI gates
+			// don't carry their own shapes; for those we check whether ANY
+			// descendant has shapes.
+			bool hasShape = slotsWithShapes.count({g->groupId, v.variantIdx}) > 0;
+			if (!hasShape) {
+				// Walk descendants — gates that recurse may still produce
+				// something downstream.
+				std::function<bool(int, int)> anyShapeBelow = [&](int gid, int vid) -> bool {
+					auto cit = childrenByGateSlot.find({gid, vid});
+					if (cit == childrenByGateSlot.end())
+						return false;
+					for (const UseAnyGroup* child : cit->second) {
+						for (auto& cv : child->variants) {
+							if (slotsWithShapes.count({child->groupId, cv.variantIdx}))
+								return true;
+							if (anyShapeBelow(child->groupId, cv.variantIdx))
+								return true;
+						}
+					}
+					return false;
+				};
+				hasShape = anyShapeBelow(g->groupId, v.variantIdx);
+			}
+			vdata->unavailable = !hasShape;
+			if (!hasShape) {
+				vdata->tooltip = "This variant has no resolvable outfit pieces — its referenced ARMO/LVLI was not found in the loaded plugins, or all sub-entries are stubs.";
+			}
+
+			wxTreeItemId varNode = tree->AppendItem(groupNode, wxString::FromUTF8(v.label), -1, -1, vdata);
+			if (vdata->unavailable)
+				tree->SetItemTextColour(varNode, wxColour(150, 150, 150));
+			if (static_cast<int>(vi) == g->activeIndex)
+				tree->SetItemBold(varNode, true);
+
+			auto cit = childrenByGateSlot.find({g->groupId, v.variantIdx});
+			if (cit != childrenByGateSlot.end())
+				for (const UseAnyGroup* child : cit->second)
+					addGroup(varNode, child);
+		}
+		tree->Expand(groupNode);
+	};
+
+	for (const UseAnyGroup* g : topLevel)
+		addGroup(parent, g);
+}
+
+void LeveledListPreviewer::OnTreeItemTooltip(wxTreeEvent& event) {
+	wxTreeCtrl* tree = dynamic_cast<wxTreeCtrl*>(event.GetEventObject());
+	if (!tree)
+		return;
+	wxTreeItemId id = event.GetItem();
+	if (!id.IsOk())
+		return;
+	auto* d = dynamic_cast<LLTreeItemData*>(tree->GetItemData(id));
+	if (!d || d->tooltip.empty())
+		return;
+	event.SetToolTip(wxString::FromUTF8(d->tooltip));
+}
+
 bool LeveledListPreviewer::IsUseAnyPathActive(const std::vector<std::pair<int, int>>& path) const {
 	// Index lookup is linear (typical group count is small — order of magnitude
 	// of LVLI depth, single digits in practice).
@@ -3266,89 +3438,8 @@ void LeveledListPreviewer::RefreshMeshOverlay() {
 		}
 	}
 
-	// --- "Use Any" variant group selectors ---
-	// Render the gate tree: each group is shown as a labeled wxChoice, indented
-	// by its depth in the gate tree. Groups whose parent gate is currently not
-	// selected are skipped (their variants are unreachable). Group depth and
-	// parent are resolved by walking parentGroupId chains.
-	if (!useAnyGroups_.empty()) {
-		// Compute depth of each group by walking up the parent chain.
-		auto findGroupIdx = [this](int gid) -> int {
-			for (size_t i = 0; i < useAnyGroups_.size(); ++i)
-				if (useAnyGroups_[i].groupId == gid)
-					return static_cast<int>(i);
-			return -1;
-		};
-		std::vector<int> groupDepth(useAnyGroups_.size(), 0);
-		for (size_t i = 0; i < useAnyGroups_.size(); ++i) {
-			int depth = 0;
-			int parent = useAnyGroups_[i].parentGroupId;
-			while (parent >= 0) {
-				++depth;
-				int pIdx = findGroupIdx(parent);
-				if (pIdx < 0)
-					break;
-				parent = useAnyGroups_[pIdx].parentGroupId;
-				if (depth > 32) // paranoia: malformed cycle
-					break;
-			}
-			groupDepth[i] = depth;
-		}
-
-		// Reachability: a group is reachable iff its parent gate is currently
-		// selected (top-level groups are always reachable).
-		auto groupReachable = [this, &findGroupIdx](size_t gi) -> bool {
-			const UseAnyGroup* cur = &useAnyGroups_[gi];
-			while (cur->parentGroupId >= 0) {
-				int pIdx = findGroupIdx(cur->parentGroupId);
-				if (pIdx < 0)
-					return false;
-				const UseAnyGroup& parent = useAnyGroups_[pIdx];
-				if (parent.activeIndex < 0 || parent.activeIndex >= static_cast<int>(parent.variants.size()))
-					return false;
-				if (parent.variants[parent.activeIndex].variantIdx != cur->parentVariantIdx)
-					return false;
-				cur = &parent;
-			}
-			return true;
-		};
-
-		bool addedHeader = false;
-		for (size_t gi = 0; gi < useAnyGroups_.size(); ++gi) {
-			auto& group = useAnyGroups_[gi];
-			if (group.variants.size() <= 1)
-				continue;
-			if (!groupReachable(gi))
-				continue;
-
-			if (!addedHeader) {
-				wxStaticText* variantHeader = new wxStaticText(meshOverlayPanel, wxID_ANY, wxT("Variants (select one)"));
-				wxFont boldFont = variantHeader->GetFont();
-				boldFont.SetWeight(wxFONTWEIGHT_BOLD);
-				variantHeader->SetFont(boldFont);
-				sizer->Add(variantHeader, 0, wxLEFT | wxTOP, 4);
-				addedHeader = true;
-			}
-
-			// Per-group label (LVLI editor id when known).
-			if (!group.label.empty()) {
-				wxStaticText* gl = new wxStaticText(meshOverlayPanel, wxID_ANY, wxString::FromUTF8(group.label));
-				sizer->Add(gl, 0, wxLEFT | wxTOP, 8 + groupDepth[gi] * 12);
-			}
-
-			wxArrayString choices;
-			for (auto& v : group.variants)
-				choices.Add(wxString::FromUTF8(v.label));
-
-			wxChoice* choice = new wxChoice(meshOverlayPanel, wxID_ANY, wxDefaultPosition, wxDefaultSize, choices);
-			choice->SetSelection(group.activeIndex);
-
-			size_t capturedGi = gi;
-			choice->Bind(wxEVT_CHOICE, [this, capturedGi](wxCommandEvent& ev) { SwitchUseAnyVariant(capturedGi, ev.GetSelection()); });
-
-			sizer->Add(choice, 0, wxLEFT | wxTOP | wxRIGHT | wxEXPAND, 8 + groupDepth[gi] * 12);
-		}
-	}
+	// (Variant gate selection lives in the left-side outfit/NPC trees — the
+	//  overlay is intentionally limited to per-shape enable/disable toggles.)
 
 	meshOverlayPanel->SetSizer(sizer);
 	meshOverlayPanel->FitInside();
@@ -3442,14 +3533,14 @@ void LeveledListPreviewer::OnClose(wxCloseEvent& WXUNUSED(event)) {
 	if (splitter)
 		Config.SetValue("LLPreviewer/SashPos", splitter->GetSashPosition());
 	if (outfitList) {
-		Config.SetValue("LLPreviewer/ColW0", outfitList->GetColumnWidth(0));
-		Config.SetValue("LLPreviewer/ColW1", outfitList->GetColumnWidth(1));
-		Config.SetValue("LLPreviewer/ColW2", outfitList->GetColumnWidth(2));
-
-		// Persist selected outfit name
-		long sel = outfitList->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
-		if (sel >= 0)
-			Config.SetValue("LLPreviewer/LastOutfit", outfitList->GetItemText(sel).ToStdString());
+		// Persist selected outfit name (column widths no longer apply — the
+		// outfit list is now a wxTreeCtrl).
+		wxTreeItemId selId = outfitList->GetSelection();
+		if (selId.IsOk()) {
+			auto* d = dynamic_cast<LLTreeItemData*>(outfitList->GetItemData(selId));
+			if (d && d->kind == LLTreeItemData::Kind::Outfit && d->topIndex >= 0 && d->topIndex < static_cast<int>(filteredOutfits.size()))
+				Config.SetValue("LLPreviewer/LastOutfit", filteredOutfits[d->topIndex]->name);
+		}
 	}
 
 	// Persist head NPC, preset, and weight

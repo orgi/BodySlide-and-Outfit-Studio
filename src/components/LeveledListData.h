@@ -91,6 +91,29 @@ struct OutfitPiece {
 	std::vector<uint32_t> armaAdditionalRaceFormIds; // ARMA additional MODL races
 };
 
+// Full description of a single variant slot of a "Use Any" LVLI gate. Captured
+// for EVERY entry of the source LVLI — including ones that resolve to a stub
+// (unresolved ARMO/LVLI) or to an empty record. This lets the previewer build
+// the full gate tree as a wxTreeCtrl even when some variants produce no
+// visible pieces (otherwise the variant indices would be missing from the UI
+// and the user would see e.g. only variants 0 and 2 with 1 silently dropped).
+struct OutfitVariantInfo {
+	int variantIdx = -1;
+	std::string label;		   // display label (ARMO FULL/editorId, sub-LVLI editorId, or stub)
+	bool gatesSubLvli = false; // true if this variant points to another LVLI (nested gate)
+	uint32_t refFormId = 0;	   // raw referenced FormID (ARMO or LVLI)
+};
+
+// Full description of a "Use Any" gate group introduced while resolving an
+// OTFT. One entry per non-"Use All" LVLI encountered.
+struct OutfitGroupInfo {
+	int groupId = -1;
+	std::string label;		   // source LVLI editor id
+	int parentGroupId = -1;	   // -1 for top-level gates (directly under OTFT)
+	int parentVariantIdx = -1; // variant of parent group that activates this gate
+	std::vector<OutfitVariantInfo> variants;
+};
+
 struct OutfitEntry {
 	std::string name;	   // OTFT editor ID (display name)
 	uint32_t formId = 0;   // OTFT FormID
@@ -99,8 +122,13 @@ struct OutfitEntry {
 	std::vector<OutfitPiece> pieces;
 	// groupId → source LVLI editor id. Populated for every "Use Any" gate
 	// introduced while resolving this outfit. Used by the previewer to label
-	// nested variant selectors.
+	// nested variant selectors. Kept alongside the richer `useAnyGroups`
+	// below for backwards compatibility with code paths that only need labels.
 	std::map<int, std::string> useAnyGroupNames;
+	// Full gate tree built during resolution. Each group lists every variant
+	// slot (even unresolved ones) with a stable label, so the variant tree UI
+	// can render the complete leveled-list structure verbatim.
+	std::vector<OutfitGroupInfo> useAnyGroups;
 };
 
 class LeveledListData {
@@ -258,8 +286,16 @@ private:
 	/// Load records from a single ESP/ESM into the caches.
 	/// masterIndex: the index of this file in the main ESP's master list.
 	/// mainMasters: the master list of the main ESP, used to remap cross-references.
-	void LoadRecordsFromESP(
-		const std::string& filepath, const std::set<std::string>& types, uint8_t masterIndex, const std::vector<std::string>& mainMasters, int masterLoadDepth = 0);
+	/// noClobber: when true, only fill cache entries that aren't already
+	///   present. Used for dependency-fill loads where the plugin being loaded
+	///   is lower in the actual load order than already-cached overrides, so
+	///   overwriting would invert "later load wins".
+	void LoadRecordsFromESP(const std::string& filepath,
+							const std::set<std::string>& types,
+							uint8_t masterIndex,
+							const std::vector<std::string>& mainMasters,
+							int masterLoadDepth = 0,
+							bool noClobber = false);
 
 	/// Load a non-master plugin's RACE/ARMO/ARMA/TXST records into our caches
 	/// so an NPC override that references a self-defined record (e.g. a mod
@@ -267,7 +303,7 @@ private:
 	/// be resolved. Uses a synthetic master index (high bytes 0xFD-0xF0);
 	/// returns that index, or 0 if loading failed. Cached by pluginPath;
 	/// subsequent calls are no-ops.
-	uint8_t EnsureDynamicMaster(const std::string& pluginPath, int masterLoadDepth = 0);
+	uint8_t EnsureDynamicMaster(const std::string& pluginPath, int masterLoadDepth = 0, bool noClobber = false);
 
 	/// Lazy-resolve an NPC skin override on actual use. ScanAllPluginsForNpcSkins
 	/// records raw FormIDs + defining-plugin paths but does not eagerly
@@ -293,7 +329,8 @@ private:
 							int& groupCounter,
 							std::vector<OutfitPiece>& pieces,
 							std::vector<std::pair<uint32_t, uint16_t>>& unresolvedRefs,
-							std::map<int, std::string>& groupNames) const;
+							std::map<int, std::string>& groupNames,
+							std::vector<OutfitGroupInfo>& groups) const;
 
 	/// Create a stub piece for an unresolved ARMO FormID.
 	static OutfitPiece MakeStubPiece(uint32_t formId);

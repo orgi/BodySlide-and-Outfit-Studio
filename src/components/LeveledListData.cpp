@@ -656,7 +656,7 @@ void LeveledListData::LoadAllPluginNativeNPCs() {
 // ---------------------------------------------------------------------------
 
 void LeveledListData::LoadRecordsFromESP(
-	const std::string& filepath, const std::set<std::string>& types, uint8_t masterIndex, const std::vector<std::string>& mainMasters, int masterLoadDepth) {
+	const std::string& filepath, const std::set<std::string>& types, uint8_t masterIndex, const std::vector<std::string>& mainMasters, int masterLoadDepth, bool noClobber) {
 	esp::ESPReader reader;
 	if (!reader.Load(filepath, types)) {
 		wxLogWarning("LeveledListData: Failed to load %s", filepath);
@@ -669,14 +669,33 @@ void LeveledListData::LoadRecordsFromESP(
 	uint8_t selfIndex = static_cast<uint8_t>(reader.GetMasters().size());
 	auto& fileMasters = reader.GetMasters();
 
-	// Build a map: this file's master index → main ESP's master index
-	// by matching filenames (case-insensitive).
+	// Build a map: this file's master index → resolved cache top byte.
+	// First try the main ESP's master list (matched case-insensitive by
+	// filename). Then fall back to any plugin already loaded as a dynamic
+	// (synthetic) master — this is what lets an override plugin's references
+	// to e.g. "Midnight Huntress.esp" be remapped to 0xD1 (its synthetic
+	// slot) instead of falling through and colliding with main-ESP master 7
+	// (SexLab). Without this, an OTFT that mixes references to mapped and
+	// unmapped masters loses the unmapped entries silently.
 	std::unordered_map<uint8_t, uint8_t> masterRemap;
 	for (size_t fi = 0; fi < fileMasters.size(); ++fi) {
 		std::string fileMasterLower = ToLower(fileMasters[fi]);
+		bool mapped = false;
 		for (size_t mi = 0; mi < mainMasters.size(); ++mi) {
 			if (ToLower(mainMasters[mi]) == fileMasterLower) {
 				masterRemap[static_cast<uint8_t>(fi)] = static_cast<uint8_t>(mi);
+				mapped = true;
+				break;
+			}
+		}
+		if (mapped)
+			continue;
+		for (size_t di = 0; di < dynamicMasters.size(); ++di) {
+			const std::string& dyn = dynamicMasters[di];
+			auto slash = dyn.find_last_of("/\\");
+			std::string dbase = ToLower(slash == std::string::npos ? dyn : dyn.substr(slash + 1));
+			if (dbase == fileMasterLower) {
+				masterRemap[static_cast<uint8_t>(fi)] = static_cast<uint8_t>(0xFD - di);
 				break;
 			}
 		}
@@ -729,8 +748,16 @@ void LeveledListData::LoadRecordsFromESP(
 		// Remap armature IDs
 		for (uint32_t aid : ar.armatureIds)
 			ca.armatureIds.push_back(remapFid(aid));
+		// Keep main-ESP-cached ARMO records authoritative. Many override
+		// plugins re-state an ARMO only to tweak keywords/enchantments and
+		// omit MOD2/MOD4 — letting them clobber would strip the model path
+		// and the previewer would render nothing for that piece. OTFT/LVLI
+		// records intentionally remain overridable so load-order edits to
+		// outfit lists (e.g. MoLLi Clothing) take effect.
 		if (mainEspLoaded && mainEspArmoIds.count(remappedId))
-			continue; // don't clobber main ESP's override
+			continue;
+		if (noClobber && armoCache.count(remappedId))
+			continue; // dependency-fill load — keep the already-cached winner
 		armoCache[remappedId] = std::move(ca);
 	}
 
@@ -765,6 +792,8 @@ void LeveledListData::LoadRecordsFromESP(
 		}
 		if (mainEspLoaded && mainEspArmaIds.count(remappedId))
 			continue;
+		if (noClobber && armaCache.count(remappedId))
+			continue;
 		armaCache[remappedId] = std::move(cam);
 	}
 
@@ -777,6 +806,8 @@ void LeveledListData::LoadRecordsFromESP(
 			ct.textures[i] = ts.textures[i];
 		if (mainEspLoaded && mainEspTxstIds.count(remappedId))
 			continue;
+		if (noClobber && txstCache.count(remappedId))
+			continue;
 		txstCache[remappedId] = std::move(ct);
 	}
 
@@ -785,6 +816,8 @@ void LeveledListData::LoadRecordsFromESP(
 	for (auto& npc : reader.GetNPCs()) {
 		if (npc.editorId.empty() || npc.wnamFormId == 0)
 			continue;
+		if (noClobber && npcSkinCache.count(npc.editorId))
+			continue;
 		npcSkinCache[npc.editorId] = remapFid(npc.wnamFormId);
 	}
 
@@ -792,6 +825,8 @@ void LeveledListData::LoadRecordsFromESP(
 	// raceByEditorId is keyed by editor id; overwrite it too so it tracks the same winner.
 	for (auto& r : reader.GetRaces()) {
 		uint32_t remappedId = remapFid(r.formId);
+		if (noClobber && raceCache.count(remappedId))
+			continue;
 		CachedRACE cr;
 		cr.editorId = r.editorId;
 		cr.skinFormId = r.skinFormId != 0 ? remapFid(r.skinFormId) : 0;
@@ -809,21 +844,45 @@ void LeveledListData::LoadRecordsFromESP(
 		chp.type = hp.type;
 		if (mainEspLoaded && mainEspHdptIds.count(remappedId))
 			continue;
+		if (noClobber && headPartCache.count(remappedId))
+			continue;
 		headPartCache[remappedId] = std::move(chp);
 	}
 
 	// Cache OTFT records. Overwrite (later master wins). Required so vanilla
 	// NPC default outfits (DOFT) can be resolved even when the loaded main ESP
 	// doesn't override the OTFT itself.
+	// A remap is "safe" when every referenced top byte is the file's own
+	// selfIndex or a master we successfully mapped to a main-ESP master.
+	// References whose top byte falls through unchanged (override plugin has a
+	// private master the main ESP doesn't list) would collide with whatever
+	// main-ESP master happens to share that index and surface as a wrong
+	// stub. When that happens we keep the previously cached OTFT/LVLI entry
+	// (e.g. the main modular ESP's clean version) rather than letting a
+	// broken override clobber it.
+	auto remapIsSafe = [&](uint32_t fid) -> bool {
+		uint8_t tb = (fid >> 24) & 0xFF;
+		if (tb == selfIndex)
+			return true;
+		return masterRemap.find(tb) != masterRemap.end();
+	};
 	for (auto& ot : reader.GetOutfits()) {
 		uint32_t remappedId = remapFid(ot.formId);
 		CachedOTFT co;
 		co.editorId = ot.editorId;
 		co.items.reserve(ot.items.size());
-		for (uint32_t inam : ot.items)
+		bool allSafe = true;
+		for (uint32_t inam : ot.items) {
+			if (!remapIsSafe(inam))
+				allSafe = false;
 			co.items.push_back(remapFid(inam));
-		if (mainEspLoaded && mainEspOtftIds.count(remappedId))
+		}
+		if (noClobber && otftCache.count(remappedId))
 			continue;
+		if (!allSafe && otftCache.count(remappedId)) {
+			wxLogMessage("  Skipping OTFT %08X override from '%s': contains unmappable master references", remappedId, filepath);
+			continue;
+		}
 		otftCache[remappedId] = std::move(co);
 	}
 
@@ -835,10 +894,18 @@ void LeveledListData::LoadRecordsFromESP(
 		cl.editorId = li.editorId;
 		cl.flags = li.flags;
 		cl.entries.reserve(li.entries.size());
-		for (auto& e : li.entries)
+		bool allSafe = true;
+		for (auto& e : li.entries) {
+			if (!remapIsSafe(e.reference))
+				allSafe = false;
 			cl.entries.emplace_back(remapFid(e.reference), e.level);
-		if (mainEspLoaded && mainEspLvliIds.count(remappedId))
+		}
+		if (noClobber && lvliCache.count(remappedId))
 			continue;
+		if (!allSafe && lvliCache.count(remappedId)) {
+			wxLogMessage("  Skipping LVLI %08X override from '%s': contains unmappable master references", remappedId, filepath);
+			continue;
+		}
 		lvliCache[remappedId] = std::move(cl);
 	}
 }
@@ -900,7 +967,7 @@ OutfitEntry LeveledListData::BuildOutfitFromOtft(uint32_t otftId, int& groupCoun
 		if (lvliIt != lvliCache.end()) {
 			std::vector<OutfitPiece> resolvedPieces;
 			std::vector<std::pair<uint32_t, uint16_t>> unresolvedRefs;
-			ResolveLVLIGrouped(itemId, 1, {}, groupCounter, resolvedPieces, unresolvedRefs, entry.useAnyGroupNames);
+			ResolveLVLIGrouped(itemId, 1, {}, groupCounter, resolvedPieces, unresolvedRefs, entry.useAnyGroupNames, entry.useAnyGroups);
 
 			// Deduplicate ARMOs: within each gating path, keep first occurrence
 			// of each (FormID, nifPath). Across different paths the same ARMO
@@ -1026,7 +1093,7 @@ const OutfitEntry* LeveledListData::ResolveNpcDefaultOutfit(const NPCEntry& npc)
 			return nullptr;
 		}
 
-		uint8_t synthIdx = EnsureDynamicMaster(otftDefiningPlugin);
+		uint8_t synthIdx = EnsureDynamicMaster(otftDefiningPlugin, /*masterLoadDepth*/ 0, /*noClobber*/ true);
 		if (synthIdx == 0) {
 			wxLogWarning("ResolveNpcDefaultOutfit: NPC '%s' lazy-load of '%s' failed", npc.editorId.c_str(), otftDefiningPlugin.c_str());
 			return nullptr;
@@ -1434,6 +1501,16 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 
 	mainEspLoaded = true;
 
+	// Eagerly apply non-master plugin overrides BEFORE building the outfit
+	// list. Previously this scan ran lazily on the first NPC-outfit resolve,
+	// which meant the outfit panel showed pre-override contents until the
+	// user clicked into the NPC tab — and outfits whose pieces are only
+	// resolvable via mod-side overrides (e.g. Octi/J3 Vampire variants) were
+	// invisible on first load. Running it here also lets MoLLi-style
+	// overrides that REMOVE entries from a vanilla LVLI take effect on the
+	// initial outfit list rather than producing a stale set.
+	ScanAllPluginsForOutfitOverrides();
+
 	// Build outfit entries from OTFT records
 	int totalPieces = 0;
 	int unresolvedCount = 0;
@@ -1513,7 +1590,8 @@ void LeveledListData::ResolveLVLIGrouped(uint32_t formId,
 										 int& groupCounter,
 										 std::vector<OutfitPiece>& pieces,
 										 std::vector<std::pair<uint32_t, uint16_t>>& unresolvedRefs,
-										 std::map<int, std::string>& groupNames) const {
+										 std::map<int, std::string>& groupNames,
+										 std::vector<OutfitGroupInfo>& groups) const {
 	auto it = lvliCache.find(formId);
 	if (it == lvliCache.end())
 		return;
@@ -1543,7 +1621,7 @@ void LeveledListData::ResolveLVLIGrouped(uint32_t formId,
 
 			auto lvliIt2 = lvliCache.find(ref);
 			if (lvliIt2 != lvliCache.end()) {
-				ResolveLVLIGrouped(ref, effectiveLevel, parentPath, groupCounter, pieces, unresolvedRefs, groupNames);
+				ResolveLVLIGrouped(ref, effectiveLevel, parentPath, groupCounter, pieces, unresolvedRefs, groupNames, groups);
 				continue;
 			}
 
@@ -1573,6 +1651,17 @@ void LeveledListData::ResolveLVLIGrouped(uint32_t formId,
 
 		int groupId = groupCounter++;
 		groupNames[groupId] = lvli.editorId;
+
+		// Pre-allocate the group info entry so every variant slot — including
+		// stub/unresolved references — appears in the variant tree even when
+		// it produces no pieces.
+		OutfitGroupInfo gi;
+		gi.groupId = groupId;
+		gi.label = lvli.editorId;
+		if (!parentPath.empty()) {
+			gi.parentGroupId = parentPath.back().first;
+			gi.parentVariantIdx = parentPath.back().second;
+		}
 		int variantIdx = 0;
 		wxLogMessage("  LVLI '%s' [%08X] is Use Any → group %d with %zu variants (depth %zu, deduped from %zu raw entries)",
 					 wxString(lvli.editorId),
@@ -1588,8 +1677,20 @@ void LeveledListData::ResolveLVLIGrouped(uint32_t formId,
 			std::vector<std::pair<int, int>> childPath = parentPath;
 			childPath.emplace_back(groupId, variantIdx);
 
+			OutfitVariantInfo vi;
+			vi.variantIdx = variantIdx;
+			vi.refFormId = ref;
+
 			auto armoIt = armoCache.find(ref);
 			if (armoIt != armoCache.end()) {
+				vi.label = !armoIt->second.fullName.empty() ? armoIt->second.fullName : armoIt->second.editorId;
+				if (vi.label.empty()) {
+					char buf[16];
+					std::snprintf(buf, sizeof(buf), "[%08X]", ref);
+					vi.label = buf;
+				}
+				gi.variants.push_back(std::move(vi));
+
 				std::vector<OutfitPiece> resolved;
 				AddPiecesFromArmo(ref, armoIt->second, armoCache, armaCache, txstCache, resolved);
 				for (auto& piece : resolved) {
@@ -1602,14 +1703,32 @@ void LeveledListData::ResolveLVLIGrouped(uint32_t formId,
 
 			auto lvliIt2 = lvliCache.find(ref);
 			if (lvliIt2 != lvliCache.end()) {
-				ResolveLVLIGrouped(ref, effectiveLevel, childPath, groupCounter, pieces, unresolvedRefs, groupNames);
+				vi.label = !lvliIt2->second.editorId.empty() ? lvliIt2->second.editorId : ([ref]() {
+					char buf[16];
+					std::snprintf(buf, sizeof(buf), "[%08X]", ref);
+					return std::string(buf);
+				})();
+				vi.gatesSubLvli = true;
+				gi.variants.push_back(std::move(vi));
+
+				ResolveLVLIGrouped(ref, effectiveLevel, childPath, groupCounter, pieces, unresolvedRefs, groupNames, groups);
 				++variantIdx;
 				continue;
 			}
 
+			// Unresolved reference: still emit a variant slot so the tree UI
+			// renders it (greyed-out in practice — the previewer will show the
+			// stub label and selecting it just yields no pieces).
+			char buf[24];
+			std::snprintf(buf, sizeof(buf), "[%08X]", ref);
+			vi.label = buf;
+			gi.variants.push_back(std::move(vi));
+
 			unresolvedRefs.emplace_back(ref, effectiveLevel);
 			++variantIdx;
 		}
+
+		groups.push_back(std::move(gi));
 	}
 }
 
@@ -2159,7 +2278,7 @@ LeveledListData::BodyPartTextures LeveledListData::ResolveNpcBodyPartTextures(co
 // its WNAM at an ARMO it also defines) can be resolved.
 // ---------------------------------------------------------------------------
 
-uint8_t LeveledListData::EnsureDynamicMaster(const std::string& pluginPath, int masterLoadDepth) {
+uint8_t LeveledListData::EnsureDynamicMaster(const std::string& pluginPath, int masterLoadDepth, bool noClobber) {
 	for (size_t i = 0; i < dynamicMasters.size(); ++i) {
 		if (dynamicMasters[i] == pluginPath)
 			return static_cast<uint8_t>(0xFD - i);
@@ -2174,9 +2293,9 @@ uint8_t LeveledListData::EnsureDynamicMaster(const std::string& pluginPath, int 
 		return 0;
 	}
 	uint8_t synthIdx = static_cast<uint8_t>(prospective);
-	wxLogMessage("EnsureDynamicMaster: loading '%s' at synthetic master index 0x%02X", pluginPath, synthIdx);
+	wxLogMessage("EnsureDynamicMaster: loading '%s' at synthetic master index 0x%02X%s", pluginPath, synthIdx, noClobber ? " (no-clobber)" : "");
 	dynamicMasters.push_back(pluginPath);
-	LoadRecordsFromESP(pluginPath, {"RACE", "ARMO", "ARMA", "TXST", "OTFT", "LVLI"}, synthIdx, espMasters, masterLoadDepth);
+	LoadRecordsFromESP(pluginPath, {"RACE", "ARMO", "ARMA", "TXST", "OTFT", "LVLI"}, synthIdx, espMasters, masterLoadDepth, noClobber);
 	return synthIdx;
 }
 
@@ -2367,17 +2486,24 @@ void LeveledListData::ScanAllPluginsForOutfitOverrides() {
 
 	int probed = 0;
 	int loaded = 0;
-	// Two-pass strategy: pass 1 reserves a synthetic master slot for every
-	// override plugin itself (so even the last one in load order is
-	// guaranteed to fit in the 8-bit master space); pass 2 then performs
-	// best-effort 1-hop master expansion. If expansion exhausts the budget
-	// some referenced items will stay unresolved, but the override plugin's
-	// own records are still loaded — which is what the user cares about.
+	// Three-phase strategy:
+	//   Phase 1: probe each plugin (no loads) to detect overrides and collect
+	//            the file-master indices the override references.
+	//   Phase 2: load every override plugin's referenced 1-hop master (the
+	//            override's own dependencies). Loading these FIRST ensures
+	//            that when phase 3 finally loads the override plugin, its
+	//            cross-references can be remapped to the synthetic indices
+	//            assigned here (otherwise the override's references to e.g.
+	//            "Midnight Huntress.esp" would fall through and collide with
+	//            main-ESP master 7 = SexLab).
+	//   Phase 3: load each override plugin itself. With the synthetic master
+	//            space populated by phase 2, LoadRecordsFromESP's masterRemap
+	//            can now redirect every reference cleanly.
 	struct OverrideEntry {
 		std::string pluginPath;
 		std::string base;
 		std::vector<std::string> srcMasters;
-		std::vector<uint8_t> wantedFileMasters; // unmapped masters to lazy-load in pass 2
+		std::vector<uint8_t> wantedFileMasters; // unmapped masters to lazy-load in phase 2
 	};
 	std::vector<OverrideEntry> overrides;
 
@@ -2455,19 +2581,15 @@ void LeveledListData::ScanAllPluginsForOutfitOverrides() {
 		if (!hasOverride)
 			continue;
 
-		wxLogMessage("ScanAllPluginsForOutfitOverrides: '%s' overrides cached OTFT/LVLI; lazy-loading", base);
-		uint8_t synthIdx = EnsureDynamicMaster(pluginPath);
-		if (synthIdx == 0)
-			continue;
-		++loaded;
+		wxLogMessage("ScanAllPluginsForOutfitOverrides: '%s' overrides cached OTFT/LVLI; deferring load", base);
 
-		// Record this override for pass-2 1-hop expansion. The override
-		// plugin's LVLI/OTFT entries may reference records living in its
-		// OWN masters that aren't part of the main ESP's master list (e.g.
-		// MoLLi Clothing.esp → MoLLi Clothing Patches.esp). Without
-		// loading those, the override's nested ARMO refs stay unresolved
-		// and the variants vanish. We collect referenced unmapped masters
-		// here and lazy-load them best-effort in pass 2.
+		// Record this override for phase-2 dependency expansion and phase-3
+		// override load. The override plugin's LVLI/OTFT entries may
+		// reference records living in its OWN masters that aren't part of
+		// the main ESP's master list (e.g. MoLLi Clothing.esp → MoLLi
+		// Clothing Patches.esp). Loading those before the override itself
+		// gives the override's records a chance to remap cross-references
+		// to the synthetic indices we assign during phase 2.
 		OverrideEntry entry;
 		entry.pluginPath = pluginPath;
 		entry.base = base;
@@ -2505,15 +2627,34 @@ void LeveledListData::ScanAllPluginsForOutfitOverrides() {
 		overrides.push_back(std::move(entry));
 	}
 
-	// Pass 2: best-effort 1-hop master expansion for each override plugin.
-	// EnsureDynamicMaster will silently fail (return 0) once the synthetic
-	// master space fills up; that's acceptable here — the override's own
-	// records are already loaded and the affected entries simply remain
-	// unresolved.
+	// Phase 2: best-effort 1-hop master expansion. Load each override's
+	// referenced file-masters BEFORE the override itself so the override's
+	// cross-references can be redirected to the synthetic indices we hand
+	// out here. CRITICAL: we MUST leave at least `overrides.size()` slots
+	// free for phase 3 to actually load the override plugins themselves —
+	// the user cares about the overrides far more than about their
+	// dependencies (a missing override means the cached pre-override LVLI
+	// stays authoritative, which is what the user reported as "the already
+	// overwritten leveled lists are showing again"). Phase 2 therefore
+	// reserves the trailing slots for phase 3.
 	int expanded = 0;
 	int expansionFailed = 0;
+	auto remainingSlots = [&]() -> int {
+		// dynamicMasters grows downward from 0xFD; max usable slots before
+		// colliding with the main ESP's master range is (0xFD - espMasters.size()).
+		int maxSlots = 0xFD - static_cast<int>(espMasters.size());
+		return maxSlots - static_cast<int>(dynamicMasters.size());
+	};
 	for (auto& entry : overrides) {
 		for (uint8_t fi : entry.wantedFileMasters) {
+			// Leave room for every override that still needs to load in phase 3.
+			// Each override consumes one slot. Loaded overrides won't take
+			// new slots (EnsureDynamicMaster short-circuits if already present)
+			// — but for safety we treat overrides.size() as the upper bound.
+			if (remainingSlots() <= static_cast<int>(overrides.size())) {
+				++expansionFailed;
+				continue;
+			}
 			if (fi >= entry.srcMasters.size())
 				continue;
 			const std::string& masterName = entry.srcMasters[fi];
@@ -2522,7 +2663,7 @@ void LeveledListData::ScanAllPluginsForOutfitOverrides() {
 				masterPath = ResolveCaseInsensitive(baseDataPath, masterName);
 			if (masterPath.empty() || !wxFileName::FileExists(wxString::FromUTF8(masterPath)))
 				continue;
-			uint8_t idx = EnsureDynamicMaster(masterPath);
+			uint8_t idx = EnsureDynamicMaster(masterPath, /*masterLoadDepth*/ 0, /*noClobber*/ true);
 			if (idx != 0)
 				++expanded;
 			else
@@ -2530,11 +2671,21 @@ void LeveledListData::ScanAllPluginsForOutfitOverrides() {
 		}
 	}
 
-	wxLogMessage("ScanAllPluginsForOutfitOverrides: probed %d non-master plugins, lazy-loaded %d with overrides; 1-hop expansion: %d loaded, %d skipped (slot budget)",
+	// Phase 3: now load the override plugins themselves. Their masterRemap
+	// will pick up the synthetic indices assigned in phase 2.
+	for (auto& entry : overrides) {
+		uint8_t synthIdx = EnsureDynamicMaster(entry.pluginPath);
+		if (synthIdx == 0)
+			continue;
+		++loaded;
+	}
+
+	wxLogMessage("ScanAllPluginsForOutfitOverrides: probed %d non-master plugins, %zu deferred overrides; 1-hop expansion: %d loaded, %d skipped; final override loads: %d",
 				 probed,
-				 loaded,
+				 overrides.size(),
 				 expanded,
-				 expansionFailed);
+				 expansionFailed,
+				 loaded);
 }
 
 // ---------------------------------------------------------------------------
@@ -2802,12 +2953,12 @@ void LeveledListData::ScanAllPluginsForNpcSkins() {
 
 void LeveledListData::ResolveLazyNpcSkin(NpcSkinInfo& info) {
 	if (info.remappedRace == 0 && info.rawRace != 0 && !info.raceDefiningPlugin.empty()) {
-		uint8_t synthIdx = EnsureDynamicMaster(info.raceDefiningPlugin);
+		uint8_t synthIdx = EnsureDynamicMaster(info.raceDefiningPlugin, /*masterLoadDepth*/ 0, /*noClobber*/ true);
 		if (synthIdx != 0)
 			info.remappedRace = (static_cast<uint32_t>(synthIdx) << 24) | (info.rawRace & 0x00FFFFFF);
 	}
 	if (info.remappedWnam == 0 && info.rawWnamForResolve != 0 && !info.wnamDefiningPlugin.empty()) {
-		uint8_t synthIdx = EnsureDynamicMaster(info.wnamDefiningPlugin);
+		uint8_t synthIdx = EnsureDynamicMaster(info.wnamDefiningPlugin, /*masterLoadDepth*/ 0, /*noClobber*/ true);
 		if (synthIdx != 0) {
 			info.remappedWnam = (static_cast<uint32_t>(synthIdx) << 24) | (info.rawWnamForResolve & 0x00FFFFFF);
 			info.selfDefined = false;

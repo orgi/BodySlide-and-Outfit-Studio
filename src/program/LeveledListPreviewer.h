@@ -26,6 +26,7 @@
 #include <wx/srchctrl.h>
 #include <wx/textcompleter.h>
 #include <wx/timer.h>
+#include <wx/treectrl.h>
 #include <wx/wx.h>
 
 class BodySlideApp;
@@ -103,12 +104,16 @@ class LeveledListPreviewer : public wxFrame {
 	wxTextCtrl* headCtrl = nullptr;		   // NPC head selector (with autocomplete)
 	wxComboBox* presetCombo = nullptr;	   // BodySlide preset selector
 	wxCheckBox* highWeightCheck = nullptr; // high (_1) vs low (_0) weight
-	wxListCtrl* outfitList = nullptr;
-	// NPC mode (second notebook tab). The NPC list is sorted by displayName
-	// and lets the user pick any NPC; the selected NPC's default outfit
-	// (DOFT) is rendered alongside the NPC's body / head.
+	// Outfit tree (Outfits tab). Top-level nodes are LVLI/OTFT outfits; each
+	// expands lazily into a variant gate tree mirroring the leveled-list
+	// hierarchy of that outfit.
+	wxTreeCtrl* outfitList = nullptr;
+	// NPC mode (second notebook tab). The NPC tree is sorted by displayName
+	// and lets the user pick any NPC; each NPC node expands into the variant
+	// gate tree for that NPC's default outfit (DOFT). The selected NPC's
+	// default outfit is rendered alongside the NPC's body / head.
 	wxNotebook* viewNotebook = nullptr;
-	wxListCtrl* npcList = nullptr;
+	wxTreeCtrl* npcList = nullptr;
 	wxSearchCtrl* npcSearchCtrl = nullptr;
 	wxButton* loadAllNpcsBtn = nullptr;
 	wxCheckBox* npcHumanoidOnlyCheck = nullptr;
@@ -190,11 +195,12 @@ public:
 	// List and filter events
 	void OnSearchChanged(wxCommandEvent& event);
 	void OnLevelChanged(wxSpinEvent& event);
-	void OnOutfitSelected(wxListEvent& event);
+	void OnOutfitSelected(wxTreeEvent& event);
+	void OnTreeItemTooltip(wxTreeEvent& event);
 
 	// NPC mode events
 	void OnNpcSearchChanged(wxCommandEvent& event);
-	void OnNpcSelected(wxListEvent& event);
+	void OnNpcSelected(wxTreeEvent& event);
 	void OnLoadAllNpcs(wxCommandEvent& event);
 	void OnViewTabChanged(wxBookCtrlEvent& event);
 
@@ -263,6 +269,20 @@ private:
 	void SyncMeshOverlayStates();
 	void RepositionMeshOverlay();
 	void SwitchUseAnyVariant(size_t groupIdx, int newVariantIdx);
+	// Activate the given (groupId, variantIdx) and recursively walk up the
+	// ancestor chain, activating the parent variant that gates this group at
+	// every level. Used by the tree-view variant selector so clicking any
+	// node automatically selects the chain that makes that node visible.
+	// `descend` true also defaults any sub-groups gated by the newly-active
+	// variant to their first variant — matching the user's mental model of
+	// "select a parent → first child becomes active".
+	void ActivateVariantChain(int groupId, int variantIdx, bool descend);
+	// Build (or rebuild) the variant gate subtree under a top-level outfit
+	// or NPC node. Reads the currently-loaded outfit's `useAnyGroups_` and
+	// `shapeUseAnyPath_` to derive per-variant renderability — variants that
+	// resolve to no visible pieces are added as greyed-out items carrying a
+	// tooltip explaining why. Removes any pre-existing children first.
+	void PopulateVariantSubtree(wxTreeCtrl* tree, wxTreeItemId parent);
 	// Walk every shape registered in shapeUseAnyPath_ and set its visibility
 	// to AND(every gate in the path is currently selected). Honors the
 	// untextured-meshes toggle and the per-shape user override so users can
