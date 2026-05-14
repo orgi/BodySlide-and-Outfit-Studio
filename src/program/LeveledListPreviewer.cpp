@@ -15,6 +15,7 @@
 #include <unordered_set>
 
 #include <ExtraData.hpp>
+#include <Shaders.hpp>
 #include <wx/dir.h>
 #include <wx/filename.h>
 #include <wx/treectrl.h>
@@ -822,7 +823,7 @@ TriFile* LeveledListPreviewer::GetOrLoadTriFile(const std::string& nifRelativePa
 // Body mesh loading (base layer: body, hands, feet)
 // ---------------------------------------------------------------------------
 
-bool LeveledListPreviewer::LoadNifFromPath(const std::string& relativePath, const std::string& prefix) {
+bool LeveledListPreviewer::LoadNifFromPath(const std::string& relativePath, const std::string& prefix, int sourceSlot) {
 	std::string baseGamePath = Config["GameDataPath"];
 	if (!baseGamePath.empty() && baseGamePath.back() != '/' && baseGamePath.back() != '\\')
 		baseGamePath += '/';
@@ -882,6 +883,8 @@ bool LeveledListPreviewer::LoadNifFromPath(const std::string& relativePath, cons
 		if (std::find(bodyShapeNames.begin(), bodyShapeNames.end(), m->shapeName) == bodyShapeNames.end())
 			bodyShapeNames.push_back(m->shapeName);
 		shapeNifSource[m->shapeName] = relativePath;
+		if (sourceSlot != 0)
+			bodyShapeSourceSlot[m->shapeName] = sourceSlot;
 
 		// Extract partition body part IDs from NIF dismember skin
 		auto* shape = nif.FindBlockByName<NiShape>(shapeName);
@@ -894,6 +897,31 @@ bool LeveledListPreviewer::LoadNifFromPath(const std::string& relativePath, cons
 					partIds.insert(partInfo[i].partID);
 				bodyShapePartMap[m->shapeName] = std::move(partIds);
 				wxLogMessage("  Body shape '%s' partition IDs: %zu entries", m->shapeName, bodyShapePartMap[m->shapeName].size());
+			}
+
+			// Record whether the shape's BSLightingShaderProperty has Skin Tint
+			// enabled. The game engine forces the NPC's NAM1 skin textures + QNAM
+			// tint onto skin-tinted shapes regardless of dismember partition or
+			// alt-tex entries; non-skin-tinted shapes keep their NIF-embedded
+			// BSShaderTextureSet untouched.
+			NiShader* shader = nif.GetShader(shape);
+			bool skinTinted = shader && shader->IsSkinTinted();
+			shapeIsSkinTinted[m->shapeName] = skinTinted;
+			if (auto* bslsp = dynamic_cast<BSLightingShaderProperty*>(shader)) {
+				wxLogMessage("  Body shape '%s' skinTinted=%d bslspShaderType=%u SF1=0x%08X SF2=0x%08X tint=(%.3f,%.3f,%.3f) clamp=%u alpha=%.3f",
+							 m->shapeName,
+							 skinTinted ? 1 : 0,
+							 shader->bslspShaderType,
+							 bslsp->shaderFlags1,
+							 bslsp->shaderFlags2,
+							 bslsp->skinTintColor.x,
+							 bslsp->skinTintColor.y,
+							 bslsp->skinTintColor.z,
+							 bslsp->textureClampMode,
+							 bslsp->alpha);
+			}
+			else {
+				wxLogMessage("  Body shape '%s' skinTinted=%d (no BSLightingShaderProperty)", m->shapeName, skinTinted ? 1 : 0);
 			}
 		}
 	}
@@ -920,6 +948,18 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 		for (auto it = bodyShapePartMap.begin(); it != bodyShapePartMap.end();) {
 			if (raceBodySet.count(it->first))
 				it = bodyShapePartMap.erase(it);
+			else
+				++it;
+		}
+		for (auto it = shapeIsSkinTinted.begin(); it != shapeIsSkinTinted.end();) {
+			if (raceBodySet.count(it->first))
+				it = shapeIsSkinTinted.erase(it);
+			else
+				++it;
+		}
+		for (auto it = bodyShapeSourceSlot.begin(); it != bodyShapeSourceSlot.end();) {
+			if (raceBodySet.count(it->first))
+				it = bodyShapeSourceSlot.erase(it);
 			else
 				++it;
 		}
@@ -989,7 +1029,7 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 	}
 
 	for (auto& entry : bodyNifs) {
-		if (!LoadNifFromPath(entry.path)) {
+		if (!LoadNifFromPath(entry.path, "", entry.slot)) {
 			wxLogMessage("LeveledListPreviewer: Body part not found: %s", entry.path);
 			continue;
 		}
@@ -1079,62 +1119,30 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 				m->color = nifly::Vector3(npcTintR, npcTintG, npcTintB);
 		};
 
-		// Only retexture race-loaded body shapes here. bodyShapePartMap also
-		// holds entries for head shapes (FaceGen NIFs commonly tag eyes /
-		// brows / mouth with body-slot dismember partitions) and for outfit
-		// shapes — neither of those should receive the skin TXST from this
-		// path. ReconcileBodyAndOutfitShapes is the place that retargets
-		// outfit body shapes; head shapes use whatever the FaceGen NIF
-		// embeds.
+		// Game-accurate skin retexture: the engine forces the NPC's NAM1
+		// skin TXST (and QNAM tint) onto shapes whose BSLightingShaderProperty
+		// has Skin Tint enabled (bslspShaderType == BSLSP_SKINTINT). All other
+		// shapes — including secondary anatomy shapes (3BA vagina/anus) that
+		// share partition 32 with the body but carry their own non-skin-tint
+		// shader — keep their NIF-embedded BSShaderTextureSet untouched and
+		// do not receive the QNAM tint.
 		//
-		// For body slot (partition 32) the loaded body NIF can hold multiple
-		// shapes (e.g. 3BA splits body / vagina / anus, all on slot 32). The
-		// NIF already carries correct per-shape BSShaderTextureSets — we must
-		// only retexture the *reference* body shape (the main body mesh) and
-		// leave the secondary anatomy shapes' embedded textures alone.
-		// Otherwise the single ARMA-resolved body TXST gets slammed onto every
-		// shape, replacing the vagina/anus detail textures with the main-body
-		// diffuse (or vice versa, depending on altTex order).
-		//
-		// The reference body shape is identified as the partition-32 shape
-		// with the largest vertex count.
-		std::string referenceBodyShape;
-		int referenceBodyVerts = -1;
+		// Slot routing (body vs hands vs feet TXST) is by which body NIF the
+		// shape was loaded from (recorded in bodyShapeSourceSlot at load time).
 		for (auto& name : bodyShapeNames) {
-			auto it = bodyShapePartMap.find(name);
-			if (it == bodyShapePartMap.end())
+			auto stIt = shapeIsSkinTinted.find(name);
+			if (stIt == shapeIsSkinTinted.end() || !stIt->second) {
+				wxLogMessage("LeveledListPreviewer: Preserving NIF-embedded textures for non-skin-tinted body shape '%s'", name);
 				continue;
-			if (!it->second.count(32))
-				continue;
-			Mesh* m = gls.GetMesh(name);
-			if (!m)
-				continue;
-			if (m->nVerts > referenceBodyVerts) {
-				referenceBodyVerts = m->nVerts;
-				referenceBodyShape = name;
 			}
-		}
-
-		for (auto& name : bodyShapeNames) {
-			auto it = bodyShapePartMap.find(name);
-			if (it == bodyShapePartMap.end())
+			auto slotIt = bodyShapeSourceSlot.find(name);
+			if (slotIt == bodyShapeSourceSlot.end())
 				continue;
-			auto& partIds = it->second;
-			if (partIds.count(32)) {
-				if (name == referenceBodyShape) {
-					applyToShape(name, bodyTex, "body");
-				}
-				else {
-					wxLogMessage("LeveledListPreviewer: Preserving NIF-embedded textures for non-reference body shape '%s' (verts=%d, reference='%s')",
-								 name,
-								 gls.GetMesh(name) ? gls.GetMesh(name)->nVerts : 0,
-								 referenceBodyShape);
-				}
+			switch (slotIt->second) {
+				case 32: applyToShape(name, bodyTex, "body"); break;
+				case 33: applyToShape(name, handsTex, "hands"); break;
+				case 37: applyToShape(name, feetTex, "feet"); break;
 			}
-			else if (partIds.count(33))
-				applyToShape(name, handsTex, "hands");
-			else if (partIds.count(37))
-				applyToShape(name, feetTex, "feet");
 		}
 	}
 
@@ -1294,62 +1302,15 @@ void LeveledListPreviewer::ReconcileBodyAndOutfitShapes() {
 		return nullptr;
 	};
 
-	// Many outfit shapes carry body-slot dismember partitions (32/33/37) just
-	// because they're skinned to the body — a dress that morphs with the body
-	// will have partition 32 even though it's not a body mesh. To avoid
-	// retexturing dresses, sleeves, etc., only override an outfit shape when
-	// its current diffuse texture path looks like a vanilla body/hands/feet
-	// texture. That singles out the outfit's "reference" body shape (the
-	// femalebody substitute baked into the outfit NIF) without touching the
-	// clothing parts.
-	auto lower = [](std::string s) {
-		std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
-		return s;
-	};
-	auto isVanillaBodyTex = [&](const std::string& path) {
-		std::string p = lower(path);
-		return p.find("femalebody") != std::string::npos || p.find("malebody") != std::string::npos;
-	};
-	auto isVanillaHandsTex = [&](const std::string& path) {
-		std::string p = lower(path);
-		return p.find("femalehands") != std::string::npos || p.find("malehands") != std::string::npos;
-	};
-	auto isVanillaFeetTex = [&](const std::string& path) {
-		// Vanilla feet meshes (FemaleFeet.nif / MaleFeet.nif) point at the
-		// body diffuse — actors/character/female/femalebody_1.dds — not at a
-		// dedicated femalefeet_*.dds. Accept both the body and explicit
-		// femalefeet patterns so an outfit's reference feet shape is
-		// recognized regardless of which convention the modder used.
-		std::string p = lower(path);
-		return p.find("femalefeet") != std::string::npos || p.find("malefeet") != std::string::npos || p.find("femalebody") != std::string::npos
-			   || p.find("malebody") != std::string::npos;
-	};
-
-	// As in the race-body retexture pass above: 3BA-style outfits expose
-	// multiple partition-32 shapes (body / vagina / anus) that all carry a
-	// "femalebody*" texture variant. We must only retexture the reference
-	// body shape (largest vert count among partition-32 outfit shapes) so the
-	// vagina/anus shapes keep their NIF-embedded detail textures
-	// (femalebody_etc_v2_1.dds etc.) instead of being overwritten with the
-	// main-body diffuse.
-	std::string outfitReferenceBodyShape;
-	int outfitReferenceBodyVerts = -1;
+	// Game-accurate retexture for outfit shapes: only shapes whose
+	// BSLightingShaderProperty has Skin Tint enabled receive the NPC's NAM1
+	// skin TXST + QNAM tint. Slot routing is by dismember partition (32/33/37).
+	// Non-skin-tinted outfit shapes keep their NIF-embedded BSShaderTextureSet,
+	// which is what the engine does too.
 	for (auto& outfitShape : outfitShapeNames) {
-		auto it = bodyShapePartMap.find(outfitShape);
-		if (it == bodyShapePartMap.end() || !it->second.count(32))
+		auto stIt = shapeIsSkinTinted.find(outfitShape);
+		if (stIt == shapeIsSkinTinted.end() || !stIt->second)
 			continue;
-		Mesh* m = gls.GetMesh(outfitShape);
-		if (!m)
-			continue;
-		if (m->nVerts > outfitReferenceBodyVerts) {
-			outfitReferenceBodyVerts = m->nVerts;
-			outfitReferenceBodyShape = outfitShape;
-		}
-	}
-	if (!outfitReferenceBodyShape.empty())
-		wxLogMessage("ReconcileBodyAndOutfitShapes: outfit reference body shape='%s' (verts=%d)", outfitReferenceBodyShape, outfitReferenceBodyVerts);
-
-	for (auto& outfitShape : outfitShapeNames) {
 		auto it = bodyShapePartMap.find(outfitShape);
 		if (it == bodyShapePartMap.end())
 			continue;
@@ -1358,11 +1319,6 @@ void LeveledListPreviewer::ReconcileBodyAndOutfitShapes() {
 		const std::vector<std::string>* tex = nullptr;
 		const char* slotLabel = nullptr;
 		if (it->second.count(32)) {
-			// Only retexture the outfit's reference body shape; other
-			// partition-32 shapes (vagina/anus on 3BA) keep their NIF
-			// textures.
-			if (outfitShape != outfitReferenceBodyShape)
-				continue;
 			slot = 32;
 			slotLabel = "body";
 			if (!bodyTex.empty() && !bodyTex[0].empty())
@@ -1381,21 +1337,6 @@ void LeveledListPreviewer::ReconcileBodyAndOutfitShapes() {
 				tex = &feetTex;
 		}
 		if (slot == 0)
-			continue;
-
-		// Verify that the outfit shape is a body part (not a dress/sleeve/etc.)
-		// by inspecting its existing diffuse texture path.
-		auto curIt = shapeTexFiles.find(outfitShape);
-		if (curIt == shapeTexFiles.end() || curIt->second.empty() || curIt->second[0].empty())
-			continue;
-		const std::string& curDiffuse = curIt->second[0];
-		bool looksLikeBodyPart = false;
-		switch (slot) {
-			case 32: looksLikeBodyPart = isVanillaBodyTex(curDiffuse); break;
-			case 33: looksLikeBodyPart = isVanillaHandsTex(curDiffuse); break;
-			case 37: looksLikeBodyPart = isVanillaFeetTex(curDiffuse); break;
-		}
-		if (!looksLikeBodyPart)
 			continue;
 
 		// Fall back to the race body NIF's embedded texture set when no
@@ -2718,6 +2659,16 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 						wxLogMessage("  Outfit shape '%s' partitions: [%s]", m->shapeName, partList);
 					}
 				}
+
+				// Record the shape's Skin Tint flag (BSLightingShaderProperty).
+				// Outfit shapes marked skin-tinted receive the NPC's slot-resolved
+				// NAM1 skin TXST + QNAM tint in ReconcileBodyAndOutfitShapes; all
+				// other outfit shapes keep their NIF-embedded textures.
+				NiShader* outfitShader = nif.GetShader(nifShape);
+				bool outfitSkinTinted = outfitShader && outfitShader->IsSkinTinted();
+				shapeIsSkinTinted[m->shapeName] = outfitSkinTinted;
+				if (outfitSkinTinted)
+					wxLogMessage("  Outfit shape '%s' is skin-tinted", m->shapeName);
 			}
 
 			// Cache game verts for reset and .tri morphing

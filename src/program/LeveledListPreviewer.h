@@ -96,6 +96,17 @@ class LeveledListPreviewer : public wxFrame {
 	// (e.g. 32=SBP_32_BODY, 33=SBP_33_HANDS, 37=SBP_37_FEET)
 	std::unordered_map<std::string, std::set<uint16_t>> bodyShapePartMap;
 
+	// Skin-tint marker: shape name → true if the shape's BSLightingShaderProperty
+	// has Skin Tint enabled (bslspShaderType == BSLSP_SKINTINT). The game engine
+	// intercepts these shapes and forces the NPC's NAM1 skin textures + QNAM tint
+	// onto them; non-skin-tinted shapes keep their NIF-embedded BSShaderTextureSet.
+	std::unordered_map<std::string, bool> shapeIsSkinTinted;
+
+	// Slot the body-chain NIF was loaded for (32=body, 33=hands, 37=feet).
+	// Outfit shapes are not in this map — their slot is derived from their
+	// dismember partition at retexture time.
+	std::unordered_map<std::string, int> bodyShapeSourceSlot;
+
 	// UI controls
 	wxSplitterWindow* splitter = nullptr;
 	wxSearchCtrl* searchCtrl = nullptr;
@@ -243,7 +254,7 @@ private:
 	void SelectNpc(const lldata::NPCEntry& npc, bool loadDefaultOutfit);
 	void LoadOutfitMeshes(const lldata::OutfitEntry& outfit);
 	bool AddNifShapeTextures(nifly::NifFile* nif, const std::string& shapeName, const std::vector<lldata::TextureOverride>* overrides = nullptr, const std::string& meshName = {});
-	bool LoadNifFromPath(const std::string& relativePath, const std::string& prefix = "");
+	bool LoadNifFromPath(const std::string& relativePath, const std::string& prefix = "", int sourceSlot = 0);
 	void LoadBodyMeshes();
 	void LoadHeadMesh(const lldata::NPCEntry& npc);
 	void ClearHeadMeshes();

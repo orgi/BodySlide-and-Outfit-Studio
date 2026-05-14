@@ -2162,43 +2162,24 @@ LeveledListData::BodyNifPaths LeveledListData::ResolveNpcBodyNifPaths(const std:
 // ---------------------------------------------------------------------------
 
 namespace {
-// Fill `dst` from the first TXST in ARMA's female alt-texture list (fallback male).
-// If MO3S/MO2S yield nothing, fall back to the per-gender skin TXST set via
-// NAM1 (female) / NAM0 (male) — that's the simpler ESP/ESL skin override
-// mechanism that mods commonly use to retexture an NPC's body.
-//
-// `slotHint` is currently informational; per-shape disambiguation is handled
-// by the renderer (the body NIF's reference shape is the only one retextured).
-enum class ArmaSlotKind { Body, Hands, Feet, Any };
-
+// Fill `dst` from the ARMA's female skin TXST (NAM1). That is the TXST the
+// game engine forces onto skin-tinted shapes for female bodies. MO3S/MO2S
+// alt-textures are per-NiTriShape overrides for *non-skin* shapes in the
+// worn mesh and must NOT be consulted here. NAM0 (male) is never used as a
+// fallback — BodySlide renders female bodies, so a male TXST on a female
+// mesh would be wrong.
 bool FillFromArmaTextures(const CachedARMA& arma,
 						  const std::unordered_map<lldata::FormId, CachedTXST>& txstCache,
-						  std::array<std::string, 8>& dst,
-						  ArmaSlotKind /*slotHint*/ = ArmaSlotKind::Any) {
-	auto& altTex = arma.altTexFemale.empty() ? arma.altTexMale : arma.altTexFemale;
-	for (auto& at : altTex) {
-		auto it = txstCache.find(at.txstFormId);
-		if (it == txstCache.end())
-			continue;
-		for (int i = 0; i < 8; ++i)
-			if (!it->second.textures[i].empty())
-				dst[i] = it->second.textures[i];
-		if (!dst[0].empty())
-			return true;
-	}
-
-	lldata::FormId skinTxst = arma.skinTextureFemale != 0 ? arma.skinTextureFemale : arma.skinTextureMale;
-	if (skinTxst != 0) {
-		auto it = txstCache.find(skinTxst);
-		if (it != txstCache.end()) {
-			for (int i = 0; i < 8; ++i)
-				if (!it->second.textures[i].empty())
-					dst[i] = it->second.textures[i];
-			if (!dst[0].empty())
-				return true;
-		}
-	}
-	return false;
+						  std::array<std::string, 8>& dst) {
+	if (arma.skinTextureFemale == 0)
+		return false;
+	auto it = txstCache.find(arma.skinTextureFemale);
+	if (it == txstCache.end())
+		return false;
+	for (int i = 0; i < 8; ++i)
+		if (!it->second.textures[i].empty())
+			dst[i] = it->second.textures[i];
+	return !dst[0].empty();
 }
 
 // Walk an ARMO's ARMA list filling per-slot texture arrays. Prefers race-matching ARMAs.
@@ -2255,15 +2236,15 @@ void FillPartTexturesFromArmo(lldata::FormId armoFid,
 						 arma.skinTextureMale);
 
 			if ((arma.bodySlotFlags & (1u << 2)) && out.body[0].empty()) {
-				if (FillFromArmaTextures(arma, txstCache, out.body, ArmaSlotKind::Body))
+				if (FillFromArmaTextures(arma, txstCache, out.body))
 					wxLogMessage("    body texture set: %s", out.body[0]);
 			}
 			if ((arma.bodySlotFlags & (1u << 3)) && out.hands[0].empty()) {
-				if (FillFromArmaTextures(arma, txstCache, out.hands, ArmaSlotKind::Hands))
+				if (FillFromArmaTextures(arma, txstCache, out.hands))
 					wxLogMessage("    hands texture set: %s", out.hands[0]);
 			}
 			if ((arma.bodySlotFlags & (1u << 7)) && out.feet[0].empty()) {
-				if (FillFromArmaTextures(arma, txstCache, out.feet, ArmaSlotKind::Feet))
+				if (FillFromArmaTextures(arma, txstCache, out.feet))
 					wxLogMessage("    feet texture set: %s", out.feet[0]);
 			}
 		}
