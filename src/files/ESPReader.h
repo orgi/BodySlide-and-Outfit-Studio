@@ -91,8 +91,8 @@ struct ArmorAddonRecord {
 	std::string modelMale;	 // MOD2 — male 3rd person worn mesh
 	std::string modelFemale; // MOD3 — female 3rd person worn mesh
 	uint32_t bodySlotFlags = 0;
-	uint32_t raceId = 0x00019;					   // RNAM — primary race
-	std::vector<uint32_t> additionalRaces;		   // MODL — additional RACE FormIDs this ARMA also applies to
+	uint32_t raceId = 0x00019;					// RNAM — primary race
+	std::vector<uint32_t> additionalRaces;		// MODL — additional RACE FormIDs this ARMA also applies to
 	std::vector<AlternateTexture> altTexFemale; // MO3S — female model alternate textures
 	std::vector<AlternateTexture> altTexMale;	// MO2S — male model alternate textures
 	// NAM0 / NAM1: a single TXST FormID applied to every shape in the worn
@@ -133,8 +133,8 @@ struct NPCRecord {
 	uint32_t formId = 0;
 	std::string editorId;
 	std::string fullName;
-	uint32_t wnamFormId = 0;  // WNAM: skin/worn armor FormID (0 = use race default)
-	uint32_t raceFormId = 0;  // RNAM: race FormID
+	uint32_t wnamFormId = 0;		  // WNAM: skin/worn armor FormID (0 = use race default)
+	uint32_t raceFormId = 0;		  // RNAM: race FormID
 	uint32_t defaultOutfitFormId = 0; // DOFT: default outfit (OTFT FormID; 0 = none)
 	bool isFemale = false;			  // ACBS flags bit 0 — set when NPC is female
 	// QNAM — 3 floats (R,G,B) texture lighting / face tint color

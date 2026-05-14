@@ -68,20 +68,28 @@ class LeveledListPreviewer : public wxFrame {
 	std::unordered_map<std::string, std::vector<std::string>> shapeTexFiles;
 	std::set<std::string> expandedNifGroups; // NIF paths currently expanded in overlay
 
-	// "Use Any" variant groups: only one variant per group is shown at a time
+	// "Use Any" variant groups: only one variant per group is shown at a time.
+	// Groups form a tree: a group whose parent gate is not currently active
+	// is itself dormant. `UseAnyVariant::shapeNames` only lists the shapes
+	// whose deepest gate is THIS variant — visibility evaluation walks the
+	// full path stored on each piece so nested gates AND together.
 	struct UseAnyVariant {
 		int variantIdx = -1;				 // original variant index from ESP
 		std::string label;					 // display name for this variant
-		std::vector<std::string> shapeNames; // shapes belonging to this variant
+		std::vector<std::string> shapeNames; // shapes whose deepest gate is this variant
 	};
 	struct UseAnyGroup {
 		int groupId = -1;
+		std::string label;		   // source LVLI editor id (from OutfitEntry::useAnyGroupNames)
+		int parentGroupId = -1;	   // outer gate this group depends on (-1 = top-level)
+		int parentVariantIdx = -1; // variant index in the parent group that activates this group
 		std::vector<UseAnyVariant> variants;
 		int activeIndex = 0; // which variant is currently shown
 	};
 	std::vector<UseAnyGroup> useAnyGroups_;
-	// Map shape name → (group index in useAnyGroups_, variant index) for quick lookup
-	std::unordered_map<std::string, std::pair<size_t, size_t>> shapeToVariantGroup_;
+	// Shape name → full gating path (list of (groupId, variantIdx)). Empty path
+	// means the shape is unconditional.
+	std::unordered_map<std::string, std::vector<std::pair<int, int>>> shapeUseAnyPath_;
 
 	// Body part tracking: shape name → set of NIF partition body part IDs
 	// (e.g. 32=SBP_32_BODY, 33=SBP_33_HANDS, 37=SBP_37_FEET)
@@ -255,6 +263,16 @@ private:
 	void SyncMeshOverlayStates();
 	void RepositionMeshOverlay();
 	void SwitchUseAnyVariant(size_t groupIdx, int newVariantIdx);
+	// Walk every shape registered in shapeUseAnyPath_ and set its visibility
+	// to AND(every gate in the path is currently selected). Honors the
+	// untextured-meshes toggle and the per-shape user override so users can
+	// still hide individual shapes manually.
+	void ApplyUseAnyVisibility();
+	// True iff every (groupId, variantIdx) in `path` matches the current
+	// activeIndex of the corresponding group. Groups whose own parent gate is
+	// inactive count as inactive (so a piece is hidden if any ancestor gate is
+	// closed, regardless of the local gate's selection).
+	bool IsUseAnyPathActive(const std::vector<std::pair<int, int>>& path) const;
 
 	// SMP physics helpers
 	void SetupSmpSimulation();

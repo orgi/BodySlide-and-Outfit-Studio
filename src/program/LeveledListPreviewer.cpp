@@ -173,7 +173,8 @@ LeveledListPreviewer::LeveledListPreviewer(wxEvtHandler* handler)
 	// is a female-body utility, the rendered body/outfit only really makes sense
 	// for female NPCs; checking this hides every male NPC.
 	npcFemaleOnlyCheck = new wxCheckBox(npcsTab, ID_NpcFemaleOnly, _("Female NPCs only"));
-	npcFemaleOnlyCheck->SetToolTip(_("Hide male NPCs (ACBS female flag = 0). BodySlide renders female bodies/outfits, so male NPCs will appear with a female body unless filtered out."));
+	npcFemaleOnlyCheck->SetToolTip(
+		_("Hide male NPCs (ACBS female flag = 0). BodySlide renders female bodies/outfits, so male NPCs will appear with a female body unless filtered out."));
 	npcFemaleOnlyCheck->SetValue(Config.GetIntValue("LLPreviewer/NpcFemaleOnly") != 0);
 	npcFemaleOnlyCheck->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
 		Config.SetValue("LLPreviewer/NpcFemaleOnly", npcFemaleOnlyCheck->GetValue() ? 1 : 0);
@@ -1692,14 +1693,15 @@ void LeveledListPreviewer::SelectNpc(const lldata::NPCEntry& npc, bool loadDefau
 			outfitGameVerts.clear();
 			shapeArmoBodySlots.clear();
 			useAnyGroups_.clear();
-			shapeToVariantGroup_.clear();
+			shapeUseAnyPath_.clear();
 			currentOutfit = nullptr;
 			// Distinguish "no DOFT defined" (normal for creatures) from "DOFT exists
 			// but couldn't be resolved" (mod outfit chain not loaded).
 			if (npc.defaultOutfitFormIdRaw == 0)
 				SetStatusText(wxString::Format(_("NPC '%s' has no default outfit"), wxString::FromUTF8(logName)));
 			else
-				SetStatusText(wxString::Format(_("NPC '%s' default outfit unresolvable (defined in '%s')"), wxString::FromUTF8(logName), wxString::FromUTF8(npc.defaultOutfitSourcePlugin)));
+				SetStatusText(
+					wxString::Format(_("NPC '%s' default outfit unresolvable (defined in '%s')"), wxString::FromUTF8(logName), wxString::FromUTF8(npc.defaultOutfitSourcePlugin)));
 		}
 	}
 
@@ -1796,28 +1798,25 @@ void LeveledListPreviewer::UpdateActiveSlotsAndVisibility() {
 
 	outfitDeclaredSlots.clear();
 	for (auto& piece : currentOutfit->pieces) {
-		if (piece.useAnyGroup >= 0) {
+		if (!piece.useAnyPath.empty()) {
+			// Pieces sitting behind a gate only contribute slots when every
+			// gate on their path is currently selected. During initial load
+			// (before useAnyGroups_ is populated) treat the first variant as
+			// active for every gate to match the default activeIndex = 0.
 			if (useAnyGroups_.empty()) {
-				// Initial load: no groups built yet, assume variant 0
-				if (piece.useAnyVariant != 0)
-					continue;
-			}
-			else {
-				// Switching variants: use the current built group state
-				bool isActive = false;
-				for (auto& g : useAnyGroups_) {
-					if (g.groupId == piece.useAnyGroup) {
-						// Active variant is indexed by g.activeIndex
-						if (g.activeIndex >= 0 && g.activeIndex < static_cast<int>(g.variants.size())) {
-							if (g.variants[g.activeIndex].variantIdx == piece.useAnyVariant) {
-								isActive = true;
-								break;
-							}
-						}
+				bool allZero = true;
+				for (auto& [g, v] : piece.useAnyPath) {
+					(void)g;
+					if (v != 0) {
+						allZero = false;
+						break;
 					}
 				}
-				if (!isActive)
+				if (!allZero)
 					continue;
+			}
+			else if (!IsUseAnyPathActive(piece.useAnyPath)) {
+				continue;
 			}
 		}
 		for (int slot : piece.bodySlots)
@@ -2176,7 +2175,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 		outfitGameVerts.clear();
 		outfitShapeNifName_.clear();
 		useAnyGroups_.clear();
-		shapeToVariantGroup_.clear();
+		shapeUseAnyPath_.clear();
 	}
 
 	gls.RenderOneFrame();
@@ -2196,8 +2195,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 
 	// Track shapes per piece for variant group building
 	struct PieceShapeInfo {
-		int useAnyGroup;
-		int useAnyVariant;
+		std::vector<std::pair<int, int>> useAnyPath;
 		std::string pieceName;
 		std::string pieceEditorId;
 		uint32_t pieceFormId = 0;
@@ -2315,7 +2313,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 			continue;
 		}
 
-		wxLogMessage("  Piece '%s' [%08X]: nifPath=%s (group=%d, variant=%d)", piece.name, piece.formId, piece.nifPath, piece.useAnyGroup, piece.useAnyVariant);
+		wxLogMessage("  Piece '%s' [%08X]: nifPath=%s (path depth=%zu)", piece.name, piece.formId, piece.nifPath, piece.useAnyPath.size());
 
 		// When in low weight mode, try the _0.nif variant of the piece
 		std::string piecePath = piece.nifPath;
@@ -2390,8 +2388,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 		TriFile* pieceTri = GetOrLoadTriFile(piecePath);
 
 		PieceShapeInfo psi;
-		psi.useAnyGroup = piece.useAnyGroup;
-		psi.useAnyVariant = piece.useAnyVariant;
+		psi.useAnyPath = piece.useAnyPath;
 		psi.pieceName = piece.name;
 		psi.pieceEditorId = piece.editorId;
 		psi.pieceFormId = piece.formId;
@@ -2541,19 +2538,50 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	}
 
 
-	// Build "Use Any" variant groups and set initial visibility.
-	// Group pieces by useAnyGroup, then create UseAnyGroup entries with variants.
+	// Build "Use Any" variant groups from each piece's gating path. Nested
+	// non-Use-All LVLIs produce paths of depth > 1; we group pieces by their
+	// DEEPEST gate (last entry in the path) and record the parent gate so the
+	// previewer can show the dependency in the variant overlay and gate-AND
+	// visibility correctly. The legacy flat grouping flattened nested gates
+	// into independent flat groups, which is why several armors could appear
+	// at once when a Use Any wrapped another Use Any.
 	{
+		// (groupId, variantIdx) → pieces whose deepest gate is this variant.
 		std::map<int, std::map<int, std::vector<PieceShapeInfo*>>> groupMap;
+		// groupId → (parentGroupId, parentVariantIdx) inherited from the first
+		// piece encountered (consistent across all pieces of the same group by
+		// construction in ResolveLVLIGrouped).
+		std::map<int, std::pair<int, int>> groupParent;
 		for (auto& psi : pieceInfos) {
-			if (psi.useAnyGroup >= 0)
-				groupMap[psi.useAnyGroup][psi.useAnyVariant].push_back(&psi);
+			if (psi.useAnyPath.empty())
+				continue;
+			auto& deepest = psi.useAnyPath.back();
+			groupMap[deepest.first][deepest.second].push_back(&psi);
+			if (psi.useAnyPath.size() >= 2) {
+				auto& parent = psi.useAnyPath[psi.useAnyPath.size() - 2];
+				groupParent.emplace(deepest.first, std::make_pair(parent.first, parent.second));
+			}
+			else {
+				groupParent.emplace(deepest.first, std::make_pair(-1, -1));
+			}
 		}
+
+		// LVLI editor id labels (best-effort: same group id is consistent across
+		// pieces, picked up from the outfit's accumulated map).
+		const auto& groupLvliNames = outfit.useAnyGroupNames;
 
 		for (auto& [groupId, variantMap] : groupMap) {
 			UseAnyGroup group;
 			group.groupId = groupId;
 			group.activeIndex = 0;
+			auto pit = groupParent.find(groupId);
+			if (pit != groupParent.end()) {
+				group.parentGroupId = pit->second.first;
+				group.parentVariantIdx = pit->second.second;
+			}
+			auto nit = groupLvliNames.find(groupId);
+			if (nit != groupLvliNames.end())
+				group.label = nit->second;
 
 			for (auto& [variantIdx, pieces] : variantMap) {
 				UseAnyVariant variant;
@@ -2586,20 +2614,67 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 				group.variants.push_back(std::move(variant));
 			}
 
-			// Register shape → group mapping and set visibility
-			size_t groupIdx = useAnyGroups_.size();
-			for (size_t vi = 0; vi < group.variants.size(); ++vi) {
-				bool isActive = (static_cast<int>(vi) == group.activeIndex);
-				for (auto& sn : group.variants[vi].shapeNames) {
-					shapeToVariantGroup_[sn] = {groupIdx, vi};
-					if (!isActive)
-						gls.SetMeshVisibility(sn, false);
-				}
-			}
-
-			wxLogMessage("  Use Any group %d: %zu variants, showing variant 0 ('%s')", groupId, group.variants.size(), group.variants.empty() ? "" : group.variants[0].label);
-
 			useAnyGroups_.push_back(std::move(group));
+		}
+
+		// Ensure every parent group exposes a variant slot for each of its
+		// children's parentVariantIdx. A parent LVLI entry that branches to a
+		// sub-LVLI never produces a direct piece, so that variant slot is
+		// missing from groupMap and the child group becomes unreachable. We
+		// inject placeholder variants labeled with the child LVLI editor id.
+		auto findGroupByIdMut = [this](int gid) -> UseAnyGroup* {
+			for (auto& g : useAnyGroups_)
+				if (g.groupId == gid)
+					return &g;
+			return nullptr;
+		};
+		// Snapshot child→parent links before mutating.
+		std::vector<std::tuple<int, int, int>> childLinks; // (childId, parentId, parentVariantIdx)
+		for (auto& g : useAnyGroups_) {
+			if (g.parentGroupId >= 0)
+				childLinks.emplace_back(g.groupId, g.parentGroupId, g.parentVariantIdx);
+		}
+		for (auto& [childId, parentId, parentVarIdx] : childLinks) {
+			UseAnyGroup* parent = findGroupByIdMut(parentId);
+			if (!parent)
+				continue;
+			bool has = false;
+			for (auto& v : parent->variants)
+				if (v.variantIdx == parentVarIdx) {
+					has = true;
+					break;
+				}
+			if (has)
+				continue;
+			UseAnyVariant ph;
+			ph.variantIdx = parentVarIdx;
+			auto nit = groupLvliNames.find(childId);
+			if (nit != groupLvliNames.end() && !nit->second.empty())
+				ph.label = nit->second;
+			else
+				ph.label = "Variant " + std::to_string(parentVarIdx);
+			parent->variants.push_back(std::move(ph));
+		}
+		// Re-sort each group's variants by variantIdx so the dropdown order
+		// matches the LVLI entry order.
+		for (auto& g : useAnyGroups_) {
+			std::sort(g.variants.begin(), g.variants.end(), [](const UseAnyVariant& a, const UseAnyVariant& b) { return a.variantIdx < b.variantIdx; });
+		}
+
+		// Register every gated shape's full path so visibility can be evaluated
+		// by AND-ing across the chain.
+		for (auto& psi : pieceInfos) {
+			if (psi.useAnyPath.empty())
+				continue;
+			for (auto& sn : psi.shapeNames)
+				shapeUseAnyPath_[sn] = psi.useAnyPath;
+		}
+
+		// Apply initial visibility for every gated shape.
+		ApplyUseAnyVisibility();
+
+		for (auto& g : useAnyGroups_) {
+			wxLogMessage("  Use Any group %d ('%s', parent=%d/%d): %zu variants", g.groupId, g.label, g.parentGroupId, g.parentVariantIdx, g.variants.size());
 		}
 	}
 
@@ -2907,28 +2982,51 @@ void LeveledListPreviewer::SwitchUseAnyVariant(size_t groupIdx, int newVariantId
 	if (newVariantIdx == group.activeIndex)
 		return;
 
-	// Hide old active variant
-	if (group.activeIndex >= 0 && group.activeIndex < static_cast<int>(group.variants.size())) {
-		for (auto& sn : group.variants[group.activeIndex].shapeNames)
-			gls.SetMeshVisibility(sn, false);
-	}
-
-	// Show new active variant (but keep untextured shapes hidden if appropriate)
 	group.activeIndex = newVariantIdx;
-	std::set<std::string> untexturedSet(untexturedShapes.begin(), untexturedShapes.end());
-	for (auto& sn : group.variants[newVariantIdx].shapeNames) {
-		if (!showUntextured && untexturedSet.count(sn))
-			continue; // keep hidden — no valid texture
-		gls.SetMeshVisibility(sn, true);
-	}
-
 	wxLogMessage("  Switched Use Any group %d to variant %d ('%s')", group.groupId, newVariantIdx, group.variants[newVariantIdx].label);
+
+	// Re-evaluate visibility for every gated shape — switching this group may
+	// have also (de)activated dependent child groups deeper in the tree.
+	ApplyUseAnyVisibility();
 
 	// Use exactly the same algorithm as initial load for re-calculating slots and visibility
 	UpdateActiveSlotsAndVisibility();
 
 	gls.RenderOneFrame();
 	RefreshMeshOverlay();
+}
+
+bool LeveledListPreviewer::IsUseAnyPathActive(const std::vector<std::pair<int, int>>& path) const {
+	// Index lookup is linear (typical group count is small — order of magnitude
+	// of LVLI depth, single digits in practice).
+	for (auto& [gid, vid] : path) {
+		const UseAnyGroup* g = nullptr;
+		for (auto& cand : useAnyGroups_) {
+			if (cand.groupId == gid) {
+				g = &cand;
+				break;
+			}
+		}
+		if (!g)
+			return false;
+		if (g->activeIndex < 0 || g->activeIndex >= static_cast<int>(g->variants.size()))
+			return false;
+		if (g->variants[g->activeIndex].variantIdx != vid)
+			return false;
+	}
+	return true;
+}
+
+void LeveledListPreviewer::ApplyUseAnyVisibility() {
+	std::set<std::string> untexturedSet(untexturedShapes.begin(), untexturedShapes.end());
+	for (auto& [shapeName, path] : shapeUseAnyPath_) {
+		bool active = IsUseAnyPathActive(path);
+		// Respect the untextured-meshes toggle: a shape with no valid texture
+		// stays hidden when `showUntextured` is off, even if its gate is open.
+		if (active && !showUntextured && untexturedSet.count(shapeName))
+			active = false;
+		gls.SetMeshVisibility(shapeName, active);
+	}
 }
 
 void LeveledListPreviewer::RefreshMeshOverlay() {
@@ -3041,25 +3139,18 @@ void LeveledListPreviewer::RefreshMeshOverlay() {
 	if (!feetOnlyCat.groups.empty())
 		categories.push_back(std::move(feetOnlyCat));
 
-	// For outfit shapes, include non-grouped shapes AND shapes from the active variant of each group.
-	// Non-active variant shapes are excluded from the overlay.
-	std::set<std::string> activeVariantShapes;
-	for (auto& group : useAnyGroups_) {
-		if (group.activeIndex >= 0 && group.activeIndex < static_cast<int>(group.variants.size())) {
-			for (auto& sn : group.variants[group.activeIndex].shapeNames)
-				activeVariantShapes.insert(sn);
-		}
-	}
-
+	// For outfit shapes, include non-gated shapes AND gated shapes whose full
+	// path is currently active (so nested gates AND together — a shape behind
+	// a Use Any LVLI whose chosen variant is itself another Use Any LVLI only
+	// shows when both levels select it).
 	std::vector<std::string> visibleOutfitShapes;
 	for (auto& n : outfitShapeNames) {
-		auto it = shapeToVariantGroup_.find(n);
-		if (it == shapeToVariantGroup_.end()) {
-			// Not in a variant group — always include
+		auto it = shapeUseAnyPath_.find(n);
+		if (it == shapeUseAnyPath_.end()) {
+			// Unconditional — always include.
 			visibleOutfitShapes.push_back(n);
 		}
-		else if (activeVariantShapes.count(n)) {
-			// In a variant group and is the active variant — include
+		else if (IsUseAnyPathActive(it->second)) {
 			visibleOutfitShapes.push_back(n);
 		}
 	}
@@ -3172,19 +3263,75 @@ void LeveledListPreviewer::RefreshMeshOverlay() {
 	}
 
 	// --- "Use Any" variant group selectors ---
+	// Render the gate tree: each group is shown as a labeled wxChoice, indented
+	// by its depth in the gate tree. Groups whose parent gate is currently not
+	// selected are skipped (their variants are unreachable). Group depth and
+	// parent are resolved by walking parentGroupId chains.
 	if (!useAnyGroups_.empty()) {
-		wxStaticText* variantHeader = new wxStaticText(meshOverlayPanel, wxID_ANY, wxT("Variants (select one)"));
-		wxFont boldFont = variantHeader->GetFont();
-		boldFont.SetWeight(wxFONTWEIGHT_BOLD);
-		variantHeader->SetFont(boldFont);
-		sizer->Add(variantHeader, 0, wxLEFT | wxTOP, 4);
+		// Compute depth of each group by walking up the parent chain.
+		auto findGroupIdx = [this](int gid) -> int {
+			for (size_t i = 0; i < useAnyGroups_.size(); ++i)
+				if (useAnyGroups_[i].groupId == gid)
+					return static_cast<int>(i);
+			return -1;
+		};
+		std::vector<int> groupDepth(useAnyGroups_.size(), 0);
+		for (size_t i = 0; i < useAnyGroups_.size(); ++i) {
+			int depth = 0;
+			int parent = useAnyGroups_[i].parentGroupId;
+			while (parent >= 0) {
+				++depth;
+				int pIdx = findGroupIdx(parent);
+				if (pIdx < 0)
+					break;
+				parent = useAnyGroups_[pIdx].parentGroupId;
+				if (depth > 32) // paranoia: malformed cycle
+					break;
+			}
+			groupDepth[i] = depth;
+		}
 
+		// Reachability: a group is reachable iff its parent gate is currently
+		// selected (top-level groups are always reachable).
+		auto groupReachable = [this, &findGroupIdx](size_t gi) -> bool {
+			const UseAnyGroup* cur = &useAnyGroups_[gi];
+			while (cur->parentGroupId >= 0) {
+				int pIdx = findGroupIdx(cur->parentGroupId);
+				if (pIdx < 0)
+					return false;
+				const UseAnyGroup& parent = useAnyGroups_[pIdx];
+				if (parent.activeIndex < 0 || parent.activeIndex >= static_cast<int>(parent.variants.size()))
+					return false;
+				if (parent.variants[parent.activeIndex].variantIdx != cur->parentVariantIdx)
+					return false;
+				cur = &parent;
+			}
+			return true;
+		};
+
+		bool addedHeader = false;
 		for (size_t gi = 0; gi < useAnyGroups_.size(); ++gi) {
 			auto& group = useAnyGroups_[gi];
 			if (group.variants.size() <= 1)
-				continue; // single variant — no selector needed
+				continue;
+			if (!groupReachable(gi))
+				continue;
 
-			// Build choice items
+			if (!addedHeader) {
+				wxStaticText* variantHeader = new wxStaticText(meshOverlayPanel, wxID_ANY, wxT("Variants (select one)"));
+				wxFont boldFont = variantHeader->GetFont();
+				boldFont.SetWeight(wxFONTWEIGHT_BOLD);
+				variantHeader->SetFont(boldFont);
+				sizer->Add(variantHeader, 0, wxLEFT | wxTOP, 4);
+				addedHeader = true;
+			}
+
+			// Per-group label (LVLI editor id when known).
+			if (!group.label.empty()) {
+				wxStaticText* gl = new wxStaticText(meshOverlayPanel, wxID_ANY, wxString::FromUTF8(group.label));
+				sizer->Add(gl, 0, wxLEFT | wxTOP, 8 + groupDepth[gi] * 12);
+			}
+
 			wxArrayString choices;
 			for (auto& v : group.variants)
 				choices.Add(wxString::FromUTF8(v.label));
@@ -3195,7 +3342,7 @@ void LeveledListPreviewer::RefreshMeshOverlay() {
 			size_t capturedGi = gi;
 			choice->Bind(wxEVT_CHOICE, [this, capturedGi](wxCommandEvent& ev) { SwitchUseAnyVariant(capturedGi, ev.GetSelection()); });
 
-			sizer->Add(choice, 0, wxLEFT | wxTOP | wxRIGHT | wxEXPAND, 8);
+			sizer->Add(choice, 0, wxLEFT | wxTOP | wxRIGHT | wxEXPAND, 8 + groupDepth[gi] * 12);
 		}
 	}
 

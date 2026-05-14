@@ -10,9 +10,11 @@
 
 #include <array>
 #include <cstdint>
+#include <map>
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace lldata {
@@ -74,8 +76,13 @@ struct OutfitPiece {
 	// mirror this in the previewer to hide rigging-only / collision shapes.
 	std::vector<int> armaBodySlots;
 	std::vector<TextureOverride> textureOverrides; // per-shape texture swaps from ARMA MO3S
-	int useAnyGroup = -1;						   // "Use Any" variant group ID (-1 = not in a group)
-	int useAnyVariant = -1;						   // variant index within the group (-1 = not in a group)
+	// "Use Any" gating path. Each entry is a (groupId, variantIdx) gate the
+	// piece sits behind. Outermost gate first, innermost last. Empty when the
+	// piece is unconditional (direct OTFT child or under Use-All LVLIs only).
+	// A piece is visible iff every gate's group is currently set to that
+	// variant. This models nested non-"Use All" LVLIs correctly (a Use-Any
+	// LVLI whose chosen entry is itself a Use-Any LVLI yields a 2-deep path).
+	std::vector<std::pair<int, int>> useAnyPath;
 	// Race(s) the source ARMA targets. Used to filter pieces against the
 	// selected NPC's race when an ARMO has multiple ARMAs for different races
 	// (e.g. KSO Mage Robes Adept ships per-race ARMA addons under one ARMO).
@@ -90,6 +97,10 @@ struct OutfitEntry {
 	std::string editorId;  // OTFT editor ID
 	uint16_t minLevel = 1; // Minimum player level for this variant
 	std::vector<OutfitPiece> pieces;
+	// groupId → source LVLI editor id. Populated for every "Use Any" gate
+	// introduced while resolving this outfit. Used by the previewer to label
+	// nested variant selectors.
+	std::map<int, std::string> useAnyGroupNames;
 };
 
 class LeveledListData {
@@ -201,11 +212,26 @@ public:
 		uint32_t remappedRace = 0; // RNAM remapped to espMasters index space (0 if no override or unmappable)
 		std::string sourcePlugin;  // Full path to the ESP that defines this NPC override
 		bool selfDefined = false;  // true = WNAM is self-defined in a non-master ESP
+		// Lazy-resolution scratchpad: ScanAllPluginsForNpcSkins records the
+		// raw FormIDs and the plugin that defines them, but does NOT call
+		// EnsureDynamicMaster eagerly (the 8-bit synthetic-master space is
+		// scarce and would be exhausted by NPCs the user never views). The
+		// fields below are consumed by ResolveLazyNpcSkin on actual NPC use.
+		uint32_t rawRace = 0;			// RNAM in source plugin's master-index space
+		uint32_t rawWnamForResolve = 0; // WNAM in source plugin's master-index space
+		std::string raceDefiningPlugin; // Plugin path defining the RNAM record
+		std::string wnamDefiningPlugin; // Plugin path defining the WNAM record
 	};
 
 	/// Scan ALL plugins in the Data directory for NPC_ WNAM overrides.
 	/// Populates npcSkinOverrides. Call after LoadESP() and LoadNPCs().
 	void ScanAllPluginsForNpcSkins();
+
+	/// Scan ALL plugins in the Data directory for OTFT/LVLI overrides that
+	/// target records already present in our caches. Each matching plugin is
+	/// loaded via EnsureDynamicMaster so its full RACE/ARMO/ARMA/TXST/OTFT/LVLI
+	/// records become available. Idempotent; subsequent calls are no-ops.
+	void ScanAllPluginsForOutfitOverrides();
 
 	/// Resolve skin textures for a specific NPC by editorId.
 	/// Uses the pre-scanned plugin data for on-demand ESP loading when needed.
@@ -232,7 +258,8 @@ private:
 	/// Load records from a single ESP/ESM into the caches.
 	/// masterIndex: the index of this file in the main ESP's master list.
 	/// mainMasters: the master list of the main ESP, used to remap cross-references.
-	void LoadRecordsFromESP(const std::string& filepath, const std::set<std::string>& types, uint8_t masterIndex, const std::vector<std::string>& mainMasters);
+	void LoadRecordsFromESP(
+		const std::string& filepath, const std::set<std::string>& types, uint8_t masterIndex, const std::vector<std::string>& mainMasters, int masterLoadDepth = 0);
 
 	/// Load a non-master plugin's RACE/ARMO/ARMA/TXST records into our caches
 	/// so an NPC override that references a self-defined record (e.g. a mod
@@ -240,21 +267,33 @@ private:
 	/// be resolved. Uses a synthetic master index (high bytes 0xFD-0xF0);
 	/// returns that index, or 0 if loading failed. Cached by pluginPath;
 	/// subsequent calls are no-ops.
-	uint8_t EnsureDynamicMaster(const std::string& pluginPath);
+	uint8_t EnsureDynamicMaster(const std::string& pluginPath, int masterLoadDepth = 0);
+
+	/// Lazy-resolve an NPC skin override on actual use. ScanAllPluginsForNpcSkins
+	/// records raw FormIDs + defining-plugin paths but does not eagerly
+	/// EnsureDynamicMaster them (the 8-bit synthetic master space is too
+	/// scarce to spend on NPCs the user never views). This helper performs
+	/// the EnsureDynamicMaster + remap on first consumption.
+	void ResolveLazyNpcSkin(NpcSkinInfo& info);
 
 	/// Resolve LVLI entries recursively to collect referenced FormIDs and their levels.
 	/// Collects both resolved ARMOs and unresolved FormIDs.
 	void ResolveLVLI(uint32_t formId, uint16_t parentLevel, std::vector<std::pair<uint32_t, uint16_t>>& armoRefs, std::vector<std::pair<uint32_t, uint16_t>>& unresolvedRefs) const;
 
 	/// Resolve LVLI recursively with "Use Any" group tracking.
-	/// Pieces from "Use Any" LVLIs are tagged with a group ID and variant index.
+	/// Pieces from "Use Any" LVLIs are tagged with a `useAnyPath` of
+	/// (groupId, variantIdx) gates. Nested non-Use-All LVLIs append a deeper
+	/// gate so a piece is only visible when every ancestor gate is selected.
+	/// `parentPath` is the chain of gates inherited from outer LVLI scopes
+	/// (empty at the OTFT level). `groupNames` is populated with each new
+	/// group's source LVLI editor id for human-readable variant labels.
 	void ResolveLVLIGrouped(uint32_t formId,
 							uint16_t parentLevel,
-							int parentGroup,
-							int parentVariant,
+							const std::vector<std::pair<int, int>>& parentPath,
 							int& groupCounter,
 							std::vector<OutfitPiece>& pieces,
-							std::vector<std::pair<uint32_t, uint16_t>>& unresolvedRefs) const;
+							std::vector<std::pair<uint32_t, uint16_t>>& unresolvedRefs,
+							std::map<int, std::string>& groupNames) const;
 
 	/// Create a stub piece for an unresolved ARMO FormID.
 	static OutfitPiece MakeStubPiece(uint32_t formId);
@@ -290,7 +329,22 @@ private:
 	// Index 0 → top byte 0xFD, index 1 → 0xFC, etc., counting down. We avoid
 	// 0xFE/0xFF since the engine reserves them for ESL-related bookkeeping.
 	std::vector<std::string> dynamicMasters;
+	// Records the main ESP directly defines or overrides. Post-init dynamic
+	// master loads must NOT overwrite these — in real game load order the
+	// main ESP is the latest override, so its versions always win. (Without
+	// this guard, when an override plugin like USSEP gets lazy-loaded as a
+	// dynamic master *after* the main ESP, USSEP's records would clobber
+	// the main ESP's overrides for the same FormID.)
+	std::unordered_set<uint32_t> mainEspArmoIds;
+	std::unordered_set<uint32_t> mainEspArmaIds;
+	std::unordered_set<uint32_t> mainEspTxstIds;
+	std::unordered_set<uint32_t> mainEspOtftIds;
+	std::unordered_set<uint32_t> mainEspLvliIds;
+	std::unordered_set<uint32_t> mainEspRaceIds;
+	std::unordered_set<uint32_t> mainEspHdptIds;
+	bool mainEspLoaded = false;
 	bool npcSkinsScanned = false;
+	bool outfitOverridesScanned = false;
 
 	// Per-NPC default-outfit cache populated lazily by ResolveNpcDefaultOutfit.
 	// Keyed by NPC editorId. Cleared in LoadESP / LoadNPCs because OTFT FormIDs
