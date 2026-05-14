@@ -36,7 +36,7 @@ extern ConfigurationManager Config;
 //   `unavailable` true   → render greyed-out + serve a tooltip explaining why.
 class LLTreeItemData : public wxTreeItemData {
 public:
-	enum class Kind { Outfit, Npc, Group, Variant };
+	enum class Kind { Outfit, Npc, Group, Variant, Plugin };
 	Kind kind = Kind::Outfit;
 	int topIndex = -1;
 	int groupId = -1;
@@ -463,20 +463,27 @@ void LeveledListPreviewer::LoadESPFile(const std::string& filepath) {
 		std::string lastOutfit = Config["LLPreviewer/LastOutfit"];
 		bool npcTabActive = viewNotebook && viewNotebook->GetSelection() == 1;
 		if (!lastOutfit.empty() && !npcTabActive) {
-			// Walk the outfit tree's top-level children to find the entry
-			// whose underlying OutfitEntry::name matches the persisted one.
+			// Walk Plugin group nodes, then their child Outfit nodes, to find
+			// the entry whose underlying OutfitEntry::name matches the
+			// persisted one.
 			wxTreeItemId root = outfitList->GetRootItem();
-			wxTreeItemIdValue cookie;
-			for (wxTreeItemId child = outfitList->GetFirstChild(root, cookie); child.IsOk(); child = outfitList->GetNextChild(root, cookie)) {
-				auto* d = dynamic_cast<LLTreeItemData*>(outfitList->GetItemData(child));
-				if (!d || d->kind != LLTreeItemData::Kind::Outfit)
-					continue;
-				if (d->topIndex < 0 || d->topIndex >= static_cast<int>(filteredOutfits.size()))
-					continue;
-				if (filteredOutfits[d->topIndex]->name == lastOutfit) {
-					outfitList->SelectItem(child);
-					outfitList->EnsureVisible(child);
-					break;
+			wxTreeItemIdValue pcookie;
+			bool found = false;
+			for (wxTreeItemId pluginItem = outfitList->GetFirstChild(root, pcookie); pluginItem.IsOk() && !found; pluginItem = outfitList->GetNextChild(root, pcookie)) {
+				wxTreeItemIdValue ocookie;
+				for (wxTreeItemId child = outfitList->GetFirstChild(pluginItem, ocookie); child.IsOk(); child = outfitList->GetNextChild(pluginItem, ocookie)) {
+					auto* d = dynamic_cast<LLTreeItemData*>(outfitList->GetItemData(child));
+					if (!d || d->kind != LLTreeItemData::Kind::Outfit)
+						continue;
+					if (d->topIndex < 0 || d->topIndex >= static_cast<int>(filteredOutfits.size()))
+						continue;
+					if (filteredOutfits[d->topIndex]->name == lastOutfit) {
+						outfitList->Expand(pluginItem);
+						outfitList->SelectItem(child);
+						outfitList->EnsureVisible(child);
+						found = true;
+						break;
+					}
 				}
 			}
 		}
@@ -555,22 +562,49 @@ void LeveledListPreviewer::RefreshOutfitList() {
 			filteredOutfits.push_back(entry);
 	}
 
-	// Populate tree: one top-level node per outfit. Variant subtree is added
-	// lazily after the outfit is loaded (see PopulateVariantSubtree).
-	for (size_t i = 0; i < filteredOutfits.size(); ++i) {
-		auto* entry = filteredOutfits[i];
-		wxString label = wxString::Format("%s  (L%d, %zu)", wxString::FromUTF8(entry->name), entry->minLevel, entry->pieces.size());
-		auto* d = new LLTreeItemData();
-		d->kind = LLTreeItemData::Kind::Outfit;
-		d->topIndex = static_cast<int>(i);
-		if (entry->pieces.empty()) {
-			d->unavailable = true;
-			d->tooltip = "This outfit has no resolvable pieces (likely an unresolved ARMO/LVLI reference or empty leveled list).";
-		}
-		wxTreeItemId item = outfitList->AppendItem(root, label, -1, -1, d);
-		if (d->unavailable)
-			outfitList->SetItemTextColour(item, wxColour(150, 150, 150));
+	// Populate tree: group outfits by source plugin so the user can see
+	// which plugin contributed each entry, then individual outfits beneath.
+	// Variant subtree is added lazily after the outfit is loaded (see
+	// PopulateVariantSubtree).
+	std::string mainPluginName;
+	{
+		wxFileName fn(wxString::FromUTF8(data.GetFilename()));
+		mainPluginName = fn.GetFullName().ToStdString();
 	}
+	// Stable per-plugin order: main ESP first, then alphabetical by filename.
+	std::map<std::string, std::vector<size_t>> byPlugin;
+	for (size_t i = 0; i < filteredOutfits.size(); ++i) {
+		const auto* e = filteredOutfits[i];
+		const std::string& key = e->sourcePlugin.empty() ? std::string("<unknown>") : e->sourcePlugin;
+		byPlugin[key].push_back(i);
+	}
+	auto appendPluginGroup = [&](const std::string& pluginKey, const std::vector<size_t>& indices) {
+		wxString label = wxString::Format("%s  (%zu)", wxString::FromUTF8(pluginKey), indices.size());
+		auto* pd = new LLTreeItemData();
+		pd->kind = LLTreeItemData::Kind::Plugin;
+		wxTreeItemId pluginItem = outfitList->AppendItem(root, label, -1, -1, pd);
+		for (size_t i : indices) {
+			auto* entry = filteredOutfits[i];
+			wxString olabel = wxString::Format("%s  (L%d, %zu)", wxString::FromUTF8(entry->name), entry->minLevel, entry->pieces.size());
+			auto* d = new LLTreeItemData();
+			d->kind = LLTreeItemData::Kind::Outfit;
+			d->topIndex = static_cast<int>(i);
+			if (entry->pieces.empty()) {
+				d->unavailable = true;
+				d->tooltip = "This outfit has no resolvable pieces (likely an unresolved ARMO/LVLI reference or empty leveled list).";
+			}
+			wxTreeItemId item = outfitList->AppendItem(pluginItem, olabel, -1, -1, d);
+			if (d->unavailable)
+				outfitList->SetItemTextColour(item, wxColour(150, 150, 150));
+		}
+	};
+	auto mainIt = byPlugin.find(mainPluginName);
+	if (mainIt != byPlugin.end()) {
+		appendPluginGroup(mainIt->first, mainIt->second);
+		byPlugin.erase(mainIt);
+	}
+	for (auto& kv : byPlugin)
+		appendPluginGroup(kv.first, kv.second);
 }
 
 // ---------------------------------------------------------------------------

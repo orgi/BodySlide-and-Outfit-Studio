@@ -870,6 +870,7 @@ void LeveledListData::LoadRecordsFromESP(
 		uint32_t remappedId = remapFid(ot.formId);
 		CachedOTFT co;
 		co.editorId = ot.editorId;
+		co.sourcePlugin = wxFileName(wxString::FromUTF8(filepath)).GetFullName().ToStdString();
 		co.items.reserve(ot.items.size());
 		bool allSafe = true;
 		for (uint32_t inam : ot.items) {
@@ -944,6 +945,7 @@ OutfitEntry LeveledListData::BuildOutfitFromOtft(uint32_t otftId, int& groupCoun
 	entry.formId = otftId;
 	entry.editorId = otft.editorId;
 	entry.name = otft.editorId;
+	entry.sourcePlugin = otft.sourcePlugin;
 	entry.minLevel = 1;
 
 	int totalPieces = 0;
@@ -1013,8 +1015,33 @@ OutfitEntry LeveledListData::BuildOutfitFromOtft(uint32_t otftId, int& groupCoun
 		++unresolvedCount;
 	}
 
+	// Final dedup pass across the entire outfit. Some OTFTs list multiple
+	// distinct ARMOs that share the same mesh path (e.g. SaltLemon Wine
+	// Duchess has separate ARMO records 71000810 and 71000835 both pointing
+	// at Nails_1.nif). These render identically and look like UI duplicates
+	// to the user. Collapse them by (nifPath, useAnyPath); keep the first
+	// occurrence so the original ordering and the per-gate dedup above are
+	// preserved.
+	{
+		std::set<std::pair<std::string, std::vector<std::pair<int, int>>>> seenPieces;
+		std::vector<OutfitPiece> deduped;
+		deduped.reserve(entry.pieces.size());
+		for (auto& p : entry.pieces) {
+			// Don't collapse stubs (empty nifPath) — they carry distinct
+			// FormIDs the user may want to see listed.
+			if (p.nifPath.empty()) {
+				deduped.push_back(std::move(p));
+				continue;
+			}
+			auto key = std::make_pair(p.nifPath, p.useAnyPath);
+			if (seenPieces.insert(key).second)
+				deduped.push_back(std::move(p));
+		}
+		entry.pieces = std::move(deduped);
+	}
+
 	if (outPieces)
-		*outPieces = totalPieces;
+		*outPieces = static_cast<int>(entry.pieces.size()) - unresolvedCount;
 	if (outUnresolved)
 		*outUnresolved = unresolvedCount;
 	return entry;
@@ -1485,6 +1512,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 	for (auto& ot : mainReader.GetOutfits()) {
 		CachedOTFT co;
 		co.editorId = ot.editorId;
+		co.sourcePlugin = wxFileName(wxString::FromUTF8(espFilename)).GetFullName().ToStdString();
 		co.items = ot.items;
 		otftCache[ot.formId] = std::move(co);
 		mainEspOtftIds.insert(ot.formId);

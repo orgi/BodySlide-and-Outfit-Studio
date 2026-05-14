@@ -115,10 +115,11 @@ struct OutfitGroupInfo {
 };
 
 struct OutfitEntry {
-	std::string name;	   // OTFT editor ID (display name)
-	uint32_t formId = 0;   // OTFT FormID
-	std::string editorId;  // OTFT editor ID
-	uint16_t minLevel = 1; // Minimum player level for this variant
+	std::string name;		  // OTFT editor ID (display name)
+	uint32_t formId = 0;	  // OTFT FormID
+	std::string editorId;	  // OTFT editor ID
+	uint16_t minLevel = 1;	  // Minimum player level for this variant
+	std::string sourcePlugin; // Filename of the plugin that authored the cached OTFT
 	std::vector<OutfitPiece> pieces;
 	// groupId → source LVLI editor id. Populated for every "Use Any" gate
 	// introduced while resolving this outfit. Used by the previewer to label
@@ -435,6 +436,10 @@ struct CachedLVLI {
 struct CachedOTFT {
 	std::string editorId;
 	std::vector<uint32_t> items;
+	// Filename (no path) of the plugin whose version of this OTFT currently
+	// occupies the cache slot. The previewer groups outfits by this so the
+	// user can see which plugin contributed each entry.
+	std::string sourcePlugin;
 };
 
 struct CachedRACE {
