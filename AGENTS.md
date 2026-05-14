@@ -18,3 +18,5 @@
 ## Logging
 * Log for Bodyslide is <skyrim installation folder>/Data/CalienteTools/Bodyslide/Log_BS.txt
 * Log for standalone leveled list viewer is: <skyrim installation folder>/Data/CalienteTools/Bodyslide/Log_LLV.txt
+* When started from BodySlide the log for thel leveled list viewer is in <skyrim installation folder>/Data/CalienteTools/Bodyslide/Log_BS.txt, too
+

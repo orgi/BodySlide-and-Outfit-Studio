@@ -656,7 +656,7 @@ void LeveledListData::LoadAllPluginNativeNPCs() {
 // ---------------------------------------------------------------------------
 
 void LeveledListData::LoadRecordsFromESP(
-	const std::string& filepath, const std::set<std::string>& types, uint8_t masterIndex, const std::vector<std::string>& mainMasters, int masterLoadDepth, bool noClobber) {
+	const std::string& filepath, const std::set<std::string>& types, uint16_t globalPluginIdx, const std::vector<std::string>& mainMasters, int masterLoadDepth, bool noClobber) {
 	esp::ESPReader reader;
 	if (!reader.Load(filepath, types)) {
 		wxLogWarning("LeveledListData: Failed to load %s", filepath);
@@ -664,26 +664,26 @@ void LeveledListData::LoadRecordsFromESP(
 	}
 
 	// Build FormID remapping table.
-	// This file's own records have top byte == len(its masters) → remap to masterIndex.
+	// This file's own records have top byte == len(its masters) → remap to globalPluginIdx.
 	// Its masters' records need to be remapped to the main ESP's master indices.
 	uint8_t selfIndex = static_cast<uint8_t>(reader.GetMasters().size());
 	auto& fileMasters = reader.GetMasters();
 
-	// Build a map: this file's master index → resolved cache top byte.
-	// First try the main ESP's master list (matched case-insensitive by
-	// filename). Then fall back to any plugin already loaded as a dynamic
-	// (synthetic) master — this is what lets an override plugin's references
-	// to e.g. "Midnight Huntress.esp" be remapped to 0xD1 (its synthetic
-	// slot) instead of falling through and colliding with main-ESP master 7
-	// (SexLab). Without this, an OTFT that mixes references to mapped and
-	// unmapped masters loses the unmapped entries silently.
-	std::unordered_map<uint8_t, uint8_t> masterRemap;
+	// Build a map: this file's master index (0..255, plugin-local) → resolved
+	// 16-bit globalPluginIdx used in cache keys. First try the main ESP's master
+	// list (matched case-insensitive by filename). Then fall back to any plugin
+	// already loaded as a dynamic master — this is what lets an override
+	// plugin's references to e.g. "Midnight Huntress.esp" be remapped to its
+	// synthetic slot instead of falling through and colliding with an unrelated
+	// main-ESP master. Without this, an OTFT that mixes references to mapped
+	// and unmapped masters loses the unmapped entries silently.
+	std::unordered_map<uint8_t, uint16_t> masterRemap;
 	for (size_t fi = 0; fi < fileMasters.size(); ++fi) {
 		std::string fileMasterLower = ToLower(fileMasters[fi]);
 		bool mapped = false;
 		for (size_t mi = 0; mi < mainMasters.size(); ++mi) {
 			if (ToLower(mainMasters[mi]) == fileMasterLower) {
-				masterRemap[static_cast<uint8_t>(fi)] = static_cast<uint8_t>(mi);
+				masterRemap[static_cast<uint8_t>(fi)] = static_cast<uint16_t>(mi);
 				mapped = true;
 				break;
 			}
@@ -695,7 +695,7 @@ void LeveledListData::LoadRecordsFromESP(
 			auto slash = dyn.find_last_of("/\\");
 			std::string dbase = ToLower(slash == std::string::npos ? dyn : dyn.substr(slash + 1));
 			if (dbase == fileMasterLower) {
-				masterRemap[static_cast<uint8_t>(fi)] = static_cast<uint8_t>(0xFD - di);
+				masterRemap[static_cast<uint8_t>(fi)] = DynamicGlobalIdx(di);
 				break;
 			}
 		}
@@ -704,28 +704,35 @@ void LeveledListData::LoadRecordsFromESP(
 	// NB: We intentionally do not lazy-load this file's master plugins here.
 	// Doing so during the main load path would recursively pull in entire
 	// dependency chains (e.g. the user-opened combined ESP declares ~200+
-	// masters), exhausting the 8-bit synthetic-master space before any
-	// override-only plugin can be loaded. Scoped master expansion happens in
+	// masters), exhausting plugin slots before any override-only plugin can be
+	// loaded. Scoped master expansion happens in
 	// ScanAllPluginsForOutfitOverrides instead, only for plugins that
 	// actually own overrides we want to surface.
 	(void)masterLoadDepth;
 
-	auto remapFid = [&](uint32_t fid) -> uint32_t {
+	auto remapFid = [&](uint32_t fid) -> FormId {
 		uint8_t topByte = (fid >> 24) & 0xFF;
 		uint32_t baseId = fid & 0x00FFFFFF;
 		if (topByte == selfIndex) {
-			return (static_cast<uint32_t>(masterIndex) << 24) | baseId;
+			return EncodeFormId(globalPluginIdx, baseId);
 		}
 		auto it = masterRemap.find(topByte);
 		if (it != masterRemap.end()) {
-			return (static_cast<uint32_t>(it->second) << 24) | baseId;
+			return EncodeFormId(it->second, baseId);
 		}
-		return fid;
+		// Unmapped: encode in the loaded file's own master-local space so the
+		// raw bytes survive round-tripping, but using a synthetic high half
+		// that cannot collide with any allocated globalPluginIdx. We pack the
+		// raw top byte into the high 8 bits of the 16-bit slot, leaving the
+		// low 8 bits 0xFF as a sentinel. This lets diagnostic logs identify
+		// such entries while keeping the FormId unique.
+		uint16_t synthSlot = static_cast<uint16_t>((static_cast<uint16_t>(topByte) << 8) | 0x00FFu);
+		return EncodeFormId(synthSlot, baseId);
 	};
 
-	wxLogMessage("LeveledListData: Loaded %s (masterIndex=%d, selfIndex=%d, %zu ARMOs, %zu ARMAs, %zu TXSTs, %zu OTFTs, %zu LVLIs)",
+	wxLogMessage("LeveledListData: Loaded %s (globalPluginIdx=%u, selfIndex=%d, %zu ARMOs, %zu ARMAs, %zu TXSTs, %zu OTFTs, %zu LVLIs)",
 				 wxString(filepath),
-				 masterIndex,
+				 static_cast<unsigned>(globalPluginIdx),
 				 selfIndex,
 				 reader.GetArmors().size(),
 				 reader.GetArmorAddons().size(),
@@ -736,7 +743,7 @@ void LeveledListData::LoadRecordsFromESP(
 	// Cache ARMO records. Overwrite: in Bethesda load order, later masters
 	// override earlier ones for the same (remapped) FormID.
 	for (auto& ar : reader.GetArmors()) {
-		uint32_t remappedId = remapFid(ar.formId);
+		FormId remappedId = remapFid(ar.formId);
 		CachedArmo ca;
 		ca.fullName = ar.fullName;
 		ca.editorId = ar.editorId;
@@ -763,7 +770,7 @@ void LeveledListData::LoadRecordsFromESP(
 
 	// Cache ARMA records. Overwrite (later master wins).
 	for (auto& aa : reader.GetArmorAddons()) {
-		uint32_t remappedId = remapFid(aa.formId);
+		FormId remappedId = remapFid(aa.formId);
 		CachedARMA cam;
 		cam.editorId = aa.editorId;
 		cam.modelMale = aa.modelMale;
@@ -799,7 +806,7 @@ void LeveledListData::LoadRecordsFromESP(
 
 	// Cache TXST records. Overwrite (later master wins).
 	for (auto& ts : reader.GetTextureSets()) {
-		uint32_t remappedId = remapFid(ts.formId);
+		FormId remappedId = remapFid(ts.formId);
 		CachedTXST ct;
 		ct.editorId = ts.editorId;
 		for (int i = 0; i < 8; ++i)
@@ -824,7 +831,7 @@ void LeveledListData::LoadRecordsFromESP(
 	// Cache RACE records (remapped FormID → race info). Overwrite (later master wins).
 	// raceByEditorId is keyed by editor id; overwrite it too so it tracks the same winner.
 	for (auto& r : reader.GetRaces()) {
-		uint32_t remappedId = remapFid(r.formId);
+		FormId remappedId = remapFid(r.formId);
 		if (noClobber && raceCache.count(remappedId))
 			continue;
 		CachedRACE cr;
@@ -837,7 +844,7 @@ void LeveledListData::LoadRecordsFromESP(
 
 	// Cache HDPTs
 	for (auto& hp : reader.GetHeadParts()) {
-		uint32_t remappedId = remapFid(hp.formId);
+		FormId remappedId = remapFid(hp.formId);
 		CachedHeadPart chp;
 		chp.editorId = hp.editorId;
 		chp.model = hp.model;
@@ -867,7 +874,7 @@ void LeveledListData::LoadRecordsFromESP(
 		return masterRemap.find(tb) != masterRemap.end();
 	};
 	for (auto& ot : reader.GetOutfits()) {
-		uint32_t remappedId = remapFid(ot.formId);
+		FormId remappedId = remapFid(ot.formId);
 		CachedOTFT co;
 		co.editorId = ot.editorId;
 		co.sourcePlugin = wxFileName(wxString::FromUTF8(filepath)).GetFullName().ToStdString();
@@ -890,7 +897,7 @@ void LeveledListData::LoadRecordsFromESP(
 	// Cache LVLI records. Overwrite (later master wins). Needed so OTFTs that
 	// reference leveled-item lists (variant outfits) can be expanded.
 	for (auto& li : reader.GetLeveledItems()) {
-		uint32_t remappedId = remapFid(li.formId);
+		FormId remappedId = remapFid(li.formId);
 		CachedLVLI cl;
 		cl.editorId = li.editorId;
 		cl.flags = li.flags;
@@ -915,7 +922,7 @@ void LeveledListData::LoadRecordsFromESP(
 // MakeStubPiece — placeholder for unresolved ARMO references
 // ---------------------------------------------------------------------------
 
-OutfitPiece LeveledListData::MakeStubPiece(uint32_t formId) {
+OutfitPiece LeveledListData::MakeStubPiece(FormId formId) {
 	OutfitPiece piece;
 	piece.formId = formId;
 	piece.name = "[" + FormIdToString(formId) + "]";
@@ -928,14 +935,14 @@ OutfitPiece LeveledListData::MakeStubPiece(uint32_t formId) {
 // ---------------------------------------------------------------------------
 
 // Forward declaration; defined later in this TU.
-static void AddPiecesFromArmo(uint32_t formId,
+static void AddPiecesFromArmo(lldata::FormId formId,
 							  const CachedArmo& armo,
-							  const std::unordered_map<uint32_t, CachedArmo>& armoCache,
-							  const std::unordered_map<uint32_t, CachedARMA>& armaCache,
-							  const std::unordered_map<uint32_t, CachedTXST>& txstCache,
+							  const std::unordered_map<lldata::FormId, CachedArmo>& armoCache,
+							  const std::unordered_map<lldata::FormId, CachedARMA>& armaCache,
+							  const std::unordered_map<lldata::FormId, CachedTXST>& txstCache,
 							  std::vector<OutfitPiece>& outPieces);
 
-OutfitEntry LeveledListData::BuildOutfitFromOtft(uint32_t otftId, int& groupCounter, int* outPieces, int* outUnresolved) const {
+OutfitEntry LeveledListData::BuildOutfitFromOtft(FormId otftId, int& groupCounter, int* outPieces, int* outUnresolved) const {
 	OutfitEntry entry;
 	auto otftIt = otftCache.find(otftId);
 	if (otftIt == otftCache.end())
@@ -951,7 +958,7 @@ OutfitEntry LeveledListData::BuildOutfitFromOtft(uint32_t otftId, int& groupCoun
 	int totalPieces = 0;
 	int unresolvedCount = 0;
 
-	for (uint32_t itemId : otft.items) {
+	for (lldata::FormId itemId : otft.items) {
 		// Direct ARMO reference?
 		auto armoIt = armoCache.find(itemId);
 		if (armoIt != armoCache.end()) {
@@ -968,14 +975,14 @@ OutfitEntry LeveledListData::BuildOutfitFromOtft(uint32_t otftId, int& groupCoun
 		auto lvliIt = lvliCache.find(itemId);
 		if (lvliIt != lvliCache.end()) {
 			std::vector<OutfitPiece> resolvedPieces;
-			std::vector<std::pair<uint32_t, uint16_t>> unresolvedRefs;
+			std::vector<std::pair<lldata::FormId, uint16_t>> unresolvedRefs;
 			ResolveLVLIGrouped(itemId, 1, {}, groupCounter, resolvedPieces, unresolvedRefs, entry.useAnyGroupNames, entry.useAnyGroups);
 
 			// Deduplicate ARMOs: within each gating path, keep first occurrence
 			// of each (FormID, nifPath). Across different paths the same ARMO
 			// is expected (variants share common pieces).
 			{
-				std::set<std::tuple<std::vector<std::pair<int, int>>, uint32_t, std::string>> seen;
+				std::set<std::tuple<std::vector<std::pair<int, int>>, lldata::FormId, std::string>> seen;
 				std::vector<OutfitPiece> deduped;
 				for (auto& p : resolvedPieces) {
 					auto key = std::make_tuple(p.useAnyPath, p.formId, p.nifPath);
@@ -1120,13 +1127,13 @@ const OutfitEntry* LeveledListData::ResolveNpcDefaultOutfit(const NPCEntry& npc)
 			return nullptr;
 		}
 
-		uint8_t synthIdx = EnsureDynamicMaster(otftDefiningPlugin, /*masterLoadDepth*/ 0, /*noClobber*/ true);
+		uint16_t synthIdx = EnsureDynamicMaster(otftDefiningPlugin, /*masterLoadDepth*/ 0, /*noClobber*/ true);
 		if (synthIdx == 0) {
 			wxLogWarning("ResolveNpcDefaultOutfit: NPC '%s' lazy-load of '%s' failed", npc.editorId.c_str(), otftDefiningPlugin.c_str());
 			return nullptr;
 		}
 
-		uint32_t lazyOtftId = (static_cast<uint32_t>(synthIdx) << 24) | doftBase;
+		FormId lazyOtftId = EncodeFormId(synthIdx, doftBase);
 		if (otftCache.find(lazyOtftId) == otftCache.end()) {
 			wxLogWarning("ResolveNpcDefaultOutfit: NPC '%s' OTFT %08X not present in '%s' after lazy-load", npc.editorId.c_str(), lazyOtftId, otftDefiningPlugin.c_str());
 			return nullptr;
@@ -1175,13 +1182,13 @@ const OutfitEntry* LeveledListData::ResolveNpcDefaultOutfit(const NPCEntry& npc)
 /// Resolve the worn mesh paths and ARMA records for an ARMO.
 /// Returns a list of (mesh path, ARMA pointer) pairs.
 static std::vector<std::pair<std::string, const CachedARMA*>> ResolveWornMeshes(const CachedArmo& armo,
-																				const std::unordered_map<uint32_t, CachedArmo>& armoCache,
-																				const std::unordered_map<uint32_t, CachedARMA>& armaCache) {
+																				const std::unordered_map<lldata::FormId, CachedArmo>& armoCache,
+																				const std::unordered_map<lldata::FormId, CachedARMA>& armaCache) {
 	std::vector<std::pair<std::string, const CachedARMA*>> results;
 	std::set<std::string> seenNifs;
 
 	// Add an ARMA's model to results. If femaleOnly is true, only use modelFemale.
-	auto addArma = [&](uint32_t armaId, bool femaleOnly) {
+	auto addArma = [&](lldata::FormId armaId, bool femaleOnly) {
 		auto it = armaCache.find(armaId);
 		if (it == armaCache.end()) {
 			if (!femaleOnly)
@@ -1199,11 +1206,11 @@ static std::vector<std::pair<std::string, const CachedARMA*>> ResolveWornMeshes(
 	// Two-pass collection for each set of ARMAs:
 	// Pass 1 — female models only (avoids loading male-only race variants for female previews)
 	// Pass 2 — male fallback only if pass 1 found nothing
-	auto collectArmatures = [&](const std::vector<uint32_t>& ids) {
-		for (uint32_t armaId : ids)
+	auto collectArmatures = [&](const std::vector<lldata::FormId>& ids) {
+		for (lldata::FormId armaId : ids)
 			addArma(armaId, true);
 		if (results.empty()) {
-			for (uint32_t armaId : ids)
+			for (lldata::FormId armaId : ids)
 				addArma(armaId, false);
 		}
 	};
@@ -1213,7 +1220,7 @@ static std::vector<std::pair<std::string, const CachedARMA*>> ResolveWornMeshes(
 
 	// If no meshes found, follow template chain (enchanted copies inherit from base armor)
 	if (results.empty()) {
-		uint32_t tid = armo.templateId;
+		lldata::FormId tid = armo.templateId;
 		for (int depth = 0; depth < 10 && tid != 0; ++depth) {
 			auto tit = armoCache.find(tid);
 			if (tit == armoCache.end())
@@ -1232,11 +1239,11 @@ static std::vector<std::pair<std::string, const CachedARMA*>> ResolveWornMeshes(
 }
 
 /// Build OutfitPiece(s) from a cached ARMO, resolving worn meshes through ARMA.
-static void AddPiecesFromArmo(uint32_t formId,
+static void AddPiecesFromArmo(lldata::FormId formId,
 							  const CachedArmo& armo,
-							  const std::unordered_map<uint32_t, CachedArmo>& armoCache,
-							  const std::unordered_map<uint32_t, CachedARMA>& armaCache,
-							  const std::unordered_map<uint32_t, CachedTXST>& txstCache,
+							  const std::unordered_map<lldata::FormId, CachedArmo>& armoCache,
+							  const std::unordered_map<lldata::FormId, CachedARMA>& armaCache,
+							  const std::unordered_map<lldata::FormId, CachedTXST>& txstCache,
 							  std::vector<OutfitPiece>& outPieces) {
 	auto meshes = ResolveWornMeshes(armo, armoCache, armaCache);
 
@@ -1457,8 +1464,8 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 		ca.modelFemale = ar.modelFemale;
 		ca.modelMale = ar.modelMale;
 		ca.templateId = ar.templateId.value_or(0);
-		ca.armatureIds = ar.armatureIds;	  // no remapping needed — main ESP's own FormIDs
-		armoCache[ar.formId] = std::move(ca); // overwrite any master version
+		ca.armatureIds.assign(ar.armatureIds.begin(), ar.armatureIds.end()); // main-ESP-local FormIDs already have main-ESP top byte
+		armoCache[ar.formId] = std::move(ca);								 // overwrite any master version
 		mainEspArmoIds.insert(ar.formId);
 	}
 
@@ -1468,8 +1475,8 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 		cam.modelMale = aa.modelMale;
 		cam.modelFemale = aa.modelFemale;
 		cam.bodySlotFlags = aa.bodySlotFlags;
-		cam.raceFormId = aa.raceId;						// main-ESP FormIDs need no remap
-		cam.additionalRaceFormIds = aa.additionalRaces; // main-ESP FormIDs need no remap
+		cam.raceFormId = aa.raceId;																// main-ESP FormIDs need no remap
+		cam.additionalRaceFormIds.assign(aa.additionalRaces.begin(), aa.additionalRaces.end()); // main-ESP FormIDs need no remap
 		cam.skinTextureMale = aa.skinTextureMale;
 		cam.skinTextureFemale = aa.skinTextureFemale;
 		for (auto& at : aa.altTexFemale) {
@@ -1513,7 +1520,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 		CachedOTFT co;
 		co.editorId = ot.editorId;
 		co.sourcePlugin = wxFileName(wxString::FromUTF8(espFilename)).GetFullName().ToStdString();
-		co.items = ot.items;
+		co.items.assign(ot.items.begin(), ot.items.end());
 		otftCache[ot.formId] = std::move(co);
 		mainEspOtftIds.insert(ot.formId);
 	}
@@ -1580,10 +1587,10 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 // ResolveLVLI — recursive LVLI → ARMO resolution
 // ---------------------------------------------------------------------------
 
-void LeveledListData::ResolveLVLI(uint32_t formId,
+void LeveledListData::ResolveLVLI(FormId formId,
 								  uint16_t parentLevel,
-								  std::vector<std::pair<uint32_t, uint16_t>>& armoRefs,
-								  std::vector<std::pair<uint32_t, uint16_t>>& unresolvedRefs) const {
+								  std::vector<std::pair<lldata::FormId, uint16_t>>& armoRefs,
+								  std::vector<std::pair<lldata::FormId, uint16_t>>& unresolvedRefs) const {
 	auto it = lvliCache.find(formId);
 	if (it == lvliCache.end())
 		return;
@@ -1612,12 +1619,12 @@ void LeveledListData::ResolveLVLI(uint32_t formId,
 // ResolveLVLIGrouped — recursive LVLI → ARMO resolution with Use Any tracking
 // ---------------------------------------------------------------------------
 
-void LeveledListData::ResolveLVLIGrouped(uint32_t formId,
+void LeveledListData::ResolveLVLIGrouped(FormId formId,
 										 uint16_t parentLevel,
 										 const std::vector<std::pair<int, int>>& parentPath,
 										 int& groupCounter,
 										 std::vector<OutfitPiece>& pieces,
-										 std::vector<std::pair<uint32_t, uint16_t>>& unresolvedRefs,
+										 std::vector<std::pair<lldata::FormId, uint16_t>>& unresolvedRefs,
 										 std::map<int, std::string>& groupNames,
 										 std::vector<OutfitGroupInfo>& groups) const {
 	auto it = lvliCache.find(formId);
@@ -1668,7 +1675,7 @@ void LeveledListData::ResolveLVLIGrouped(uint32_t formId,
 		// armor as five separate dropdown entries is just visual noise, so we
 		// collapse consecutive duplicates by ref FormID here. The first
 		// occurrence's level wins; later duplicates are skipped entirely.
-		std::vector<std::pair<uint32_t, uint16_t>> uniqueEntries;
+		std::vector<std::pair<lldata::FormId, uint16_t>> uniqueEntries;
 		{
 			std::set<uint32_t> seenRefs;
 			for (auto& [ref, level] : lvli.entries) {
@@ -1821,7 +1828,7 @@ std::string LeveledListData::ResolveNifPath(const std::string& relativePath) con
 // Skin texture resolution for NPC body display
 // ---------------------------------------------------------------------------
 
-std::array<std::string, 8> LeveledListData::ResolveSkinTextures(uint32_t wnamFormId, uint32_t npcRaceFormId) const {
+std::array<std::string, 8> LeveledListData::ResolveSkinTextures(FormId wnamFormId, FormId npcRaceFormId) const {
 	std::array<std::string, 8> textures{};
 	if (wnamFormId == 0)
 		return textures;
@@ -1837,7 +1844,7 @@ std::array<std::string, 8> LeveledListData::ResolveSkinTextures(uint32_t wnamFor
 	// Try race-matching ARMAs first, then any. Game semantics: SkinNaked holds one ARMA
 	// per race; the engine picks the one whose RNAM matches the NPC's race.
 	auto tryArmas = [&](bool requireRaceMatch) -> bool {
-		for (uint32_t armaId : armo.armatureIds) {
+		for (lldata::FormId armaId : armo.armatureIds) {
 			auto armaIt = armaCache.find(armaId);
 			if (armaIt == armaCache.end())
 				continue;
@@ -1848,7 +1855,7 @@ std::array<std::string, 8> LeveledListData::ResolveSkinTextures(uint32_t wnamFor
 			if (requireRaceMatch && npcRaceFormId != 0) {
 				bool match = arma.raceFormId == npcRaceFormId;
 				if (!match) {
-					for (uint32_t r : arma.additionalRaceFormIds) {
+					for (lldata::FormId r : arma.additionalRaceFormIds) {
 						if (r == npcRaceFormId) {
 							match = true;
 							break;
@@ -1901,7 +1908,7 @@ std::array<std::string, 8> LeveledListData::ResolveSkinTextures(uint32_t wnamFor
 // ResolveBodyNifPaths — get body/hands/feet NIF paths from NPC skin ARMO
 // ---------------------------------------------------------------------------
 
-LeveledListData::BodyNifPaths LeveledListData::ResolveBodyNifPaths(uint32_t wnamFormId, bool highWeight, uint32_t npcRaceFormId) const {
+LeveledListData::BodyNifPaths LeveledListData::ResolveBodyNifPaths(FormId wnamFormId, bool highWeight, FormId npcRaceFormId) const {
 	BodyNifPaths result;
 	if (wnamFormId == 0)
 		return result;
@@ -1917,7 +1924,7 @@ LeveledListData::BodyNifPaths LeveledListData::ResolveBodyNifPaths(uint32_t wnam
 	// Fill one pass worth of ARMAs with optional race-match requirement. Returns true
 	// if all three slots are filled after this pass.
 	auto pass = [&](bool requireRaceMatch) -> bool {
-		for (uint32_t armaId : armoIt->second.armatureIds) {
+		for (lldata::FormId armaId : armoIt->second.armatureIds) {
 			auto armaIt = armaCache.find(armaId);
 			if (armaIt == armaCache.end())
 				continue;
@@ -1926,7 +1933,7 @@ LeveledListData::BodyNifPaths LeveledListData::ResolveBodyNifPaths(uint32_t wnam
 			if (requireRaceMatch && npcRaceFormId != 0) {
 				bool match = arma.raceFormId == npcRaceFormId;
 				if (!match) {
-					for (uint32_t r : arma.additionalRaceFormIds) {
+					for (lldata::FormId r : arma.additionalRaceFormIds) {
 						if (r == npcRaceFormId) {
 							match = true;
 							break;
@@ -1983,7 +1990,7 @@ LeveledListData::BodyNifPaths LeveledListData::ResolveBodyNifPaths(uint32_t wnam
 // Race skin ARMO + NPC body NIF resolution (with race fallback)
 // ---------------------------------------------------------------------------
 
-uint32_t LeveledListData::GetRaceSkinArmo(const std::string& raceEditorId) const {
+lldata::FormId LeveledListData::GetRaceSkinArmo(const std::string& raceEditorId) const {
 	if (raceEditorId.empty())
 		return 0;
 	auto it = raceByEditorId.find(raceEditorId);
@@ -2040,8 +2047,8 @@ LeveledListData::EffectiveRace LeveledListData::GetEffectiveNpcRace(const std::s
 	return er;
 }
 
-std::set<uint32_t> LeveledListData::GetEffectiveArmorRaces(uint32_t npcRaceFormId) const {
-	std::set<uint32_t> races;
+std::set<lldata::FormId> LeveledListData::GetEffectiveArmorRaces(FormId npcRaceFormId) const {
+	std::set<lldata::FormId> races;
 	if (npcRaceFormId == 0)
 		return races;
 	races.insert(npcRaceFormId);
@@ -2059,30 +2066,30 @@ std::set<uint32_t> LeveledListData::GetEffectiveArmorRaces(uint32_t npcRaceFormI
 	// with vanilla armor: the skin ARMO references vanilla ARMAs whose RNAMs
 	// list NordRace / DefaultRace / etc., so outfits whose ARMAs target those
 	// same races are equippable on the custom race in-game.
-	for (uint32_t armaId : armoIt->second.armatureIds) {
+	for (lldata::FormId armaId : armoIt->second.armatureIds) {
 		auto armaIt = armaCache.find(armaId);
 		if (armaIt == armaCache.end())
 			continue;
 		if (armaIt->second.raceFormId != 0)
 			races.insert(armaIt->second.raceFormId);
-		for (uint32_t r : armaIt->second.additionalRaceFormIds)
+		for (lldata::FormId r : armaIt->second.additionalRaceFormIds)
 			races.insert(r);
 	}
 
 	// Walk template-armor chain too in case the skin ARMO is an enchanted
 	// copy that inherits its ARMAs from a base.
-	uint32_t tid = armoIt->second.templateId;
+	lldata::FormId tid = armoIt->second.templateId;
 	for (int depth = 0; depth < 10 && tid != 0; ++depth) {
 		auto tit = armoCache.find(tid);
 		if (tit == armoCache.end())
 			break;
-		for (uint32_t armaId : tit->second.armatureIds) {
+		for (lldata::FormId armaId : tit->second.armatureIds) {
 			auto armaIt = armaCache.find(armaId);
 			if (armaIt == armaCache.end())
 				continue;
 			if (armaIt->second.raceFormId != 0)
 				races.insert(armaIt->second.raceFormId);
-			for (uint32_t r : armaIt->second.additionalRaceFormIds)
+			for (lldata::FormId r : armaIt->second.additionalRaceFormIds)
 				races.insert(r);
 		}
 		tid = tit->second.templateId;
@@ -2091,7 +2098,7 @@ std::set<uint32_t> LeveledListData::GetEffectiveArmorRaces(uint32_t npcRaceFormI
 	return races;
 }
 
-std::string LeveledListData::ResolveHeadPartNif(uint32_t headPartFormId) const {
+std::string LeveledListData::ResolveHeadPartNif(FormId headPartFormId) const {
 	auto it = headPartCache.find(headPartFormId);
 	if (it == headPartCache.end())
 		return {};
@@ -2106,10 +2113,10 @@ LeveledListData::BodyNifPaths LeveledListData::ResolveNpcBodyNifPaths(const std:
 	// Effective race honors RNAM overrides from any plugin, not just vanilla data.
 	EffectiveRace effRace = GetEffectiveNpcRace(npcEditorId);
 	const std::string& raceEdid = effRace.editorId;
-	uint32_t npcRaceFid = effRace.formId;
+	FormId npcRaceFid = effRace.formId;
 
 	// Primary: NPC's own WNAM (prefer all-plugins override, fall back to master cache).
-	uint32_t npcWnam = 0;
+	FormId npcWnam = 0;
 	auto ovIt = npcSkinOverrides.find(npcEditorId);
 	if (ovIt != npcSkinOverrides.end())
 		ResolveLazyNpcSkin(ovIt->second);
@@ -2123,7 +2130,7 @@ LeveledListData::BodyNifPaths LeveledListData::ResolveNpcBodyNifPaths(const std:
 	if (npcWnam != 0)
 		result = ResolveBodyNifPaths(npcWnam, highWeight, npcRaceFid);
 
-	uint32_t raceWnam = 0;
+	FormId raceWnam = 0;
 	if (result.body.empty() || result.hands.empty() || result.feet.empty()) {
 		raceWnam = GetRaceSkinArmo(raceEdid);
 		if (raceWnam != 0) {
@@ -2137,12 +2144,12 @@ LeveledListData::BodyNifPaths LeveledListData::ResolveNpcBodyNifPaths(const std:
 		}
 	}
 
-	wxLogMessage("ResolveNpcBodyNifPaths: NPC '%s' race='%s' raceFID=%08X npcWNAM=%08X raceWNAM=%08X -> body='%s' hands='%s' feet='%s'",
+	wxLogMessage("ResolveNpcBodyNifPaths: NPC '%s' race='%s' raceFID=%016llX npcWNAM=%016llX raceWNAM=%016llX -> body='%s' hands='%s' feet='%s'",
 				 npcEditorId,
 				 raceEdid,
-				 npcRaceFid,
-				 npcWnam,
-				 raceWnam,
+				 static_cast<unsigned long long>(npcRaceFid),
+				 static_cast<unsigned long long>(npcWnam),
+				 static_cast<unsigned long long>(raceWnam),
 				 result.body,
 				 result.hands,
 				 result.feet);
@@ -2159,7 +2166,15 @@ namespace {
 // If MO3S/MO2S yield nothing, fall back to the per-gender skin TXST set via
 // NAM1 (female) / NAM0 (male) — that's the simpler ESP/ESL skin override
 // mechanism that mods commonly use to retexture an NPC's body.
-bool FillFromArmaTextures(const CachedARMA& arma, const std::unordered_map<uint32_t, CachedTXST>& txstCache, std::array<std::string, 8>& dst) {
+//
+// `slotHint` is currently informational; per-shape disambiguation is handled
+// by the renderer (the body NIF's reference shape is the only one retextured).
+enum class ArmaSlotKind { Body, Hands, Feet, Any };
+
+bool FillFromArmaTextures(const CachedARMA& arma,
+						  const std::unordered_map<lldata::FormId, CachedTXST>& txstCache,
+						  std::array<std::string, 8>& dst,
+						  ArmaSlotKind /*slotHint*/ = ArmaSlotKind::Any) {
 	auto& altTex = arma.altTexFemale.empty() ? arma.altTexMale : arma.altTexFemale;
 	for (auto& at : altTex) {
 		auto it = txstCache.find(at.txstFormId);
@@ -2172,7 +2187,7 @@ bool FillFromArmaTextures(const CachedARMA& arma, const std::unordered_map<uint3
 			return true;
 	}
 
-	uint32_t skinTxst = arma.skinTextureFemale != 0 ? arma.skinTextureFemale : arma.skinTextureMale;
+	lldata::FormId skinTxst = arma.skinTextureFemale != 0 ? arma.skinTextureFemale : arma.skinTextureMale;
 	if (skinTxst != 0) {
 		auto it = txstCache.find(skinTxst);
 		if (it != txstCache.end()) {
@@ -2187,24 +2202,27 @@ bool FillFromArmaTextures(const CachedARMA& arma, const std::unordered_map<uint3
 }
 
 // Walk an ARMO's ARMA list filling per-slot texture arrays. Prefers race-matching ARMAs.
-void FillPartTexturesFromArmo(uint32_t armoFid,
-							  uint32_t npcRaceFid,
-							  const std::unordered_map<uint32_t, CachedArmo>& armoCache,
-							  const std::unordered_map<uint32_t, CachedARMA>& armaCache,
-							  const std::unordered_map<uint32_t, CachedTXST>& txstCache,
+void FillPartTexturesFromArmo(lldata::FormId armoFid,
+							  lldata::FormId npcRaceFid,
+							  const std::unordered_map<lldata::FormId, CachedArmo>& armoCache,
+							  const std::unordered_map<lldata::FormId, CachedARMA>& armaCache,
+							  const std::unordered_map<lldata::FormId, CachedTXST>& txstCache,
 							  LeveledListData::BodyPartTextures& out) {
 	if (armoFid == 0)
 		return;
 	auto armoIt = armoCache.find(armoFid);
 	if (armoIt == armoCache.end()) {
-		wxLogMessage("FillPartTexturesFromArmo: ARMO %08X not in cache", armoFid);
+		wxLogMessage("FillPartTexturesFromArmo: ARMO %016llX not in cache", static_cast<unsigned long long>(armoFid));
 		return;
 	}
 
-	wxLogMessage("FillPartTexturesFromArmo: walking ARMO %08X (%zu ARMAs) raceHint=%08X", armoFid, armoIt->second.armatureIds.size(), npcRaceFid);
+	wxLogMessage("FillPartTexturesFromArmo: walking ARMO %016llX (%zu ARMAs) raceHint=%016llX",
+				 static_cast<unsigned long long>(armoFid),
+				 armoIt->second.armatureIds.size(),
+				 static_cast<unsigned long long>(npcRaceFid));
 
 	auto tryFill = [&](bool requireRaceMatch) {
-		for (uint32_t armaId : armoIt->second.armatureIds) {
+		for (lldata::FormId armaId : armoIt->second.armatureIds) {
 			auto armaIt = armaCache.find(armaId);
 			if (armaIt == armaCache.end()) {
 				wxLogMessage("  ARMA %08X not in cache", armaId);
@@ -2214,7 +2232,7 @@ void FillPartTexturesFromArmo(uint32_t armoFid,
 			if (requireRaceMatch && npcRaceFid != 0) {
 				bool match = arma.raceFormId == npcRaceFid;
 				if (!match) {
-					for (uint32_t r : arma.additionalRaceFormIds) {
+					for (lldata::FormId r : arma.additionalRaceFormIds) {
 						if (r == npcRaceFid) {
 							match = true;
 							break;
@@ -2237,15 +2255,15 @@ void FillPartTexturesFromArmo(uint32_t armoFid,
 						 arma.skinTextureMale);
 
 			if ((arma.bodySlotFlags & (1u << 2)) && out.body[0].empty()) {
-				if (FillFromArmaTextures(arma, txstCache, out.body))
+				if (FillFromArmaTextures(arma, txstCache, out.body, ArmaSlotKind::Body))
 					wxLogMessage("    body texture set: %s", out.body[0]);
 			}
 			if ((arma.bodySlotFlags & (1u << 3)) && out.hands[0].empty()) {
-				if (FillFromArmaTextures(arma, txstCache, out.hands))
+				if (FillFromArmaTextures(arma, txstCache, out.hands, ArmaSlotKind::Hands))
 					wxLogMessage("    hands texture set: %s", out.hands[0]);
 			}
 			if ((arma.bodySlotFlags & (1u << 7)) && out.feet[0].empty()) {
-				if (FillFromArmaTextures(arma, txstCache, out.feet))
+				if (FillFromArmaTextures(arma, txstCache, out.feet, ArmaSlotKind::Feet))
 					wxLogMessage("    feet texture set: %s", out.feet[0]);
 			}
 		}
@@ -2266,10 +2284,10 @@ LeveledListData::BodyPartTextures LeveledListData::ResolveNpcBodyPartTextures(co
 	// an NPC also redirects which ARMAs the texture chain walks.
 	EffectiveRace effRace = GetEffectiveNpcRace(npcEditorId);
 	const std::string& raceEdid = effRace.editorId;
-	uint32_t npcRaceFid = effRace.formId;
+	FormId npcRaceFid = effRace.formId;
 
 	// Pass 1: NPC's own WNAM (from all-plugin scan, remapped to main cache).
-	uint32_t npcWnam = 0;
+	FormId npcWnam = 0;
 	auto ovIt = npcSkinOverrides.find(npcEditorId);
 	if (ovIt != npcSkinOverrides.end())
 		ResolveLazyNpcSkin(ovIt->second);
@@ -2285,16 +2303,16 @@ LeveledListData::BodyPartTextures LeveledListData::ResolveNpcBodyPartTextures(co
 
 	// Pass 2: race's default skin ARMO for any slots still empty.
 	if (out.body[0].empty() || out.hands[0].empty() || out.feet[0].empty()) {
-		uint32_t raceWnam = GetRaceSkinArmo(raceEdid);
+		FormId raceWnam = GetRaceSkinArmo(raceEdid);
 		if (raceWnam != 0)
 			FillPartTexturesFromArmo(raceWnam, npcRaceFid, armoCache, armaCache, txstCache, out);
 	}
 
-	wxLogMessage("ResolveNpcBodyPartTextures: NPC '%s' race='%s' raceFID=%08X npcWNAM=%08X -> body='%s' hands='%s' feet='%s'",
+	wxLogMessage("ResolveNpcBodyPartTextures: NPC '%s' race='%s' raceFID=%016llX npcWNAM=%016llX -> body='%s' hands='%s' feet='%s'",
 				 npcEditorId,
 				 raceEdid,
-				 npcRaceFid,
-				 npcWnam,
+				 static_cast<unsigned long long>(npcRaceFid),
+				 static_cast<unsigned long long>(npcWnam),
 				 out.body[0],
 				 out.hands[0],
 				 out.feet[0]);
@@ -2306,25 +2324,40 @@ LeveledListData::BodyPartTextures LeveledListData::ResolveNpcBodyPartTextures(co
 // its WNAM at an ARMO it also defines) can be resolved.
 // ---------------------------------------------------------------------------
 
-uint8_t LeveledListData::EnsureDynamicMaster(const std::string& pluginPath, int masterLoadDepth, bool noClobber) {
+uint16_t LeveledListData::EnsureDynamicMaster(const std::string& pluginPath, int masterLoadDepth, bool noClobber) {
+	// If this plugin is already loaded as a main-ESP master, return its
+	// existing globalPluginIdx so callers encode FormIDs against the slot
+	// where the plugin's records are actually cached. Without this, an NPC
+	// override whose WNAM points into a main-ESP master would get encoded
+	// against a freshly-allocated dynamic slot whose cache is empty, and the
+	// lookup would miss even though the record IS cached (just under a
+	// different key).
+	{
+		auto sep = pluginPath.find_last_of("/\\");
+		std::string base = (sep == std::string::npos) ? pluginPath : pluginPath.substr(sep + 1);
+		std::string baseLower = ToLower(base);
+		for (size_t i = 0; i < espMasters.size(); ++i) {
+			if (ToLower(espMasters[i]) == baseLower)
+				return static_cast<uint16_t>(i);
+		}
+	}
 	for (size_t i = 0; i < dynamicMasters.size(); ++i) {
 		if (dynamicMasters[i] == pluginPath)
-			return static_cast<uint8_t>(0xFD - i);
+			return DynamicGlobalIdx(i);
 	}
-	// Synthetic indices grow downward from 0xFD; they must stay strictly above
-	// the main ESP's top-byte range (its master count = its self index) to
-	// avoid colliding with the main ESP's own records or its declared masters.
+	// Allocate a new globalPluginIdx slot. The 16-bit ordinal space (65535
+	// plugins) is effectively unbounded for any realistic mod list, so the
+	// old "synthetic master space exhausted" failure mode is gone.
 	size_t nextSlot = dynamicMasters.size();
-	uint32_t prospective = 0xFD - nextSlot;
-	if (prospective <= espMasters.size()) {
-		wxLogWarning("EnsureDynamicMaster: synthetic master space exhausted (mainMasters=%zu, used=%zu), refusing to load %s", espMasters.size(), dynamicMasters.size(), pluginPath);
+	uint16_t globalIdx = static_cast<uint16_t>(espMasters.size() + 1 + nextSlot);
+	if (globalIdx == 0xFFFF) {
+		wxLogWarning("EnsureDynamicMaster: 16-bit plugin space exhausted (%zu plugins loaded), refusing to load %s", static_cast<size_t>(globalIdx), pluginPath);
 		return 0;
 	}
-	uint8_t synthIdx = static_cast<uint8_t>(prospective);
-	wxLogMessage("EnsureDynamicMaster: loading '%s' at synthetic master index 0x%02X%s", pluginPath, synthIdx, noClobber ? " (no-clobber)" : "");
+	wxLogMessage("EnsureDynamicMaster: loading '%s' at globalPluginIdx=%u%s", pluginPath, static_cast<unsigned>(globalIdx), noClobber ? " (no-clobber)" : "");
 	dynamicMasters.push_back(pluginPath);
-	LoadRecordsFromESP(pluginPath, {"RACE", "ARMO", "ARMA", "TXST", "OTFT", "LVLI"}, synthIdx, espMasters, masterLoadDepth, noClobber);
-	return synthIdx;
+	LoadRecordsFromESP(pluginPath, {"RACE", "ARMO", "ARMA", "TXST", "OTFT", "LVLI", "NPC_"}, globalIdx, espMasters, masterLoadDepth, noClobber);
+	return globalIdx;
 }
 
 // ---------------------------------------------------------------------------
@@ -2421,19 +2454,21 @@ static std::string FindSkyrimPluginsTxt(const std::string& baseDataPath) {
 }
 
 // ---------------------------------------------------------------------------
-// ScanAllPluginsForOutfitOverrides — scan every ESP/ESM/ESL in Data dir for
-// OTFT/LVLI overrides of records already cached, and lazy-load any plugin that
-// supplies such overrides via EnsureDynamicMaster. This is required so that
-// vanilla LVLI/OTFT records overridden by a mod plugin that is NOT a master of
-// the loaded main ESP are still picked up when resolving an NPC's default
-// outfit (e.g. "MoLLi Clothing.esp" overriding Skyrim.esm's
-// LItemNecromancerRobesConjuration without being a master of
-// "MoLLi Light Armor.esp"). Idempotent.
+// ScanAllPluginsForOutfitOverrides — pre-load every ACTIVE plugin from the
+// user's Skyrim load order into the dynamic master pool so all ARMO/ARMA/TXST/
+// OTFT/LVLI/RACE/NPC_ records are resolvable from cache without any further
+// lazy expansion. The 16-bit plugin pool removes the historical 256-slot cap,
+// so we no longer need to be selective about which plugins to load.
 //
 // Load order: when Plugins.txt is available we iterate plugins in the user's
 // real load order so "later load wins" matches the game. Without Plugins.txt
 // we fall back to alphabetical filesystem order, which can pick the wrong
 // override winner among multiple conflicting plugins.
+//
+// Inactive plugins (not listed in Plugins.txt with a leading '*') are skipped:
+// they aren't part of the runtime load order so the game would never load
+// them, and loading them here would waste RAM and could let an inactive
+// override clobber an active winner.
 // ---------------------------------------------------------------------------
 
 void LeveledListData::ScanAllPluginsForOutfitOverrides() {
@@ -2452,11 +2487,6 @@ void LeveledListData::ScanAllPluginsForOutfitOverrides() {
 		alreadyLoaded.insert(ToLower(m));
 	if (!espFilename.empty())
 		alreadyLoaded.insert(ToLower(espFilename));
-
-	// Lookup: lowercase master name → index in espMasters
-	std::unordered_map<std::string, uint8_t> mainMasterIdx;
-	for (size_t i = 0; i < espMasters.size(); ++i)
-		mainMasterIdx[ToLower(espMasters[i])] = static_cast<uint8_t>(i);
 
 	// Parse Plugins.txt for the user's real load order. Active plugins are
 	// prefixed with '*'; we only care about active ones since inactive plugins
@@ -2512,208 +2542,38 @@ void LeveledListData::ScanAllPluginsForOutfitOverrides() {
 		});
 	}
 
-	int probed = 0;
+	int considered = 0;
 	int loaded = 0;
-	// Three-phase strategy:
-	//   Phase 1: probe each plugin (no loads) to detect overrides and collect
-	//            the file-master indices the override references.
-	//   Phase 2: load every override plugin's referenced 1-hop master (the
-	//            override's own dependencies). Loading these FIRST ensures
-	//            that when phase 3 finally loads the override plugin, its
-	//            cross-references can be remapped to the synthetic indices
-	//            assigned here (otherwise the override's references to e.g.
-	//            "Midnight Huntress.esp" would fall through and collide with
-	//            main-ESP master 7 = SexLab).
-	//   Phase 3: load each override plugin itself. With the synthetic master
-	//            space populated by phase 2, LoadRecordsFromESP's masterRemap
-	//            can now redirect every reference cleanly.
-	struct OverrideEntry {
-		std::string pluginPath;
-		std::string base;
-		std::vector<std::string> srcMasters;
-		std::vector<uint8_t> wantedFileMasters; // unmapped masters to lazy-load in phase 2
-	};
-	std::vector<OverrideEntry> overrides;
+	int failed = 0;
+	int skippedInactive = 0;
 
+	// Eager load: every active plugin not already loaded, in load order.
+	// EnsureDynamicMaster is idempotent — a plugin that some prior plugin
+	// listed as a master may already be loaded by the time we reach it, in
+	// which case the call is a no-op. Plugins.txt order guarantees masters
+	// precede dependents (Bethesda load order rule enforced by mod managers),
+	// so each plugin's own master list is already cached as dynamic masters
+	// when remapFid runs, letting cross-references redirect cleanly.
 	for (auto& pluginPath : orderedPlugins) {
 		std::string base = wxFileName(wxString::FromUTF8(pluginPath)).GetFullName().ToStdString();
 		if (alreadyLoaded.count(ToLower(base)))
 			continue;
-		// Skip plugins not in the user's active load order (when we have one).
-		if (!loadOrderRank.empty() && !loadOrderRank.count(ToLower(base)))
+		if (!loadOrderRank.empty() && !loadOrderRank.count(ToLower(base))) {
+			// Plugin file exists on disk but is not active in the user's
+			// Skyrim load order — skip it. The game would never load it, so
+			// neither should we.
+			++skippedInactive;
 			continue;
-		++probed;
-
-		// Read only OTFT/LVLI records to keep the probe cheap.
-		esp::ESPReader probe;
-		if (!probe.Load(pluginPath, {"OTFT", "LVLI"}))
-			continue;
-		auto& srcMasters = probe.GetMasters();
-
-		// Build remap from source master idx → cache top-byte. This must
-		// include both the main ESP's declared masters AND any plugins we
-		// have already lazy-loaded as dynamic masters earlier in this same
-		// override scan (e.g. USSEP, which is itself an override plugin
-		// that other override plugins like MoLLi Clothing reference).
-		// Without this, an override of a USSEP-defined LVLI would be
-		// invisible to plugins probed after USSEP got its synthetic slot.
-		std::unordered_map<uint8_t, uint8_t> masterRemap;
-		for (size_t fi = 0; fi < srcMasters.size(); ++fi) {
-			std::string lname = ToLower(srcMasters[fi]);
-			auto it = mainMasterIdx.find(lname);
-			if (it != mainMasterIdx.end()) {
-				masterRemap[static_cast<uint8_t>(fi)] = it->second;
-				continue;
-			}
-			// Try dynamic masters loaded so far.
-			for (size_t di = 0; di < dynamicMasters.size(); ++di) {
-				std::string dyn = dynamicMasters[di];
-				auto slash = dyn.find_last_of("/\\");
-				std::string dbase = ToLower(slash == std::string::npos ? dyn : dyn.substr(slash + 1));
-				if (dbase == lname) {
-					masterRemap[static_cast<uint8_t>(fi)] = static_cast<uint8_t>(0xFD - di);
-					break;
-				}
-			}
 		}
-
-		// Probe records: a FormID with top byte == one of OUR masters and a
-		// matching base id already in our cache is an override we care about.
-		auto isOverrideOfCached = [&](uint32_t rawFid, bool checkOtft) -> bool {
-			uint8_t tb = (rawFid >> 24) & 0xFF;
-			auto it = masterRemap.find(tb);
-			if (it == masterRemap.end())
-				return false; // self or unmapped master — not an override of cached records
-			uint32_t remapped = (static_cast<uint32_t>(it->second) << 24) | (rawFid & 0x00FFFFFF);
-			if (checkOtft)
-				return otftCache.count(remapped) != 0;
-			return lvliCache.count(remapped) != 0;
-		};
-
-		bool hasOverride = false;
-		for (auto& li : probe.GetLeveledItems()) {
-			if (isOverrideOfCached(li.formId, /*checkOtft*/ false)) {
-				hasOverride = true;
-				break;
-			}
-		}
-		if (!hasOverride) {
-			for (auto& ot : probe.GetOutfits()) {
-				if (isOverrideOfCached(ot.formId, /*checkOtft*/ true)) {
-					hasOverride = true;
-					break;
-				}
-			}
-		}
-
-		if (!hasOverride)
-			continue;
-
-		wxLogMessage("ScanAllPluginsForOutfitOverrides: '%s' overrides cached OTFT/LVLI; deferring load", base);
-
-		// Record this override for phase-2 dependency expansion and phase-3
-		// override load. The override plugin's LVLI/OTFT entries may
-		// reference records living in its OWN masters that aren't part of
-		// the main ESP's master list (e.g. MoLLi Clothing.esp → MoLLi
-		// Clothing Patches.esp). Loading those before the override itself
-		// gives the override's records a chance to remap cross-references
-		// to the synthetic indices we assign during phase 2.
-		OverrideEntry entry;
-		entry.pluginPath = pluginPath;
-		entry.base = base;
-		entry.srcMasters.assign(srcMasters.begin(), srcMasters.end());
-		std::set<uint8_t> wantedFileMasters;
-		auto noteFileMasterRef = [&](uint32_t rawFid) {
-			if (rawFid == 0)
-				return;
-			uint8_t tb = (rawFid >> 24) & 0xFF;
-			if (tb >= srcMasters.size())
-				return; // self-defined or out of range
-			if (masterRemap.find(tb) != masterRemap.end())
-				return; // already mapped to a main-ESP master
-			wantedFileMasters.insert(tb);
-		};
-		// Only walk LVLI/OTFT records that ACTUALLY override a cached
-		// vanilla/master record. Many override plugins (MoLLi Heavy/Light)
-		// also define lots of new private LVLIs that reference dozens of
-		// their own master packs which the user's actual outfits never
-		// touch — loading those would burn the 8-bit synthetic master
-		// budget on records nobody asked for.
-		for (auto& li : probe.GetLeveledItems()) {
-			if (!isOverrideOfCached(li.formId, /*checkOtft*/ false))
-				continue;
-			for (auto& e : li.entries)
-				noteFileMasterRef(e.reference);
-		}
-		for (auto& ot : probe.GetOutfits()) {
-			if (!isOverrideOfCached(ot.formId, /*checkOtft*/ true))
-				continue;
-			for (uint32_t item : ot.items)
-				noteFileMasterRef(item);
-		}
-		entry.wantedFileMasters.assign(wantedFileMasters.begin(), wantedFileMasters.end());
-		overrides.push_back(std::move(entry));
+		++considered;
+		uint16_t idx = EnsureDynamicMaster(pluginPath, /*masterLoadDepth*/ 0, /*noClobber*/ true);
+		if (idx != 0)
+			++loaded;
+		else
+			++failed;
 	}
 
-	// Phase 2: best-effort 1-hop master expansion. Load each override's
-	// referenced file-masters BEFORE the override itself so the override's
-	// cross-references can be redirected to the synthetic indices we hand
-	// out here. CRITICAL: we MUST leave at least `overrides.size()` slots
-	// free for phase 3 to actually load the override plugins themselves —
-	// the user cares about the overrides far more than about their
-	// dependencies (a missing override means the cached pre-override LVLI
-	// stays authoritative, which is what the user reported as "the already
-	// overwritten leveled lists are showing again"). Phase 2 therefore
-	// reserves the trailing slots for phase 3.
-	int expanded = 0;
-	int expansionFailed = 0;
-	auto remainingSlots = [&]() -> int {
-		// dynamicMasters grows downward from 0xFD; max usable slots before
-		// colliding with the main ESP's master range is (0xFD - espMasters.size()).
-		int maxSlots = 0xFD - static_cast<int>(espMasters.size());
-		return maxSlots - static_cast<int>(dynamicMasters.size());
-	};
-	for (auto& entry : overrides) {
-		for (uint8_t fi : entry.wantedFileMasters) {
-			// Leave room for every override that still needs to load in phase 3.
-			// Each override consumes one slot. Loaded overrides won't take
-			// new slots (EnsureDynamicMaster short-circuits if already present)
-			// — but for safety we treat overrides.size() as the upper bound.
-			if (remainingSlots() <= static_cast<int>(overrides.size())) {
-				++expansionFailed;
-				continue;
-			}
-			if (fi >= entry.srcMasters.size())
-				continue;
-			const std::string& masterName = entry.srcMasters[fi];
-			std::string masterPath = baseDataPath + masterName;
-			if (!wxFileName::FileExists(wxString::FromUTF8(masterPath)))
-				masterPath = ResolveCaseInsensitive(baseDataPath, masterName);
-			if (masterPath.empty() || !wxFileName::FileExists(wxString::FromUTF8(masterPath)))
-				continue;
-			uint8_t idx = EnsureDynamicMaster(masterPath, /*masterLoadDepth*/ 0, /*noClobber*/ true);
-			if (idx != 0)
-				++expanded;
-			else
-				++expansionFailed;
-		}
-	}
-
-	// Phase 3: now load the override plugins themselves. Their masterRemap
-	// will pick up the synthetic indices assigned in phase 2.
-	for (auto& entry : overrides) {
-		uint8_t synthIdx = EnsureDynamicMaster(entry.pluginPath);
-		if (synthIdx == 0)
-			continue;
-		++loaded;
-	}
-
-	wxLogMessage("ScanAllPluginsForOutfitOverrides: probed %d non-master plugins, %zu deferred overrides; 1-hop expansion: %d loaded, %d skipped; final override loads: %d",
-				 probed,
-				 overrides.size(),
-				 expanded,
-				 expansionFailed,
-				 loaded);
+	wxLogMessage("ScanAllPluginsForOutfitOverrides: considered %d active plugins (%d skipped inactive); loaded %d, failed %d", considered, skippedInactive, loaded, failed);
 }
 
 // ---------------------------------------------------------------------------
@@ -2757,10 +2617,68 @@ void LeveledListData::ScanAllPluginsForNpcSkins() {
 	wxDir::GetAllFiles(wxString::FromUTF8(baseDataPath), &pluginFiles, "*.esm", wxDIR_FILES);
 	wxDir::GetAllFiles(wxString::FromUTF8(baseDataPath), &pluginFiles, "*.esl", wxDIR_FILES);
 
-	size_t pluginsWithNpcs = 0;
+	// Parse Plugins.txt to honor the user's real Skyrim load order. Active
+	// plugins are prefixed '*'. With this order, the last-write-wins semantic
+	// on npcSkinOverrides correctly picks the highest-priority override —
+	// matching the in-game winner. Without Plugins.txt order we'd pick an
+	// arbitrary alphabetical winner and skin/race choices would not match
+	// what the game actually loads.
+	std::unordered_map<std::string, int> loadOrderRank;
+	{
+		std::string pluginsTxt = FindSkyrimPluginsTxt(baseDataPath);
+		if (!pluginsTxt.empty()) {
+			std::ifstream f(pluginsTxt);
+			std::string line;
+			int rank = 0;
+			while (std::getline(f, line)) {
+				if (!line.empty() && line.back() == '\r')
+					line.pop_back();
+				if (line.empty() || line.front() != '*')
+					continue;
+				std::string name = line.substr(1);
+				if (name.empty())
+					continue;
+				loadOrderRank[ToLower(name)] = rank++;
+			}
+			wxLogMessage("ScanAllPluginsForNpcSkins: parsed Plugins.txt with %zu active entries", loadOrderRank.size());
+		}
+		else {
+			wxLogMessage("ScanAllPluginsForNpcSkins: no Plugins.txt found; using alphabetical order");
+		}
+	}
 
-	for (auto& pluginWx : pluginFiles) {
-		std::string pluginPath = pluginWx.ToStdString();
+	std::vector<std::string> orderedPlugins;
+	orderedPlugins.reserve(pluginFiles.GetCount());
+	for (auto& p : pluginFiles)
+		orderedPlugins.push_back(p.ToStdString());
+
+	if (!loadOrderRank.empty()) {
+		std::stable_sort(orderedPlugins.begin(), orderedPlugins.end(), [&](const std::string& a, const std::string& b) {
+			auto baseOf = [](const std::string& s) {
+				auto pos = s.find_last_of("/\\");
+				return ToLower(pos == std::string::npos ? s : s.substr(pos + 1));
+			};
+			auto ia = loadOrderRank.find(baseOf(a));
+			auto ib = loadOrderRank.find(baseOf(b));
+			int ra = (ia == loadOrderRank.end()) ? INT_MAX : ia->second;
+			int rb = (ib == loadOrderRank.end()) ? INT_MAX : ib->second;
+			return ra < rb;
+		});
+	}
+
+	size_t pluginsWithNpcs = 0;
+	size_t skippedInactive = 0;
+
+	for (auto& pluginPath : orderedPlugins) {
+		// Skip inactive plugins: not in Plugins.txt → game would never load them.
+		if (!loadOrderRank.empty()) {
+			auto sep = pluginPath.find_last_of("/\\");
+			std::string base = (sep == std::string::npos) ? pluginPath : pluginPath.substr(sep + 1);
+			if (!loadOrderRank.count(ToLower(base))) {
+				++skippedInactive;
+				continue;
+			}
+		}
 
 		esp::ESPReader reader;
 		if (!reader.Load(pluginPath, {"NPC_"}))
@@ -2775,7 +2693,7 @@ void LeveledListData::ScanAllPluginsForNpcSkins() {
 		uint8_t selfIdx = static_cast<uint8_t>(srcMasters.size());
 
 		// Check if this ESP is itself a master of the generated ESP
-		std::string pluginName = wxFileName(pluginWx).GetFullName().ToStdString();
+		std::string pluginName = wxFileName(wxString::FromUTF8(pluginPath)).GetFullName().ToStdString();
 		auto selfMasterIt = masterNameToIdx.find(ToLower(pluginName));
 		bool isMaster = (selfMasterIt != masterNameToIdx.end());
 		uint8_t selfMasterIdx = isMaster ? selfMasterIt->second : 0;
@@ -2857,10 +2775,21 @@ void LeveledListData::ScanAllPluginsForNpcSkins() {
 				continue;
 			}
 			npcSkinOverrides[npc.editorId] = info;
+			if (npc.editorId == "HousecarlWhiterun") {
+				wxLogMessage("ScanAllPluginsForNpcSkins: 'HousecarlWhiterun' override from '%s' wnamRaw=%08X remappedWnam=%08X selfDefined=%d",
+							 pluginPath,
+							 npc.wnamFormId,
+							 info.remappedWnam,
+							 info.selfDefined ? 1 : 0);
+			}
 		}
 	}
 
-	wxLogMessage("ScanAllPluginsForNpcSkins: scanned %zu plugins (%zu with NPCs), %zu NPC skin overrides", pluginFiles.size(), pluginsWithNpcs, npcSkinOverrides.size());
+	wxLogMessage("ScanAllPluginsForNpcSkins: scanned %zu plugins (%zu with NPCs, %zu skipped inactive), %zu NPC skin overrides",
+				 orderedPlugins.size(),
+				 pluginsWithNpcs,
+				 skippedInactive,
+				 npcSkinOverrides.size());
 
 	// For each unresolvable override (RNAM and/or WNAM not in our caches), find
 	// the plugin that ACTUALLY defines the referenced record — which can be the
@@ -2981,14 +2910,14 @@ void LeveledListData::ScanAllPluginsForNpcSkins() {
 
 void LeveledListData::ResolveLazyNpcSkin(NpcSkinInfo& info) {
 	if (info.remappedRace == 0 && info.rawRace != 0 && !info.raceDefiningPlugin.empty()) {
-		uint8_t synthIdx = EnsureDynamicMaster(info.raceDefiningPlugin, /*masterLoadDepth*/ 0, /*noClobber*/ true);
+		uint16_t synthIdx = EnsureDynamicMaster(info.raceDefiningPlugin, /*masterLoadDepth*/ 0, /*noClobber*/ true);
 		if (synthIdx != 0)
-			info.remappedRace = (static_cast<uint32_t>(synthIdx) << 24) | (info.rawRace & 0x00FFFFFF);
+			info.remappedRace = EncodeFormId(synthIdx, info.rawRace);
 	}
 	if (info.remappedWnam == 0 && info.rawWnamForResolve != 0 && !info.wnamDefiningPlugin.empty()) {
-		uint8_t synthIdx = EnsureDynamicMaster(info.wnamDefiningPlugin, /*masterLoadDepth*/ 0, /*noClobber*/ true);
+		uint16_t synthIdx = EnsureDynamicMaster(info.wnamDefiningPlugin, /*masterLoadDepth*/ 0, /*noClobber*/ true);
 		if (synthIdx != 0) {
-			info.remappedWnam = (static_cast<uint32_t>(synthIdx) << 24) | (info.rawWnamForResolve & 0x00FFFFFF);
+			info.remappedWnam = EncodeFormId(synthIdx, info.rawWnamForResolve);
 			info.selfDefined = false;
 		}
 	}
@@ -3013,7 +2942,7 @@ std::array<std::string, 8> LeveledListData::ResolveSkinTexturesForNPC(const std:
 			break;
 		}
 	}
-	uint32_t npcRaceFid = 0;
+	FormId npcRaceFid = 0;
 	if (!raceEdid.empty()) {
 		auto it = raceByEditorId.find(raceEdid);
 		if (it != raceByEditorId.end())
@@ -3024,11 +2953,15 @@ std::array<std::string, 8> LeveledListData::ResolveSkinTexturesForNPC(const std:
 	auto tryRaceFallback = [&](std::array<std::string, 8>& tex) {
 		if (!tex[0].empty())
 			return;
-		uint32_t raceWnam = GetRaceSkinArmo(raceEdid);
+		FormId raceWnam = GetRaceSkinArmo(raceEdid);
 		if (raceWnam != 0) {
 			tex = ResolveSkinTextures(raceWnam, npcRaceFid);
 			if (!tex[0].empty())
-				wxLogMessage("ResolveSkinTexturesForNPC: NPC '%s' race '%s' skin ARMO %08X provided textures: %s", npcEditorId, raceEdid, raceWnam, tex[0]);
+				wxLogMessage("ResolveSkinTexturesForNPC: NPC '%s' race '%s' skin ARMO %016llX provided textures: %s",
+							 npcEditorId,
+							 raceEdid,
+							 static_cast<unsigned long long>(raceWnam),
+							 tex[0]);
 		}
 	};
 
@@ -3094,28 +3027,28 @@ std::array<std::string, 8> LeveledListData::ResolveSkinTexturesForNPC(const std:
 
 	// Remap a raw FormID from source ESP space → main cache space.
 	// Returns 0 for self-defined records (must use local lookup).
-	auto toMainCache = [&](uint32_t fid) -> uint32_t {
+	auto toMainCache = [&](uint32_t fid) -> FormId {
 		uint8_t top = (fid >> 24) & 0xFF;
 		if (top == selfIdx)
 			return 0; // self-defined, use local lookup
 		uint32_t base = fid & 0x00FFFFFF;
 		auto it = masterRemap.find(top);
 		if (it != masterRemap.end())
-			return (static_cast<uint32_t>(it->second) << 24) | base;
+			return EncodeFormId(it->second, base);
 		return 0; // can't remap
 	};
 
 	// Step 1: Find WNAM ARMO
 	uint32_t wnamFid = info.wnamRaw;
 	const std::vector<uint32_t>* espArmaIds = nullptr;
-	const std::vector<uint32_t>* cacheArmaIds = nullptr;
+	const std::vector<FormId>* cacheArmaIds = nullptr;
 
 	auto lArmoIt = localArmos.find(wnamFid);
 	if (lArmoIt != localArmos.end()) {
 		espArmaIds = &armors[lArmoIt->second].armatureIds;
 	}
 	if (!espArmaIds || espArmaIds->empty()) {
-		uint32_t remapped = toMainCache(wnamFid);
+		FormId remapped = toMainCache(wnamFid);
 		if (remapped != 0) {
 			auto cIt = armoCache.find(remapped);
 			if (cIt != armoCache.end())
@@ -3129,14 +3062,14 @@ std::array<std::string, 8> LeveledListData::ResolveSkinTexturesForNPC(const std:
 	}
 
 	// Collect all ARMA IDs to check
-	std::vector<uint32_t> allArmaIds;
+	std::vector<lldata::FormId> allArmaIds;
 	if (espArmaIds && !espArmaIds->empty())
 		allArmaIds.insert(allArmaIds.end(), espArmaIds->begin(), espArmaIds->end());
 	if (cacheArmaIds && !cacheArmaIds->empty())
 		allArmaIds.insert(allArmaIds.end(), cacheArmaIds->begin(), cacheArmaIds->end());
 
 	// Step 2: Find body ARMA (slot 32) with alternate textures
-	for (uint32_t armaId : allArmaIds) {
+	for (lldata::FormId armaId : allArmaIds) {
 		// Try local ARMA first
 		auto lArmaIt = localArmas.find(armaId);
 		if (lArmaIt != localArmas.end()) {

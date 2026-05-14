@@ -1086,13 +1086,51 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 		// path. ReconcileBodyAndOutfitShapes is the place that retargets
 		// outfit body shapes; head shapes use whatever the FaceGen NIF
 		// embeds.
+		//
+		// For body slot (partition 32) the loaded body NIF can hold multiple
+		// shapes (e.g. 3BA splits body / vagina / anus, all on slot 32). The
+		// NIF already carries correct per-shape BSShaderTextureSets — we must
+		// only retexture the *reference* body shape (the main body mesh) and
+		// leave the secondary anatomy shapes' embedded textures alone.
+		// Otherwise the single ARMA-resolved body TXST gets slammed onto every
+		// shape, replacing the vagina/anus detail textures with the main-body
+		// diffuse (or vice versa, depending on altTex order).
+		//
+		// The reference body shape is identified as the partition-32 shape
+		// with the largest vertex count.
+		std::string referenceBodyShape;
+		int referenceBodyVerts = -1;
+		for (auto& name : bodyShapeNames) {
+			auto it = bodyShapePartMap.find(name);
+			if (it == bodyShapePartMap.end())
+				continue;
+			if (!it->second.count(32))
+				continue;
+			Mesh* m = gls.GetMesh(name);
+			if (!m)
+				continue;
+			if (m->nVerts > referenceBodyVerts) {
+				referenceBodyVerts = m->nVerts;
+				referenceBodyShape = name;
+			}
+		}
+
 		for (auto& name : bodyShapeNames) {
 			auto it = bodyShapePartMap.find(name);
 			if (it == bodyShapePartMap.end())
 				continue;
 			auto& partIds = it->second;
-			if (partIds.count(32))
-				applyToShape(name, bodyTex, "body");
+			if (partIds.count(32)) {
+				if (name == referenceBodyShape) {
+					applyToShape(name, bodyTex, "body");
+				}
+				else {
+					wxLogMessage("LeveledListPreviewer: Preserving NIF-embedded textures for non-reference body shape '%s' (verts=%d, reference='%s')",
+								 name,
+								 gls.GetMesh(name) ? gls.GetMesh(name)->nVerts : 0,
+								 referenceBodyShape);
+				}
+			}
 			else if (partIds.count(33))
 				applyToShape(name, handsTex, "hands");
 			else if (partIds.count(37))
@@ -1287,6 +1325,30 @@ void LeveledListPreviewer::ReconcileBodyAndOutfitShapes() {
 			   || p.find("malebody") != std::string::npos;
 	};
 
+	// As in the race-body retexture pass above: 3BA-style outfits expose
+	// multiple partition-32 shapes (body / vagina / anus) that all carry a
+	// "femalebody*" texture variant. We must only retexture the reference
+	// body shape (largest vert count among partition-32 outfit shapes) so the
+	// vagina/anus shapes keep their NIF-embedded detail textures
+	// (femalebody_etc_v2_1.dds etc.) instead of being overwritten with the
+	// main-body diffuse.
+	std::string outfitReferenceBodyShape;
+	int outfitReferenceBodyVerts = -1;
+	for (auto& outfitShape : outfitShapeNames) {
+		auto it = bodyShapePartMap.find(outfitShape);
+		if (it == bodyShapePartMap.end() || !it->second.count(32))
+			continue;
+		Mesh* m = gls.GetMesh(outfitShape);
+		if (!m)
+			continue;
+		if (m->nVerts > outfitReferenceBodyVerts) {
+			outfitReferenceBodyVerts = m->nVerts;
+			outfitReferenceBodyShape = outfitShape;
+		}
+	}
+	if (!outfitReferenceBodyShape.empty())
+		wxLogMessage("ReconcileBodyAndOutfitShapes: outfit reference body shape='%s' (verts=%d)", outfitReferenceBodyShape, outfitReferenceBodyVerts);
+
 	for (auto& outfitShape : outfitShapeNames) {
 		auto it = bodyShapePartMap.find(outfitShape);
 		if (it == bodyShapePartMap.end())
@@ -1296,6 +1358,11 @@ void LeveledListPreviewer::ReconcileBodyAndOutfitShapes() {
 		const std::vector<std::string>* tex = nullptr;
 		const char* slotLabel = nullptr;
 		if (it->second.count(32)) {
+			// Only retexture the outfit's reference body shape; other
+			// partition-32 shapes (vagina/anus on 3BA) keep their NIF
+			// textures.
+			if (outfitShape != outfitReferenceBodyShape)
+				continue;
 			slot = 32;
 			slotLabel = "body";
 			if (!bodyTex.empty() && !bodyTex[0].empty())
@@ -1596,7 +1663,7 @@ void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
 	UpdateHeadVisibility();
 
 	// Load additional head parts (eyes, hair, etc.) if they have separate NIFs.
-	for (uint32_t hpFid : npc.headParts) {
+	for (lldata::FormId hpFid : npc.headParts) {
 		std::string hpRelPath = data.ResolveHeadPartNif(hpFid);
 		if (hpRelPath.empty())
 			continue;
@@ -2338,7 +2405,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	// to the ARMA that matches the NPC's race — otherwise we render every
 	// race variant on top of each other.
 	uint32_t npcRaceFid = 0;
-	std::set<uint32_t> effectiveArmorRaces;
+	std::set<lldata::FormId> effectiveArmorRaces;
 	if (!currentHeadEditorId.empty()) {
 		auto effRace = data.GetEffectiveNpcRace(currentHeadEditorId);
 		npcRaceFid = effRace.formId;
@@ -2348,11 +2415,11 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	}
 	if (npcRaceFid != 0) {
 		std::string ras;
-		for (uint32_t r : effectiveArmorRaces) {
+		for (lldata::FormId r : effectiveArmorRaces) {
 			if (!ras.empty())
 				ras += ",";
-			char buf[16];
-			std::snprintf(buf, sizeof(buf), "%08X", r);
+			char buf[24];
+			std::snprintf(buf, sizeof(buf), "%llX", static_cast<unsigned long long>(r));
 			ras += buf;
 		}
 		wxLogMessage("LeveledListPreviewer: NPC race %08X effective armor races: [%s]", npcRaceFid, ras);
@@ -2375,29 +2442,29 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	constexpr uint32_t DEFAULT_RACE_FID = 0x00000019;
 	std::set<size_t> renderPieceIdx;
 	{
-		auto pieceMatchesAny = [](const lldata::OutfitPiece& p, const std::set<uint32_t>& set) -> bool {
+		auto pieceMatchesAny = [](const lldata::OutfitPiece& p, const std::set<lldata::FormId>& set) -> bool {
 			if (set.count(p.armaRaceFormId))
 				return true;
-			for (uint32_t r : p.armaAdditionalRaceFormIds) {
+			for (lldata::FormId r : p.armaAdditionalRaceFormIds) {
 				if (set.count(r))
 					return true;
 			}
 			return false;
 		};
 
-		std::set<uint32_t> exactRaceSet;
+		std::set<lldata::FormId> exactRaceSet;
 		if (npcRaceFid != 0)
 			exactRaceSet.insert(npcRaceFid);
-		std::set<uint32_t> defaultRaceSet{DEFAULT_RACE_FID};
+		std::set<lldata::FormId> defaultRaceSet{DEFAULT_RACE_FID};
 
-		std::map<uint32_t, std::vector<size_t>> byArmo;
+		std::map<lldata::FormId, std::vector<size_t>> byArmo;
 		for (size_t i = 0; i < outfit.pieces.size(); ++i)
 			byArmo[outfit.pieces[i].formId].push_back(i);
 
 		for (auto& [armoId, indices] : byArmo) {
 			// Try each tier in priority order; first tier that finds a match
 			// wins for this ARMO and all non-matching ARMA variants get hidden.
-			auto tryTier = [&](const std::set<uint32_t>& tierSet, const char* tierLabel) -> bool {
+			auto tryTier = [&](const std::set<lldata::FormId>& tierSet, const char* tierLabel) -> bool {
 				if (tierSet.empty())
 					return false;
 				bool anyMatch = false;
