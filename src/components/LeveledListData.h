@@ -370,6 +370,12 @@ private:
 	std::unordered_map<std::string, FormId> raceByEditorId;			 // editorId → remapped RACE FormID
 	std::unordered_map<std::string, FormId> npcSkinCache;			 // editorId → remapped WNAM FormID
 	std::unordered_map<std::string, NpcSkinInfo> npcSkinOverrides;	 // editorId → skin info from all plugins
+
+	// (lowercased master plugin filename, baseFormId & 0x00FFFFFF) → editorId.
+	// Built from `npcs` at the end of LoadNPCs so that NPC override records
+	// from non-vanilla plugins — which Bethesda's CK serializes WITHOUT an
+	// EDID subrecord — can still be matched back to their canonical editor id.
+	std::map<std::pair<std::string, uint32_t>, std::string> npcEditorIdByMasterFormId;
 	// Plugin pool used to encode FormIDs. The conceptual layout is:
 	//   globalPluginIdx 0 .. espMasters.size()-1          = main ESP's masters
 	//   globalPluginIdx espMasters.size()                 = the main ESP itself

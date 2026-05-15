@@ -435,13 +435,13 @@ void LeveledListData::LoadNPCs() {
 			auto& readerMasters = reader.GetMasters();
 			auto remapDoftOverride = buildLocalToEspMastersRemap(readerMasters, pluginFile);
 			for (auto& npc : reader.GetNPCs()) {
-				if (npc.editorId.empty())
-					continue;
-
 				// Only care about records that override an NPC defined in one of the
 				// plugin's masters — those are the ones whose FaceGen this plugin may
 				// have regenerated. Top byte == len(masters) means the NPC is native
 				// to this plugin (i.e. a new NPC_ record), not relevant here.
+				// (We don't filter on empty editorId here: CK omits EDID on
+				// overrides, and the (nativePlugin, baseFormId) tuple below is
+				// sufficient to identify the NPC.)
 				uint8_t topByte = (npc.formId >> 24) & 0xFF;
 				if (topByte >= readerMasters.size())
 					continue;
@@ -525,7 +525,17 @@ void LeveledListData::LoadNPCs() {
 
 	std::sort(npcs.begin(), npcs.end(), [](const NPCEntry& a, const NPCEntry& b) { return a.displayName < b.displayName; });
 
-	wxLogMessage("LeveledListData::LoadNPCs: %zu NPCs total", npcs.size());
+	// Build (masterPluginLower, baseFormId) → editorId so the scan loop can
+	// resolve override records whose EDID subrecord is omitted (CK default
+	// behaviour for NPC_ overrides).
+	npcEditorIdByMasterFormId.clear();
+	for (auto& n : npcs) {
+		if (n.editorId.empty() || n.plugin.empty())
+			continue;
+		npcEditorIdByMasterFormId[{ToLower(n.plugin), n.formId & 0x00FFFFFFu}] = n.editorId;
+	}
+
+	wxLogMessage("LeveledListData::LoadNPCs: %zu NPCs total, %zu master/formId→editorId entries", npcs.size(), npcEditorIdByMasterFormId.size());
 }
 
 // ---------------------------------------------------------------------------
@@ -730,7 +740,7 @@ void LeveledListData::LoadRecordsFromESP(
 		return EncodeFormId(synthSlot, baseId);
 	};
 
-	wxLogMessage("LeveledListData: Loaded %s (globalPluginIdx=%u, selfIndex=%d, %zu ARMOs, %zu ARMAs, %zu TXSTs, %zu OTFTs, %zu LVLIs)",
+	wxLogMessage("LeveledListData: Loaded %s (globalPluginIdx=%u, selfIndex=%d, %zu ARMOs, %zu ARMAs, %zu TXSTs, %zu OTFTs, %zu LVLIs, %zu RACEs, %zu NPCs)",
 				 wxString(filepath),
 				 static_cast<unsigned>(globalPluginIdx),
 				 selfIndex,
@@ -738,7 +748,9 @@ void LeveledListData::LoadRecordsFromESP(
 				 reader.GetArmorAddons().size(),
 				 reader.GetTextureSets().size(),
 				 reader.GetOutfits().size(),
-				 reader.GetLeveledItems().size());
+				 reader.GetLeveledItems().size(),
+				 reader.GetRaces().size(),
+				 reader.GetNPCs().size());
 
 	// Cache ARMO records. Overwrite: in Bethesda load order, later masters
 	// override earlier ones for the same (remapped) FormID.
@@ -2016,16 +2028,27 @@ LeveledListData::EffectiveRace LeveledListData::GetEffectiveNpcRace(const std::s
 	if (ovIt != npcSkinOverrides.end())
 		ResolveLazyNpcSkin(ovIt->second);
 	if (ovIt != npcSkinOverrides.end() && ovIt->second.remappedRace != 0) {
-		uint32_t fid = ovIt->second.remappedRace;
+		// remappedRace is FormId (uint64_t) — globalPluginIdx lives in the
+		// high 16 bits above the local 24-bit id. Anything wider than uint32_t
+		// MUST be preserved here; narrowing drops the top byte for any
+		// dynamic-master FormID whose globalIdx exceeds 0xFF, and the cache
+		// lookup then silently misses.
+		FormId fid = ovIt->second.remappedRace;
 		auto cacheIt = raceCache.find(fid);
 		if (cacheIt != raceCache.end()) {
 			er.formId = fid;
 			er.editorId = cacheIt->second.editorId;
 			er.skinArmoFormId = cacheIt->second.skinFormId;
-			wxLogMessage("GetEffectiveNpcRace: NPC '%s' override race %08X ('%s') skinArmo=%08X", npcEditorId, fid, er.editorId, er.skinArmoFormId);
+			wxLogMessage("GetEffectiveNpcRace: NPC '%s' override race %016llX ('%s') skinArmo=%016llX",
+						 npcEditorId,
+						 static_cast<unsigned long long>(fid),
+						 er.editorId,
+						 static_cast<unsigned long long>(er.skinArmoFormId));
 			return er;
 		}
-		wxLogMessage("GetEffectiveNpcRace: NPC '%s' override race %08X not in raceCache, falling back to vanilla", npcEditorId, fid);
+		wxLogMessage("GetEffectiveNpcRace: NPC '%s' override race %016llX not in raceCache, falling back to vanilla",
+					 npcEditorId,
+					 static_cast<unsigned long long>(fid));
 	}
 
 	// Step 2: vanilla race recorded during LoadNPCs.
@@ -2115,14 +2138,20 @@ LeveledListData::BodyNifPaths LeveledListData::ResolveNpcBodyNifPaths(const std:
 	const std::string& raceEdid = effRace.editorId;
 	FormId npcRaceFid = effRace.formId;
 
-	// Primary: NPC's own WNAM (prefer all-plugins override, fall back to master cache).
+	// Primary: NPC's own WNAM. npcSkinOverrides is the load-order-aware winner
+	// across every plugin; when an entry exists it is authoritative even when
+	// remappedWnam==0 (explicit revert to race default). Only fall back to
+	// npcSkinCache (main-ESP master chain) when no override entry exists.
 	FormId npcWnam = 0;
+	bool haveOverrideEntry = false;
 	auto ovIt = npcSkinOverrides.find(npcEditorId);
-	if (ovIt != npcSkinOverrides.end())
+	if (ovIt != npcSkinOverrides.end()) {
 		ResolveLazyNpcSkin(ovIt->second);
-	if (ovIt != npcSkinOverrides.end() && !ovIt->second.selfDefined)
-		npcWnam = ovIt->second.remappedWnam;
-	if (npcWnam == 0) {
+		haveOverrideEntry = true;
+		if (!ovIt->second.selfDefined)
+			npcWnam = ovIt->second.remappedWnam;
+	}
+	if (npcWnam == 0 && !haveOverrideEntry) {
 		auto scIt = npcSkinCache.find(npcEditorId);
 		if (scIt != npcSkinCache.end())
 			npcWnam = scIt->second;
@@ -2268,13 +2297,22 @@ LeveledListData::BodyPartTextures LeveledListData::ResolveNpcBodyPartTextures(co
 	FormId npcRaceFid = effRace.formId;
 
 	// Pass 1: NPC's own WNAM (from all-plugin scan, remapped to main cache).
+	// npcSkinOverrides is built load-order-aware across every plugin in the
+	// Data directory, so if an entry exists for this NPC it is THE authoritative
+	// last-writer record. An explicit remappedWnam=0 in that entry means the
+	// winning plugin reverts to the race default and must NOT fall back to
+	// npcSkinCache (which only sees the main-ESP master chain and could still
+	// hold a non-zero value from an earlier master override).
 	FormId npcWnam = 0;
+	bool haveOverrideEntry = false;
 	auto ovIt = npcSkinOverrides.find(npcEditorId);
-	if (ovIt != npcSkinOverrides.end())
+	if (ovIt != npcSkinOverrides.end()) {
 		ResolveLazyNpcSkin(ovIt->second);
-	if (ovIt != npcSkinOverrides.end() && !ovIt->second.selfDefined)
-		npcWnam = ovIt->second.remappedWnam;
-	if (npcWnam == 0) {
+		haveOverrideEntry = true;
+		if (!ovIt->second.selfDefined)
+			npcWnam = ovIt->second.remappedWnam;
+	}
+	if (npcWnam == 0 && !haveOverrideEntry) {
 		auto scIt = npcSkinCache.find(npcEditorId);
 		if (scIt != npcSkinCache.end())
 			npcWnam = scIt->second;
@@ -2651,11 +2689,13 @@ void LeveledListData::ScanAllPluginsForNpcSkins() {
 	size_t skippedInactive = 0;
 
 	for (auto& pluginPath : orderedPlugins) {
+		auto sep = pluginPath.find_last_of("/\\");
+		std::string base = (sep == std::string::npos) ? pluginPath : pluginPath.substr(sep + 1);
+		std::string baseLower = ToLower(base);
+
 		// Skip inactive plugins: not in Plugins.txt → game would never load them.
 		if (!loadOrderRank.empty()) {
-			auto sep = pluginPath.find_last_of("/\\");
-			std::string base = (sep == std::string::npos) ? pluginPath : pluginPath.substr(sep + 1);
-			if (!loadOrderRank.count(ToLower(base))) {
+			if (!loadOrderRank.count(baseLower)) {
 				++skippedInactive;
 				continue;
 			}
@@ -2707,11 +2747,37 @@ void LeveledListData::ScanAllPluginsForNpcSkins() {
 		};
 
 		for (auto& npc : npcs) {
-			if (npc.editorId.empty())
+			// The override's identity is its FormID, not the EDID subrecord.
+			// Bethesda's CK lets an override carry a renamed EDID (some mods
+			// do this for organisation). The npcSkinOverrides map MUST be
+			// keyed by the canonical editor id from the master record,
+			// otherwise renamed overrides land under a different bucket and
+			// the consumer (which looks up by canonical id) silently misses
+			// them.
+			//
+			// Native records (top byte == selfIdx) are plugin-defined NPCs;
+			// for those the override's own EDID IS canonical.
+			uint8_t tb = (npc.formId >> 24) & 0xFF;
+			std::string resolvedEditorId;
+			if (tb < srcMasters.size()) {
+				auto it = npcEditorIdByMasterFormId.find({ToLower(srcMasters[tb]), npc.formId & 0x00FFFFFFu});
+				if (it != npcEditorIdByMasterFormId.end())
+					resolvedEditorId = it->second;
+				else if (!npc.editorId.empty())
+					resolvedEditorId = npc.editorId;
+			}
+			else {
+				resolvedEditorId = npc.editorId;
+			}
+			if (resolvedEditorId.empty())
 				continue;
-			// Skip records that override neither WNAM nor RNAM — they have nothing to contribute.
-			if (npc.wnamFormId == 0 && npc.raceFormId == 0)
-				continue;
+			// Do NOT short-circuit on wnam==0 && race==0. Skyrim NPC overrides
+			// serialize the whole record, so an override that just edits AI or
+			// inventory still re-emits WNAM=0 when the override author didn't
+			// touch skin. The game's last-writer-wins applies to the whole
+			// record, so that later override must clear an earlier mod's WNAM
+			// override and revert to the race default — skipping the record
+			// here would leave the stale earlier override winning.
 
 			NpcSkinInfo info;
 			info.sourcePlugin = pluginPath;
@@ -2751,18 +2817,11 @@ void LeveledListData::ScanAllPluginsForNpcSkins() {
 			// override would be reset to vanilla just because the ESM happens
 			// to sort later in the directory listing.
 			bool currentIsVanilla = isVanillaEsm(pluginPath);
-			auto existing = npcSkinOverrides.find(npc.editorId);
+			auto existing = npcSkinOverrides.find(resolvedEditorId);
 			if (existing != npcSkinOverrides.end() && currentIsVanilla && !isVanillaEsm(existing->second.sourcePlugin)) {
 				continue;
 			}
-			npcSkinOverrides[npc.editorId] = info;
-			if (npc.editorId == "HousecarlWhiterun") {
-				wxLogMessage("ScanAllPluginsForNpcSkins: 'HousecarlWhiterun' override from '%s' wnamRaw=%08X remappedWnam=%08X selfDefined=%d",
-							 pluginPath,
-							 npc.wnamFormId,
-							 info.remappedWnam,
-							 info.selfDefined ? 1 : 0);
-			}
+			npcSkinOverrides[resolvedEditorId] = info;
 		}
 	}
 
@@ -2831,13 +2890,28 @@ void LeveledListData::ScanAllPluginsForNpcSkins() {
 		auto& srcMasters = reader.GetMasters();
 		uint8_t srcSelfIdx = static_cast<uint8_t>(srcMasters.size());
 
+		// Key by CANONICAL editor id (the master record's id), not the plugin's
+		// raw EDID — an override may rename the EDID and the outer editorIds
+		// list (sourced from npcSkinOverrides) is already canonical.
 		std::unordered_map<std::string, uint32_t> rawRaceByEditorId;
 		std::unordered_map<std::string, uint32_t> rawWnamByEditorId;
 		for (auto& npc : reader.GetNPCs()) {
-			if (npc.editorId.empty())
+			uint8_t tb = (npc.formId >> 24) & 0xFF;
+			std::string canonical;
+			if (tb < srcMasters.size()) {
+				auto it = npcEditorIdByMasterFormId.find({ToLower(srcMasters[tb]), npc.formId & 0x00FFFFFFu});
+				if (it != npcEditorIdByMasterFormId.end())
+					canonical = it->second;
+				else
+					canonical = npc.editorId; // fallback when master record isn't in our cache
+			}
+			else {
+				canonical = npc.editorId; // native record
+			}
+			if (canonical.empty())
 				continue;
-			rawRaceByEditorId[npc.editorId] = npc.raceFormId;
-			rawWnamByEditorId[npc.editorId] = npc.wnamFormId;
+			rawRaceByEditorId[canonical] = npc.raceFormId;
+			rawWnamByEditorId[canonical] = npc.wnamFormId;
 		}
 
 		for (auto& editorId : editorIds) {
