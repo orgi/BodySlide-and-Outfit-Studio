@@ -376,7 +376,7 @@ void LeveledListData::LoadNPCs() {
 			if (!npc.fullName.empty() && npc.fullName[0] != '[')
 				pn.entry.fullName = npc.fullName;
 
-			// Display: "In-game Name (plugin.esm, EditorID)" — fall back to editor id only
+			// Display: "In-game Name (<source>, EditorID)" — fall back to editor id only
 			// when the NPC has no readable FULL name. Autocomplete still matches on editor id
 			// via the fallback branch in OnHeadEntered.
 			const std::string& shownName = !pn.entry.fullName.empty() ? pn.entry.fullName : npc.editorId;
@@ -683,7 +683,7 @@ void LeveledListData::LoadRecordsFromESP(
 	// 16-bit globalPluginIdx used in cache keys. First try the main ESP's master
 	// list (matched case-insensitive by filename). Then fall back to any plugin
 	// already loaded as a dynamic master — this is what lets an override
-	// plugin's references to e.g. "Midnight Huntress.esp" be remapped to its
+	// plugin's references to another mod plugin be remapped to its
 	// synthetic slot instead of falling through and colliding with an unrelated
 	// main-ESP master. Without this, an OTFT that mixes references to mapped
 	// and unmapped masters loses the unmapped entries silently.
@@ -716,7 +716,7 @@ void LeveledListData::LoadRecordsFromESP(
 	// dependency chains (e.g. the user-opened combined ESP declares ~200+
 	// masters), exhausting plugin slots before any override-only plugin can be
 	// loaded. Scoped master expansion happens in
-	// ScanAllPluginsForOutfitOverrides instead, only for plugins that
+	// LoadAllActivePlugins instead, only for plugins that
 	// actually own overrides we want to surface.
 	(void)masterLoadDepth;
 
@@ -1075,12 +1075,9 @@ const OutfitEntry* LeveledListData::ResolveNpcDefaultOutfit(const NPCEntry& npc)
 	if (cached != npcOutfitCache.end())
 		return &cached->second;
 
-	// Lazy-scan the Data folder for non-master plugins that override OTFT/LVLI
-	// records we already cache. Triggered on the first NPC outfit resolution so
-	// the scan cost is only paid when the NPC tab is actually used. After this
-	// runs, otftCache and lvliCache reflect overrides from mod plugins that are
-	// not masters of the loaded main ESP.
-	ScanAllPluginsForOutfitOverrides();
+	// All active mod plugins (and the OTFT/LVLI overrides they carry) were
+	// loaded once at the end of LoadESP via LoadAllActivePlugins, so otftCache
+	// and lvliCache already reflect the load-order winner.
 
 	if (npc.defaultOutfitFormId == 0) {
 		if (npc.defaultOutfitFormIdRaw == 0) {
@@ -1347,7 +1344,6 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 	mainEspHdptIds.clear();
 	mainEspLoaded = false;
 	loadInfo.clear();
-	outfitOverridesScanned = false;
 
 	espDirectory = DirectoryOf(filepath);
 
@@ -1556,7 +1552,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 	// invisible on first load. Running it here also lets MoLLi-style
 	// overrides that REMOVE entries from a vanilla LVLI take effect on the
 	// initial outfit list rather than producing a stale set.
-	ScanAllPluginsForOutfitOverrides();
+	LoadAllActivePlugins();
 
 	// Build outfit entries from OTFT records
 	int totalPieces = 0;
@@ -2022,11 +2018,10 @@ LeveledListData::EffectiveRace LeveledListData::GetEffectiveNpcRace(const std::s
 	if (!npcSkinsScanned)
 		ScanAllPluginsForNpcSkins();
 
-	// Step 1: prefer the latest plugin's RNAM override if we managed to remap it
-	// into the main-ESP cache space.
+	// Step 1: prefer the latest plugin's RNAM override (all active plugins
+	// were loaded eagerly during LoadESP so remappedRace is resolvable at
+	// scan time).
 	auto ovIt = npcSkinOverrides.find(npcEditorId);
-	if (ovIt != npcSkinOverrides.end())
-		ResolveLazyNpcSkin(ovIt->second);
 	if (ovIt != npcSkinOverrides.end() && ovIt->second.remappedRace != 0) {
 		// remappedRace is FormId (uint64_t) — globalPluginIdx lives in the
 		// high 16 bits above the local 24-bit id. Anything wider than uint32_t
@@ -2146,10 +2141,8 @@ LeveledListData::BodyNifPaths LeveledListData::ResolveNpcBodyNifPaths(const std:
 	bool haveOverrideEntry = false;
 	auto ovIt = npcSkinOverrides.find(npcEditorId);
 	if (ovIt != npcSkinOverrides.end()) {
-		ResolveLazyNpcSkin(ovIt->second);
 		haveOverrideEntry = true;
-		if (!ovIt->second.selfDefined)
-			npcWnam = ovIt->second.remappedWnam;
+		npcWnam = ovIt->second.remappedWnam;
 	}
 	if (npcWnam == 0 && !haveOverrideEntry) {
 		auto scIt = npcSkinCache.find(npcEditorId);
@@ -2307,10 +2300,8 @@ LeveledListData::BodyPartTextures LeveledListData::ResolveNpcBodyPartTextures(co
 	bool haveOverrideEntry = false;
 	auto ovIt = npcSkinOverrides.find(npcEditorId);
 	if (ovIt != npcSkinOverrides.end()) {
-		ResolveLazyNpcSkin(ovIt->second);
 		haveOverrideEntry = true;
-		if (!ovIt->second.selfDefined)
-			npcWnam = ovIt->second.remappedWnam;
+		npcWnam = ovIt->second.remappedWnam;
 	}
 	if (npcWnam == 0 && !haveOverrideEntry) {
 		auto scIt = npcSkinCache.find(npcEditorId);
@@ -2473,7 +2464,7 @@ static std::string FindSkyrimPluginsTxt(const std::string& baseDataPath) {
 }
 
 // ---------------------------------------------------------------------------
-// ScanAllPluginsForOutfitOverrides — pre-load every ACTIVE plugin from the
+// LoadAllActivePlugins — pre-load every ACTIVE plugin from the
 // user's Skyrim load order into the dynamic master pool so all ARMO/ARMA/TXST/
 // OTFT/LVLI/RACE/NPC_ records are resolvable from cache without any further
 // lazy expansion. The 16-bit plugin pool removes the historical 256-slot cap,
@@ -2490,13 +2481,9 @@ static std::string FindSkyrimPluginsTxt(const std::string& baseDataPath) {
 // override clobber an active winner.
 // ---------------------------------------------------------------------------
 
-void LeveledListData::ScanAllPluginsForOutfitOverrides() {
-	if (outfitOverridesScanned)
-		return;
-	outfitOverridesScanned = true;
-
+void LeveledListData::LoadAllActivePlugins() {
 	if (baseDataPath.empty()) {
-		wxLogMessage("ScanAllPluginsForOutfitOverrides: no baseDataPath set");
+		wxLogMessage("LoadAllActivePlugins: no baseDataPath set");
 		return;
 	}
 
@@ -2527,10 +2514,10 @@ void LeveledListData::ScanAllPluginsForOutfitOverrides() {
 				continue;
 			loadOrderRank[ToLower(name)] = rank++;
 		}
-		wxLogMessage("ScanAllPluginsForOutfitOverrides: parsed Plugins.txt '%s' with %zu active entries", pluginsTxt, loadOrderRank.size());
+		wxLogMessage("LoadAllActivePlugins: parsed Plugins.txt '%s' with %zu active entries", pluginsTxt, loadOrderRank.size());
 	}
 	else {
-		wxLogMessage("ScanAllPluginsForOutfitOverrides: no Plugins.txt found; falling back to alphabetical order");
+		wxLogMessage("LoadAllActivePlugins: no Plugins.txt found; falling back to alphabetical order");
 	}
 
 	wxArrayString pluginFiles;
@@ -2592,7 +2579,7 @@ void LeveledListData::ScanAllPluginsForOutfitOverrides() {
 			++failed;
 	}
 
-	wxLogMessage("ScanAllPluginsForOutfitOverrides: considered %d active plugins (%d skipped inactive); loaded %d, failed %d", considered, skippedInactive, loaded, failed);
+	wxLogMessage("LoadAllActivePlugins: considered %d active plugins (%d skipped inactive); loaded %d, failed %d", considered, skippedInactive, loaded, failed);
 }
 
 // ---------------------------------------------------------------------------
@@ -2713,37 +2700,46 @@ void LeveledListData::ScanAllPluginsForNpcSkins() {
 		auto& srcMasters = reader.GetMasters();
 		uint8_t selfIdx = static_cast<uint8_t>(srcMasters.size());
 
-		// Check if this ESP is itself a master of the generated ESP
-		std::string pluginName = wxFileName(wxString::FromUTF8(pluginPath)).GetFullName().ToStdString();
-		auto selfMasterIt = masterNameToIdx.find(ToLower(pluginName));
-		bool isMaster = (selfMasterIt != masterNameToIdx.end());
-		uint8_t selfMasterIdx = isMaster ? selfMasterIt->second : 0;
-
-		// Build remap: source ESP master idx → generated ESP master idx
-		std::unordered_map<uint8_t, uint8_t> masterRemap;
-		for (size_t i = 0; i < srcMasters.size(); ++i) {
-			auto it = masterNameToIdx.find(ToLower(srcMasters[i]));
+		// Build remap: source ESP master idx → globalPluginIdx. All active
+		// plugins are loaded into either espMasters (main-ESP master chain)
+		// or dynamicMasters (eager LoadAllActivePlugins), so every name
+		// resolves. The lambda returns a full FormId (64-bit) — narrowing to
+		// uint32_t silently drops the top byte for any globalIdx above 0xFF.
+		auto lookupGlobalIdx = [&](const std::string& baseLower) -> uint16_t {
+			auto it = masterNameToIdx.find(baseLower);
 			if (it != masterNameToIdx.end())
-				masterRemap[static_cast<uint8_t>(i)] = it->second;
+				return static_cast<uint16_t>(it->second);
+			for (size_t i = 0; i < dynamicMasters.size(); ++i) {
+				const std::string& dyn = dynamicMasters[i];
+				auto slash = dyn.find_last_of("/\\");
+				std::string dbase = ToLower(slash == std::string::npos ? dyn : dyn.substr(slash + 1));
+				if (dbase == baseLower)
+					return DynamicGlobalIdx(i);
+			}
+			return 0;
+		};
+
+		std::string pluginName = wxFileName(wxString::FromUTF8(pluginPath)).GetFullName().ToStdString();
+		uint16_t selfGlobalIdx = lookupGlobalIdx(ToLower(pluginName));
+
+		std::unordered_map<uint8_t, uint16_t> masterRemap;
+		for (size_t i = 0; i < srcMasters.size(); ++i) {
+			uint16_t g = lookupGlobalIdx(ToLower(srcMasters[i]));
+			if (g != 0 || ToLower(srcMasters[i]) == ToLower(espMasters.empty() ? std::string() : espMasters[0]))
+				masterRemap[static_cast<uint8_t>(i)] = g;
 		}
 
-		// Helper: remap a FormID from this plugin's master-index space into the
-		// main ESP's master-index space (raceCache / armoCache lookup space).
-		// Returns 0 if the FormID can't be remapped (top byte unknown).
-		auto remapToMainSpace = [&](uint32_t fid) -> uint32_t {
+		auto remapToMainSpace = [&](uint32_t fid) -> FormId {
 			if (fid == 0)
 				return 0;
 			uint8_t tb = (fid >> 24) & 0xFF;
 			uint32_t base = fid & 0x00FFFFFF;
-			if (tb == selfIdx) {
-				if (isMaster)
-					return (static_cast<uint32_t>(selfMasterIdx) << 24) | base;
-				return 0;
-			}
+			if (tb == selfIdx)
+				return selfGlobalIdx == 0 ? FormId{0} : EncodeFormId(selfGlobalIdx, base);
 			auto it = masterRemap.find(tb);
 			if (it == masterRemap.end())
 				return 0;
-			return (static_cast<uint32_t>(it->second) << 24) | base;
+			return EncodeFormId(it->second, base);
 		};
 
 		for (auto& npc : npcs) {
@@ -2782,33 +2778,7 @@ void LeveledListData::ScanAllPluginsForNpcSkins() {
 			NpcSkinInfo info;
 			info.sourcePlugin = pluginPath;
 			info.remappedRace = remapToMainSpace(npc.raceFormId);
-
-			if (npc.wnamFormId != 0) {
-				uint8_t topByte = (npc.wnamFormId >> 24) & 0xFF;
-				uint32_t baseId = npc.wnamFormId & 0x00FFFFFF;
-
-				if (topByte == selfIdx) {
-					if (isMaster) {
-						info.remappedWnam = (static_cast<uint32_t>(selfMasterIdx) << 24) | baseId;
-						info.selfDefined = false;
-					}
-					else {
-						info.wnamRaw = npc.wnamFormId;
-						info.selfDefined = true;
-					}
-				}
-				else {
-					auto remapIt = masterRemap.find(topByte);
-					if (remapIt != masterRemap.end()) {
-						info.remappedWnam = (static_cast<uint32_t>(remapIt->second) << 24) | baseId;
-						info.selfDefined = false;
-					}
-					else {
-						info.wnamRaw = npc.wnamFormId;
-						info.selfDefined = true;
-					}
-				}
-			}
+			info.remappedWnam = remapToMainSpace(npc.wnamFormId);
 
 			// Don't let a record from a vanilla ESM (Skyrim.esm, Update.esm, ...)
 			// clobber an override we already recorded from a non-vanilla plugin.
@@ -2830,152 +2800,6 @@ void LeveledListData::ScanAllPluginsForNpcSkins() {
 				 pluginsWithNpcs,
 				 skippedInactive,
 				 npcSkinOverrides.size());
-
-	// For each unresolvable override (RNAM and/or WNAM not in our caches), find
-	// the plugin that ACTUALLY defines the referenced record — which can be the
-	// override's source plugin itself (self-defined) OR one of the source's
-	// masters that isn't one of our generated ESP's masters. Load that plugin
-	// as a synthetic "dynamic master" and rewrite the NpcSkinInfo with FormIDs
-	// that resolve in our caches. This lets both a mod that re-races an NPC
-	// and points its WNAM at an ARMO it self-defines, and a patch ESP that
-	// points an NPC override at an ARMO from a third plugin, drive the
-	// NIF/texture chain.
-	//
-	// First, gather all (sourcePlugin → editorId) pairs that still need
-	// resolution. Group by sourcePlugin so we re-read each source plugin once.
-	std::unordered_map<std::string, std::vector<std::string>> needBySource;
-	for (auto& [editorId, info] : npcSkinOverrides) {
-		bool needRace = (info.remappedRace == 0);
-		bool needWnam = (info.selfDefined && info.wnamRaw != 0);
-		if (!needRace && !needWnam)
-			continue;
-		needBySource[info.sourcePlugin].push_back(editorId);
-	}
-
-	// Index every plugin file in the data directory by lowercased base name —
-	// we'll need this to locate "the plugin named X" when an override points
-	// into one of the source plugin's masters that isn't one of our masters.
-	std::unordered_map<std::string, std::string> dataDirPluginByName;
-	for (auto& wxPath : pluginFiles) {
-		std::string p = wxPath.ToStdString();
-		auto sep = p.find_last_of("/\\");
-		std::string base = (sep == std::string::npos) ? p : p.substr(sep + 1);
-		dataDirPluginByName[ToLower(base)] = p;
-	}
-
-	// Resolve a raw FormID (in the source plugin's master-index space) to the
-	// plugin path that actually defines it. Returns empty string if the master
-	// can't be located in the data directory.
-	auto findDefiningPlugin = [&](const std::string& srcPath, const std::vector<std::string>& srcMasters, uint8_t srcSelfIdx, uint32_t rawFid) -> std::string {
-		uint8_t topByte = (rawFid >> 24) & 0xFF;
-		if (topByte == srcSelfIdx)
-			return srcPath;
-		if (topByte < srcMasters.size()) {
-			auto it = dataDirPluginByName.find(ToLower(srcMasters[topByte]));
-			if (it != dataDirPluginByName.end())
-				return it->second;
-		}
-		return {};
-	};
-
-	for (auto& [pluginPath, editorIds] : needBySource) {
-		if (isVanillaEsm(pluginPath))
-			continue;
-
-		// Re-read the source plugin's NPC_ records to recover each override's
-		// raw RNAM and the plugin's master list.
-		esp::ESPReader reader;
-		if (!reader.Load(pluginPath, {"NPC_"}))
-			continue;
-		auto& srcMasters = reader.GetMasters();
-		uint8_t srcSelfIdx = static_cast<uint8_t>(srcMasters.size());
-
-		// Key by CANONICAL editor id (the master record's id), not the plugin's
-		// raw EDID — an override may rename the EDID and the outer editorIds
-		// list (sourced from npcSkinOverrides) is already canonical.
-		std::unordered_map<std::string, uint32_t> rawRaceByEditorId;
-		std::unordered_map<std::string, uint32_t> rawWnamByEditorId;
-		for (auto& npc : reader.GetNPCs()) {
-			uint8_t tb = (npc.formId >> 24) & 0xFF;
-			std::string canonical;
-			if (tb < srcMasters.size()) {
-				auto it = npcEditorIdByMasterFormId.find({ToLower(srcMasters[tb]), npc.formId & 0x00FFFFFFu});
-				if (it != npcEditorIdByMasterFormId.end())
-					canonical = it->second;
-				else
-					canonical = npc.editorId; // fallback when master record isn't in our cache
-			}
-			else {
-				canonical = npc.editorId; // native record
-			}
-			if (canonical.empty())
-				continue;
-			rawRaceByEditorId[canonical] = npc.raceFormId;
-			rawWnamByEditorId[canonical] = npc.wnamFormId;
-		}
-
-		for (auto& editorId : editorIds) {
-			auto ovIt = npcSkinOverrides.find(editorId);
-			if (ovIt == npcSkinOverrides.end())
-				continue;
-			NpcSkinInfo& info = ovIt->second;
-
-			// Resolve the RNAM if still unmapped.
-			auto rIt = rawRaceByEditorId.find(editorId);
-			uint32_t raceRaw = (rIt != rawRaceByEditorId.end()) ? rIt->second : 0;
-			if (raceRaw != 0 && info.remappedRace == 0) {
-				std::string defPath = findDefiningPlugin(pluginPath, srcMasters, srcSelfIdx, raceRaw);
-				if (!defPath.empty()) {
-					// Defer EnsureDynamicMaster — synthetic master space is
-					// scarce and only the NPCs the user actually views need
-					// resolution. ResolveLazyNpcSkin performs the load on
-					// first consumption.
-					info.rawRace = raceRaw;
-					info.raceDefiningPlugin = defPath;
-				}
-			}
-
-			// Resolve the WNAM if still unmapped. Use whichever raw value is
-			// available — info.wnamRaw is what we recorded earlier, and the
-			// source plugin's record may have a different one if the override
-			// chain is more complex.
-			uint32_t wnamRaw = info.wnamRaw;
-			if (wnamRaw == 0) {
-				auto wIt = rawWnamByEditorId.find(editorId);
-				if (wIt != rawWnamByEditorId.end())
-					wnamRaw = wIt->second;
-			}
-			if (wnamRaw != 0 && info.remappedWnam == 0) {
-				std::string defPath = findDefiningPlugin(pluginPath, srcMasters, srcSelfIdx, wnamRaw);
-				if (!defPath.empty()) {
-					info.rawWnamForResolve = wnamRaw;
-					info.wnamDefiningPlugin = defPath;
-				}
-			}
-
-			wxLogMessage("ScanAllPluginsForNpcSkins: '%s' override deferred — rawRace=%08X rawWnam=%08X (resolution on use)", editorId, info.rawRace, info.rawWnamForResolve);
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// ResolveLazyNpcSkin — on first NPC use, lazy-load defining plugins and
-// remap raw FormIDs. Idempotent: a fully-resolved info is left untouched.
-// ---------------------------------------------------------------------------
-
-void LeveledListData::ResolveLazyNpcSkin(NpcSkinInfo& info) {
-	if (info.remappedRace == 0 && info.rawRace != 0 && !info.raceDefiningPlugin.empty()) {
-		uint16_t synthIdx = EnsureDynamicMaster(info.raceDefiningPlugin, /*masterLoadDepth*/ 0, /*noClobber*/ true);
-		if (synthIdx != 0)
-			info.remappedRace = EncodeFormId(synthIdx, info.rawRace);
-	}
-	if (info.remappedWnam == 0 && info.rawWnamForResolve != 0 && !info.wnamDefiningPlugin.empty()) {
-		uint16_t synthIdx = EnsureDynamicMaster(info.wnamDefiningPlugin, /*masterLoadDepth*/ 0, /*noClobber*/ true);
-		if (synthIdx != 0) {
-			info.remappedWnam = EncodeFormId(synthIdx, info.rawWnamForResolve);
-			info.selfDefined = false;
-		}
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -3028,175 +2852,15 @@ std::array<std::string, 8> LeveledListData::ResolveSkinTexturesForNPC(const std:
 	}
 
 	auto& info = ovIt->second;
-	ResolveLazyNpcSkin(info);
-
-	// If WNAM was remapped to main cache space, use the existing cache-based resolver
-	if (!info.selfDefined) {
-		textures = ResolveSkinTextures(info.remappedWnam, npcRaceFid);
-		if (!textures[0].empty())
-			wxLogMessage("ResolveSkinTexturesForNPC: NPC '%s' resolved from cache (WNAM %08X, race %08X): %s", npcEditorId, info.remappedWnam, npcRaceFid, textures[0]);
-		else
-			tryRaceFallback(textures);
+	textures = ResolveSkinTextures(info.remappedWnam, npcRaceFid);
+	if (!textures[0].empty()) {
+		wxLogMessage("ResolveSkinTexturesForNPC: NPC '%s' resolved (WNAM %016llX, race %016llX): %s",
+					 npcEditorId,
+					 static_cast<unsigned long long>(info.remappedWnam),
+					 static_cast<unsigned long long>(npcRaceFid),
+					 textures[0]);
 		return textures;
 	}
-
-	// Self-defined WNAM from a non-master ESP — load the source ESP on demand
-	wxLogMessage("ResolveSkinTexturesForNPC: loading '%s' for NPC '%s' WNAM raw=%08X",
-				 wxFileName(wxString::FromUTF8(info.sourcePlugin)).GetFullName().ToStdString(),
-				 npcEditorId,
-				 info.wnamRaw);
-
-	esp::ESPReader reader;
-	if (!reader.Load(info.sourcePlugin, {"ARMO", "ARMA", "TXST"})) {
-		wxLogMessage("ResolveSkinTexturesForNPC: failed to load %s", info.sourcePlugin);
-		return textures;
-	}
-
-	auto armors = reader.GetArmors();
-	auto armorAddons = reader.GetArmorAddons();
-	auto texSets = reader.GetTextureSets();
-
-	// Build local lookups indexed by raw FormID
-	std::unordered_map<uint32_t, size_t> localArmos, localArmas, localTxsts;
-	for (size_t i = 0; i < armors.size(); ++i)
-		localArmos[armors[i].formId] = i;
-	for (size_t i = 0; i < armorAddons.size(); ++i)
-		localArmas[armorAddons[i].formId] = i;
-	for (size_t i = 0; i < texSets.size(); ++i)
-		localTxsts[texSets[i].formId] = i;
-
-	// Build remap for cross-references to masters (source ESP master → espMasters index)
-	auto& srcMasters = reader.GetMasters();
-	uint8_t selfIdx = static_cast<uint8_t>(srcMasters.size());
-
-	std::unordered_map<std::string, uint8_t> masterNameToIdx;
-	for (size_t i = 0; i < espMasters.size(); ++i)
-		masterNameToIdx[ToLower(espMasters[i])] = static_cast<uint8_t>(i);
-
-	std::unordered_map<uint8_t, uint8_t> masterRemap;
-	for (size_t i = 0; i < srcMasters.size(); ++i) {
-		auto it = masterNameToIdx.find(ToLower(srcMasters[i]));
-		if (it != masterNameToIdx.end())
-			masterRemap[static_cast<uint8_t>(i)] = it->second;
-	}
-
-	// Remap a raw FormID from source ESP space → main cache space.
-	// Returns 0 for self-defined records (must use local lookup).
-	auto toMainCache = [&](uint32_t fid) -> FormId {
-		uint8_t top = (fid >> 24) & 0xFF;
-		if (top == selfIdx)
-			return 0; // self-defined, use local lookup
-		uint32_t base = fid & 0x00FFFFFF;
-		auto it = masterRemap.find(top);
-		if (it != masterRemap.end())
-			return EncodeFormId(it->second, base);
-		return 0; // can't remap
-	};
-
-	// Step 1: Find WNAM ARMO
-	uint32_t wnamFid = info.wnamRaw;
-	const std::vector<uint32_t>* espArmaIds = nullptr;
-	const std::vector<FormId>* cacheArmaIds = nullptr;
-
-	auto lArmoIt = localArmos.find(wnamFid);
-	if (lArmoIt != localArmos.end()) {
-		espArmaIds = &armors[lArmoIt->second].armatureIds;
-	}
-	if (!espArmaIds || espArmaIds->empty()) {
-		FormId remapped = toMainCache(wnamFid);
-		if (remapped != 0) {
-			auto cIt = armoCache.find(remapped);
-			if (cIt != armoCache.end())
-				cacheArmaIds = &cIt->second.armatureIds;
-		}
-	}
-
-	if ((!espArmaIds || espArmaIds->empty()) && (!cacheArmaIds || cacheArmaIds->empty())) {
-		wxLogMessage("ResolveSkinTexturesForNPC: ARMO not found for WNAM %08X", wnamFid);
-		return textures;
-	}
-
-	// Collect all ARMA IDs to check
-	std::vector<lldata::FormId> allArmaIds;
-	if (espArmaIds && !espArmaIds->empty())
-		allArmaIds.insert(allArmaIds.end(), espArmaIds->begin(), espArmaIds->end());
-	if (cacheArmaIds && !cacheArmaIds->empty())
-		allArmaIds.insert(allArmaIds.end(), cacheArmaIds->begin(), cacheArmaIds->end());
-
-	// Step 2: Find body ARMA (slot 32) with alternate textures
-	for (lldata::FormId armaId : allArmaIds) {
-		// Try local ARMA first
-		auto lArmaIt = localArmas.find(armaId);
-		if (lArmaIt != localArmas.end()) {
-			auto& arma = armorAddons[lArmaIt->second];
-			if (!(arma.bodySlotFlags & (1u << 2)))
-				continue;
-
-			auto& altTex = arma.altTexFemale.empty() ? arma.altTexMale : arma.altTexFemale;
-			if (altTex.empty())
-				continue;
-
-			for (auto& at : altTex) {
-				// Try local TXST
-				auto lTxIt = localTxsts.find(at.texSetFormId);
-				if (lTxIt != localTxsts.end()) {
-					auto& ts = texSets[lTxIt->second];
-					for (int i = 0; i < 8; ++i)
-						if (!ts.textures[i].empty())
-							textures[i] = ts.textures[i];
-					if (!textures[0].empty()) {
-						wxLogMessage("ResolveSkinTexturesForNPC: found textures (local): %s", textures[0]);
-						return textures;
-					}
-				}
-				// Try main cache TXST
-				uint32_t remapped = toMainCache(at.texSetFormId);
-				if (remapped != 0) {
-					auto cIt = txstCache.find(remapped);
-					if (cIt != txstCache.end()) {
-						for (int i = 0; i < 8; ++i)
-							if (!cIt->second.textures[i].empty())
-								textures[i] = cIt->second.textures[i];
-						if (!textures[0].empty()) {
-							wxLogMessage("ResolveSkinTexturesForNPC: found textures (cached TXST): %s", textures[0]);
-							return textures;
-						}
-					}
-				}
-			}
-			continue;
-		}
-
-		// Try main cache ARMA
-		uint32_t remapped = toMainCache(armaId);
-		if (remapped != 0) {
-			auto cArmaIt = armaCache.find(remapped);
-			if (cArmaIt != armaCache.end()) {
-				auto& cachedArma = cArmaIt->second;
-				if (!(cachedArma.bodySlotFlags & (1u << 2)))
-					continue;
-
-				auto& altTex = cachedArma.altTexFemale.empty() ? cachedArma.altTexMale : cachedArma.altTexFemale;
-				if (altTex.empty())
-					continue;
-
-				for (auto& at : altTex) {
-					auto tIt = txstCache.find(at.txstFormId);
-					if (tIt != txstCache.end()) {
-						for (int i = 0; i < 8; ++i)
-							if (!tIt->second.textures[i].empty())
-								textures[i] = tIt->second.textures[i];
-						if (!textures[0].empty()) {
-							wxLogMessage("ResolveSkinTexturesForNPC: found textures (cached ARMA+TXST): %s", textures[0]);
-							return textures;
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Self-defined chain yielded nothing — try race fallback.
 	tryRaceFallback(textures);
 	if (textures[0].empty())
 		wxLogMessage("ResolveSkinTexturesForNPC: no body textures found for '%s'", npcEditorId);

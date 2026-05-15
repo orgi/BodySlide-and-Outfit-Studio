@@ -243,31 +243,26 @@ public:
 	std::string ResolveHeadPartNif(FormId headPartFormId) const;
 
 	/// Info about an NPC's skin override found by scanning all plugins.
+	/// All active plugins are loaded eagerly via LoadAllActivePlugins during
+	/// LoadESP, so both remappedWnam and remappedRace are always resolvable
+	/// at scan time — there is no lazy-resolve fallback.
 	struct NpcSkinInfo {
-		FormId remappedWnam = 0;  // WNAM remapped to global plugin-space (when !selfDefined)
-		uint32_t wnamRaw = 0;	  // WNAM raw 32-bit FormID from source ESP (when selfDefined)
-		FormId remappedRace = 0;  // RNAM remapped to global plugin-space (0 if no override or unmappable)
-		std::string sourcePlugin; // Full path to the ESP that defines this NPC override
-		bool selfDefined = false; // true = WNAM is self-defined in a non-master ESP
-		// Lazy-resolution scratchpad: ScanAllPluginsForNpcSkins records the
-		// raw FormIDs and the plugin that defines them, but does NOT call
-		// EnsureDynamicMaster eagerly. The fields below are consumed by
-		// ResolveLazyNpcSkin on actual NPC use.
-		uint32_t rawRace = 0;			// RNAM in source plugin's master-index space
-		uint32_t rawWnamForResolve = 0; // WNAM in source plugin's master-index space
-		std::string raceDefiningPlugin; // Plugin path defining the RNAM record
-		std::string wnamDefiningPlugin; // Plugin path defining the WNAM record
+		FormId remappedWnam = 0;  // WNAM remapped to global plugin-space (0 if the override reverts to race default)
+		FormId remappedRace = 0;  // RNAM remapped to global plugin-space (0 if no race override)
+		std::string sourcePlugin; // Full path to the ESP that defines this NPC override (load-order winner)
 	};
 
 	/// Scan ALL plugins in the Data directory for NPC_ WNAM overrides.
 	/// Populates npcSkinOverrides. Call after LoadESP() and LoadNPCs().
 	void ScanAllPluginsForNpcSkins();
 
-	/// Scan ALL plugins in the Data directory for OTFT/LVLI overrides that
-	/// target records already present in our caches. Each matching plugin is
-	/// loaded via EnsureDynamicMaster so its full RACE/ARMO/ARMA/TXST/OTFT/LVLI
-	/// records become available. Idempotent; subsequent calls are no-ops.
-	void ScanAllPluginsForOutfitOverrides();
+	/// Load every active plugin in the Data directory (per Plugins.txt) into
+	/// the dynamic-master cache exactly once. Plugins already in the main
+	/// ESP's master chain are skipped. After this runs every RACE / ARMO /
+	/// ARMA / TXST / OTFT / LVLI / NPC_ override the user's load order
+	/// produces is resolvable in our caches — no lazy-load path is needed.
+	/// Called once from LoadESP(); idempotent on repeat calls.
+	void LoadAllActivePlugins();
 
 	/// Resolve skin textures for a specific NPC by editorId.
 	/// Uses the pre-scanned plugin data for on-demand ESP loading when needed.
@@ -313,13 +308,6 @@ private:
 	/// or 0 if loading failed. Cached by pluginPath; subsequent calls return
 	/// the previously-assigned index without reloading.
 	uint16_t EnsureDynamicMaster(const std::string& pluginPath, int masterLoadDepth = 0, bool noClobber = false);
-
-	/// Lazy-resolve an NPC skin override on actual use. ScanAllPluginsForNpcSkins
-	/// records raw FormIDs + defining-plugin paths but does not eagerly
-	/// EnsureDynamicMaster them (the 8-bit synthetic master space is too
-	/// scarce to spend on NPCs the user never views). This helper performs
-	/// the EnsureDynamicMaster + remap on first consumption.
-	void ResolveLazyNpcSkin(NpcSkinInfo& info);
 
 	/// Resolve LVLI entries recursively to collect referenced FormIDs and their levels.
 	/// Collects both resolved ARMOs and unresolved FormIDs.
@@ -409,7 +397,6 @@ private:
 	std::unordered_set<FormId> mainEspHdptIds;
 	bool mainEspLoaded = false;
 	bool npcSkinsScanned = false;
-	bool outfitOverridesScanned = false;
 
 	// Per-NPC default-outfit cache populated lazily by ResolveNpcDefaultOutfit.
 	// Keyed by NPC editorId. Cleared in LoadESP / LoadNPCs because OTFT FormIDs
