@@ -1360,6 +1360,8 @@ void LeveledListPreviewer::ClearHeadMeshes() {
 		shapeNifSource.erase(name);
 		bodyShapePartMap.erase(name);
 		shapeMaterials.erase(name);
+		headGameVerts.erase(name);
+		headShapeNifName_.erase(name);
 	}
 	headShapeNames.clear();
 }
@@ -1574,6 +1576,14 @@ void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
 		AddNifShapeTextures(&nif, shapeName, nullptr, meshName);
 		headShapeNames.push_back(meshName);
 		shapeNifSource[meshName] = relativePath;
+		headShapeNifName_[meshName] = shapeName;
+		if (m->nVerts > 0) {
+			std::vector<Vector3> gameVerts(m->nVerts);
+			for (int i = 0; i < m->nVerts; i++)
+				gameVerts[i] = Mesh::TransformPosMeshToNif(m->verts[i]);
+			headGameVerts[meshName] = std::move(gameVerts);
+		}
+		GetOrLoadTriFile(relativePath);
 
 		// Extract partition body part IDs from NIF dismember skin
 		auto* shape = nif.FindBlockByName<NiShape>(shapeName);
@@ -1674,10 +1684,24 @@ void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
 			AddNifShapeTextures(&hpNif, shapeName, nullptr, meshName);
 			headShapeNames.push_back(meshName);
 			shapeNifSource[meshName] = hpRelPath;
+			headShapeNifName_[meshName] = shapeName;
+			if (m->nVerts > 0) {
+				std::vector<Vector3> gameVerts(m->nVerts);
+				for (int i = 0; i < m->nVerts; i++)
+					gameVerts[i] = Mesh::TransformPosMeshToNif(m->verts[i]);
+				headGameVerts[meshName] = std::move(gameVerts);
+			}
+			GetOrLoadTriFile(hpRelPath);
 		}
 	}
 
 	UpdateHeadVisibility();
+
+	// Apply the active BodySlide preset to head morphs so the head's neck
+	// vertices follow the body's morphed neck (closes the otherwise-visible
+	// neck seam on the standard races).
+	if (!currentPresetName.empty() && currentPresetName != "(none)")
+		ApplyPresetToHead(currentPresetName, true);
 
 	wxLogMessage("LeveledListPreviewer: Loaded head NIF + parts for NPC '%s' (%s): %zu shapes", npc.editorId, formIdBuf, headShapeNames.size());
 	gls.RenderOneFrame();
@@ -2044,6 +2068,84 @@ void LeveledListPreviewer::ApplyPresetToBody(const std::string& presetName, bool
 	wxLog::FlushActive();
 }
 
+void LeveledListPreviewer::ApplyPresetToHead(const std::string& presetName, bool deferredRender) {
+	if (headGameVerts.empty())
+		return;
+
+	if (canvas && context)
+		canvas->SetCurrent(*context);
+
+	// "(none)" or empty → reset every head shape to its game verts.
+	if (presetName.empty() || presetName == "(none)") {
+		for (auto& [meshName, verts] : headGameVerts)
+			gls.Update(meshName, &verts, nullptr);
+		if (!deferredRender)
+			gls.RenderOneFrame();
+		return;
+	}
+
+	std::string projectPath = Config["ProjectPath"];
+	if (projectPath.empty())
+		projectPath = Config["AppDir"];
+
+	PresetCollection presets;
+	std::vector<std::string> noGroups;
+	presets.LoadPresets(projectPath + "/SliderPresets", "", noGroups, true);
+
+	wxLogMessage("ApplyPresetToHead: preset='%s', shapes=%zu", presetName, headGameVerts.size());
+
+	int shapesTouched = 0;
+	for (auto& [meshName, gameVerts] : headGameVerts) {
+		auto srcIt = shapeNifSource.find(meshName);
+		if (srcIt == shapeNifSource.end())
+			continue;
+
+		TriFile* tri = GetOrLoadTriFile(srcIt->second);
+		if (!tri)
+			continue;
+		if (!gls.GetMesh(meshName))
+			continue;
+
+		auto nameIt = headShapeNifName_.find(meshName);
+		if (nameIt == headShapeNifName_.end())
+			continue;
+		const std::string& nifShapeName = nameIt->second;
+
+		auto allMorphs = tri->GetMorphs();
+		auto morphIt = allMorphs.find(nifShapeName);
+		if (morphIt == allMorphs.end())
+			continue;
+
+		std::vector<Vector3> verts = gameVerts;
+		int applied = 0;
+		for (auto& morph : morphIt->second) {
+			if (morph->type != MORPHTYPE_POSITION)
+				continue;
+
+			float val = 0.0f;
+			bool found = useHighWeight ? presets.GetBigPreset(presetName, morph->name, val) : presets.GetSmallPreset(presetName, morph->name, val);
+			if (!found || val == 0.0f)
+				continue;
+
+			for (auto& [idx, delta] : morph->offsets) {
+				if (idx < verts.size())
+					verts[idx] += delta * val;
+			}
+			++applied;
+		}
+
+		wxLogMessage("  head shape '%s' (nif '%s'): %d morphs applied", meshName, nifShapeName, applied);
+		gls.Update(meshName, &verts, nullptr);
+		if (applied > 0)
+			++shapesTouched;
+	}
+	wxLogMessage("ApplyPresetToHead: %d/%zu shapes had matching morphs", shapesTouched, headGameVerts.size());
+
+	if (!deferredRender)
+		gls.RenderOneFrame();
+	wxLog::FlushActive();
+}
+
 void LeveledListPreviewer::ApplyPresetToOutfit(const std::string& presetName, bool deferredRender) {
 	if (outfitGameVerts.empty())
 		return;
@@ -2127,6 +2229,7 @@ void LeveledListPreviewer::OnPresetChanged(wxCommandEvent& WXUNUSED(event)) {
 	currentPresetName = presetCombo->GetValue().ToStdString();
 	ApplyPresetToBody(currentPresetName);
 	ApplyPresetToOutfit(currentPresetName);
+	ApplyPresetToHead(currentPresetName);
 
 	// If SMP is running, feed the newly morphed mesh vertices back to the simulator
 	if (smpSimulator_) {
@@ -2158,6 +2261,7 @@ void LeveledListPreviewer::OnHighWeightChanged(wxCommandEvent& event) {
 	if (presetActive && !bodyGameVerts.empty()) {
 		ApplyPresetToBody(currentPresetName);
 		ApplyPresetToOutfit(currentPresetName);
+		ApplyPresetToHead(currentPresetName);
 		// If SMP is running, sync morphed verts
 		if (smpSimulator_) {
 			for (auto& name : smpSimulator_->GetPhysicsShapeNames()) {

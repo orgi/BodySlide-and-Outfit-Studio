@@ -177,6 +177,15 @@ class LeveledListPreviewer : public wxFrame {
 	// displayName → original NIF shape name (for .tri morph lookup; strips formId prefix)
 	std::unordered_map<std::string, std::string> outfitShapeNifName_;
 
+	// Head preset morphing via .tri files. Keeps body and head necks aligned
+	// when a BodySlide preset is applied: morphs whose name matches a slider
+	// in the active preset are applied to the head shape's neck/upper-body
+	// vertices. Heads typically only ship a small subset of slider morphs
+	// (neck/shoulders); morphs the head .tri doesn't carry are silently
+	// skipped, matching how the in-game BodySlide build pipeline behaves.
+	std::unordered_map<std::string, std::vector<nifly::Vector3>> headGameVerts; // displayName ("_head_<shape>") → game verts
+	std::unordered_map<std::string, std::string> headShapeNifName_;				 // displayName → original NIF shape name
+
 	// SMP physics simulation
 	std::unique_ptr<SmpSimulator> smpSimulator_;
 	wxTimer smpTimer_;
@@ -273,6 +282,7 @@ private:
 	void LoadPresetList();
 	void ApplyPresetToBody(const std::string& presetName, bool deferredRender = false);
 	void ApplyPresetToOutfit(const std::string& presetName, bool deferredRender = false);
+	void ApplyPresetToHead(const std::string& presetName, bool deferredRender = false);
 	TriFile* GetOrLoadTriFile(const std::string& nifRelativePath);
 
 	// Mesh overlay helpers
