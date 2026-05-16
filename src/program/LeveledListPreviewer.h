@@ -16,6 +16,7 @@
 
 #include <array>
 #include <memory>
+#include <map>
 #include <set>
 #include <wx/combobox.h>
 #include <wx/fswatcher.h>
@@ -78,6 +79,8 @@ class LeveledListPreviewer : public wxFrame {
 		int variantIdx = -1;				 // original variant index from ESP
 		std::string label;					 // display name for this variant
 		std::vector<std::string> shapeNames; // shapes whose deepest gate is this variant
+		bool resolved = true;				 // mirrors OutfitVariantInfo::resolved
+		std::string diagnostic;				 // populated when !resolved (FormID + decoded plugin slot)
 	};
 	struct UseAnyGroup {
 		int groupId = -1;
@@ -91,6 +94,13 @@ class LeveledListPreviewer : public wxFrame {
 	// Shape name → full gating path (list of (groupId, variantIdx)). Empty path
 	// means the shape is unconditional.
 	std::unordered_map<std::string, std::vector<std::pair<int, int>>> shapeUseAnyPath_;
+
+	// Per (groupId, variantIdx) record of NIF paths the loader couldn't find
+	// on disk for pieces gated by this variant. Used by the variant tooltip
+	// to explain "the piece resolved but its mesh file is missing" cases —
+	// distinct from "the ARMO didn't resolve in cache". Cleared per outfit
+	// load alongside useAnyGroups_.
+	std::map<std::pair<int, int>, std::set<std::string>> variantNifLoadFailures_;
 
 	// Body part tracking: shape name → set of NIF partition body part IDs
 	// (e.g. 32=SBP_32_BODY, 33=SBP_33_HANDS, 37=SBP_37_FEET)

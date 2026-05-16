@@ -956,12 +956,16 @@ static void AddPiecesFromArmo(lldata::FormId formId,
 
 OutfitEntry LeveledListData::BuildOutfitFromOtft(FormId otftId, int& groupCounter, int* outPieces, int* outUnresolved) const {
 	OutfitEntry entry;
+	entry.formId = otftId;
 	auto otftIt = otftCache.find(otftId);
-	if (otftIt == otftCache.end())
+	if (otftIt == otftCache.end()) {
+		char buf[40];
+		std::snprintf(buf, sizeof(buf), "%016llX", static_cast<unsigned long long>(otftId));
+		entry.loadDiagnostics = std::string("OTFT FormID ") + buf + " is not in the cache. The plugin that defines this OTFT is either inactive in Plugins.txt, failed to load, or doesn't declare it natively (and no override re-defined it).";
 		return entry;
+	}
 
 	const auto& otft = otftIt->second;
-	entry.formId = otftId;
 	entry.editorId = otft.editorId;
 	entry.name = otft.editorId;
 	entry.sourcePlugin = otft.sourcePlugin;
@@ -1057,6 +1061,33 @@ OutfitEntry LeveledListData::BuildOutfitFromOtft(FormId otftId, int& groupCounte
 				deduped.push_back(std::move(p));
 		}
 		entry.pieces = std::move(deduped);
+	}
+
+	// Tally resolvable (has nifPath) vs stub pieces — and stash on the entry
+	// so the previewer's tooltip can explain why an outfit ended up empty.
+	int resolved = 0;
+	int stubs = 0;
+	for (auto& p : entry.pieces) {
+		if (p.nifPath.empty())
+			++stubs;
+		else
+			++resolved;
+	}
+	entry.resolvedPieceCount = resolved;
+	entry.unresolvedPieceCount = stubs;
+
+	if (resolved == 0) {
+		char fbuf[40];
+		std::snprintf(fbuf, sizeof(fbuf), "%016llX", static_cast<unsigned long long>(otftId));
+		if (otft.items.empty()) {
+			entry.loadDiagnostics = std::string("OTFT '") + otft.editorId + "' (" + fbuf + ", plugin '" + otft.sourcePlugin + "') has 0 INAM entries — empty outfit definition.";
+		}
+		else if (stubs > 0) {
+			entry.loadDiagnostics = std::string("OTFT '") + otft.editorId + "' (" + fbuf + ", plugin '" + otft.sourcePlugin + "') lists " + std::to_string(otft.items.size()) + " item(s) but " + std::to_string(stubs) + " of them (all the renderable ones) couldn't be resolved to an ARMO or LVLI in the loaded plugin cache. Likely a dependency plugin is inactive or its master chain is incomplete.";
+		}
+		else {
+			entry.loadDiagnostics = std::string("OTFT '") + otft.editorId + "' (" + fbuf + ", plugin '" + otft.sourcePlugin + "') produced 0 renderable pieces (no ARMOs with a mesh path). The items resolved but every ARMO had an empty model field.";
+		}
 	}
 
 	if (outPieces)
@@ -1732,14 +1763,34 @@ void LeveledListData::ResolveLVLIGrouped(FormId formId,
 					std::snprintf(buf, sizeof(buf), "[%08X]", ref);
 					vi.label = buf;
 				}
-				gi.variants.push_back(std::move(vi));
 
 				std::vector<OutfitPiece> resolved;
 				AddPiecesFromArmo(ref, armoIt->second, armoCache, armaCache, txstCache, resolved);
+				// AddPiecesFromArmo emits a placeholder piece with an empty
+				// nifPath when its ARMA chain resolved no meshes — so a
+				// "no-render" variant has resolved.size() == 1 but
+				// resolved[0].nifPath.empty(). Count actually-renderable pieces.
+				int rendCount = 0;
+				for (auto& p : resolved) {
+					if (!p.nifPath.empty())
+						++rendCount;
+				}
+				if (rendCount == 0) {
+					char rbuf[40];
+					std::snprintf(rbuf, sizeof(rbuf), "%016llX", static_cast<unsigned long long>(ref));
+					uint16_t globalIdx = static_cast<uint16_t>((ref >> 24) & 0xFFFFu);
+					std::string pluginName = LookupGlobalPluginName(globalIdx);
+					std::string d = std::string("ARMO 0x") + rbuf + " ('" + vi.label + "') is in armoCache";
+					if (!pluginName.empty())
+						d += " (defined by '" + pluginName + "')";
+					d += ", has " + std::to_string(armoIt->second.armatureIds.size()) + " ARMA reference(s), but ResolveWornMeshes produced no usable model path. Either the ARMA records aren't in armaCache (their defining plugin isn't loaded), or every ARMA's MOD2/MOD3 (worn-mesh) field is empty.";
+					vi.diagnostic = std::move(d);
+				}
 				for (auto& piece : resolved) {
 					piece.useAnyPath = childPath;
 					pieces.push_back(std::move(piece));
 				}
+				gi.variants.push_back(std::move(vi));
 				++variantIdx;
 				continue;
 			}
@@ -1752,9 +1803,24 @@ void LeveledListData::ResolveLVLIGrouped(FormId formId,
 					return std::string(buf);
 				})();
 				vi.gatesSubLvli = true;
-				gi.variants.push_back(std::move(vi));
 
+				size_t piecesBefore = pieces.size();
 				ResolveLVLIGrouped(ref, effectiveLevel, childPath, groupCounter, pieces, unresolvedRefs, groupNames, groups);
+				// Count renderable pieces added by the recursion (non-empty
+				// nifPath). Placeholder pieces with empty nifPath are not
+				// renderable.
+				int rendAdded = 0;
+				for (size_t pi = piecesBefore; pi < pieces.size(); ++pi) {
+					if (!pieces[pi].nifPath.empty())
+						++rendAdded;
+				}
+				if (rendAdded == 0) {
+					char rbuf[40];
+					std::snprintf(rbuf, sizeof(rbuf), "%016llX", static_cast<unsigned long long>(ref));
+					size_t total = pieces.size() - piecesBefore;
+					vi.diagnostic = std::string("Sub-LVLI 0x") + rbuf + " ('" + vi.label + "') resolved (record is in lvliCache) but produced 0 renderable pieces (" + std::to_string(total) + " placeholder piece(s) only — every entry inside it failed to resolve to a usable ARMO). Open the variant's descendants for per-entry detail.";
+				}
+				gi.variants.push_back(std::move(vi));
 				++variantIdx;
 				continue;
 			}
@@ -1763,8 +1829,32 @@ void LeveledListData::ResolveLVLIGrouped(FormId formId,
 			// renders it (greyed-out in practice — the previewer will show the
 			// stub label and selecting it just yields no pieces).
 			char buf[24];
-			std::snprintf(buf, sizeof(buf), "[%08X]", ref);
+			std::snprintf(buf, sizeof(buf), "[%016llX]", static_cast<unsigned long long>(ref));
 			vi.label = buf;
+			vi.resolved = false;
+			{
+				uint16_t globalIdx = static_cast<uint16_t>((ref >> 24) & 0xFFFFu);
+				std::string pluginName = LookupGlobalPluginName(globalIdx);
+				char dbuf[32];
+				std::snprintf(dbuf, sizeof(dbuf), "0x%016llX", static_cast<unsigned long long>(ref));
+				std::string d = std::string("Variant refFormID ") + dbuf + " is not in armoCache or lvliCache.";
+				if (pluginName.empty()) {
+					if ((globalIdx & 0xFFu) == 0xFFu) {
+						d += " globalPluginIdx looks like a synth-slot fallback — the source LVLI references a master ('";
+						char tb[8];
+						std::snprintf(tb, sizeof(tb), "0x%02X", static_cast<unsigned>((globalIdx >> 8) & 0xFFu));
+						d += tb;
+						d += "' in its own master list) that LeveledListData couldn't match to any active plugin in Plugins.txt.";
+					}
+					else {
+						d += " globalPluginIdx maps to no loaded plugin (out of range).";
+					}
+				}
+				else {
+					d += " globalPluginIdx maps to '" + pluginName + "', which IS loaded — but its cache doesn't contain a record with the local FormID. Possibly the cache key encoding differs from what this LVLI stored.";
+				}
+				vi.diagnostic = std::move(d);
+			}
 			gi.variants.push_back(std::move(vi));
 
 			unresolvedRefs.emplace_back(ref, effectiveLevel);
@@ -2368,6 +2458,27 @@ uint16_t LeveledListData::EnsureDynamicMaster(const std::string& pluginPath, int
 	dynamicMasters.push_back(pluginPath);
 	LoadRecordsFromESP(pluginPath, {"RACE", "ARMO", "ARMA", "TXST", "OTFT", "LVLI", "NPC_"}, globalIdx, espMasters, masterLoadDepth, noClobber);
 	return globalIdx;
+}
+
+std::string LeveledListData::LookupGlobalPluginName(uint16_t globalIdx) const {
+	// Synth-slot fallback: bottom byte 0xFF, top byte is the original
+	// (un-remapped) master index inside the source plugin's master list.
+	// We never assign these via EnsureDynamicMaster, so they don't map to a
+	// real plugin on disk.
+	if ((globalIdx & 0xFFu) == 0xFFu)
+		return {};
+	if (globalIdx < espMasters.size())
+		return espMasters[globalIdx];
+	// Slot espMasters.size() is reserved for the main ESP itself.
+	if (globalIdx == espMasters.size())
+		return espFilename;
+	size_t di = static_cast<size_t>(globalIdx) - espMasters.size() - 1;
+	if (di < dynamicMasters.size()) {
+		const std::string& path = dynamicMasters[di];
+		auto slash = path.find_last_of("/\\");
+		return slash == std::string::npos ? path : path.substr(slash + 1);
+	}
+	return {};
 }
 
 // ---------------------------------------------------------------------------

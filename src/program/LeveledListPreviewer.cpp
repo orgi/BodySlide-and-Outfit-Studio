@@ -586,13 +586,20 @@ void LeveledListPreviewer::RefreshOutfitList() {
 		wxTreeItemId pluginItem = outfitList->AppendItem(root, label, -1, -1, pd);
 		for (size_t i : indices) {
 			auto* entry = filteredOutfits[i];
-			wxString olabel = wxString::Format("%s  (L%d, %zu)", wxString::FromUTF8(entry->name), entry->minLevel, entry->pieces.size());
+			wxString olabel = wxString::Format("%s  (L%d, %d/%zu)",
+											   wxString::FromUTF8(entry->name),
+											   entry->minLevel,
+											   entry->resolvedPieceCount,
+											   entry->pieces.size());
 			auto* d = new LLTreeItemData();
 			d->kind = LLTreeItemData::Kind::Outfit;
 			d->topIndex = static_cast<int>(i);
-			if (entry->pieces.empty()) {
+			if (entry->resolvedPieceCount == 0) {
 				d->unavailable = true;
-				d->tooltip = "This outfit has no resolvable pieces (likely an unresolved ARMO/LVLI reference or empty leveled list).";
+				if (!entry->loadDiagnostics.empty())
+					d->tooltip = entry->loadDiagnostics;
+				else
+					d->tooltip = "This outfit has no resolvable pieces (no renderable ARMOs were found).";
 			}
 			wxTreeItemId item = outfitList->AppendItem(pluginItem, olabel, -1, -1, d);
 			if (d->unavailable)
@@ -1827,6 +1834,7 @@ void LeveledListPreviewer::SelectNpc(const lldata::NPCEntry& npc, bool loadDefau
 			shapeArmoBodySlots.clear();
 			useAnyGroups_.clear();
 			shapeUseAnyPath_.clear();
+			variantNifLoadFailures_.clear();
 			currentOutfit = nullptr;
 			// Distinguish "no DOFT defined" (normal for creatures) from "DOFT exists
 			// but couldn't be resolved" (mod outfit chain not loaded).
@@ -2418,6 +2426,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 		outfitShapeNifName_.clear();
 		useAnyGroups_.clear();
 		shapeUseAnyPath_.clear();
+		variantNifLoadFailures_.clear();
 	}
 
 	gls.RenderOneFrame();
@@ -2576,6 +2585,12 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 		std::string resolvedPath = data.ResolveNifPath(piecePath);
 		if (resolvedPath.empty()) {
 			wxLogWarning("  NIF not found: %s", piecePath);
+			// Record the missing NIF against every gate slot in the piece's
+			// useAnyPath so the variant-tree tooltip can attribute the failure
+			// to the right (groupId, variantIdx). Empty path means an
+			// unconditional piece (no gating), nothing to record.
+			for (auto& slot : piece.useAnyPath)
+				variantNifLoadFailures_[slot].insert(piecePath);
 			continue;
 		}
 
@@ -2809,6 +2824,8 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 				UseAnyVariant variant;
 				variant.variantIdx = vi.variantIdx;
 				variant.label = !vi.label.empty() ? vi.label : ("Variant " + std::to_string(vi.variantIdx));
+				variant.resolved = vi.resolved;
+				variant.diagnostic = vi.diagnostic;
 				group.variants.push_back(std::move(variant));
 			}
 			useAnyGroups_.push_back(std::move(group));
@@ -3294,7 +3311,51 @@ void LeveledListPreviewer::PopulateVariantSubtree(wxTreeCtrl* tree, wxTreeItemId
 			}
 			vdata->unavailable = !hasShape;
 			if (!hasShape) {
-				vdata->tooltip = "This variant has no resolvable outfit pieces — its referenced ARMO/LVLI was not found in the loaded plugins, or all sub-entries are stubs.";
+				// Collect every diagnostic in this subtree (the variant itself
+				// plus all descendants reachable through nested gates). Each
+				// problem-variant — unresolved ref, resolved-but-zero-pieces,
+				// or piece-with-missing-NIF — carries its own diagnostic.
+				std::function<void(int, int, std::set<std::string>&)> collectDiags = [&](int gid, int vid, std::set<std::string>& bag) {
+					// NIF-load failures recorded at piece-load time.
+					auto nifIt = variantNifLoadFailures_.find({gid, vid});
+					if (nifIt != variantNifLoadFailures_.end()) {
+						for (auto& missingPath : nifIt->second)
+							bag.insert("NIF file not found on disk: " + missingPath);
+					}
+					auto cit = childrenByGateSlot.find({gid, vid});
+					if (cit == childrenByGateSlot.end())
+						return;
+					for (const UseAnyGroup* child : cit->second) {
+						for (auto& cv : child->variants) {
+							if (!cv.diagnostic.empty())
+								bag.insert(cv.diagnostic);
+							collectDiags(child->groupId, cv.variantIdx, bag);
+						}
+					}
+				};
+				std::set<std::string> diags;
+				if (!v.diagnostic.empty())
+					diags.insert(v.diagnostic);
+				collectDiags(g->groupId, v.variantIdx, diags);
+
+				if (diags.empty()) {
+					vdata->tooltip = "This variant has no resolvable pieces, but no per-variant diagnostic was captured. Likely cause: a piece was produced and a shape was registered, yet the shape didn't reach this variant's gate path (a tagging bug in shape registration).";
+				}
+				else if (diags.size() == 1) {
+					vdata->tooltip = *diags.begin();
+				}
+				else {
+					std::string aggregated = std::to_string(diags.size()) + " distinct problem(s) under this variant:\n";
+					int n = 0;
+					for (auto& d : diags) {
+						if (++n > 6) {
+							aggregated += "  • (and " + std::to_string(diags.size() - 6) + " more)";
+							break;
+						}
+						aggregated += "  • " + d + "\n";
+					}
+					vdata->tooltip = aggregated;
+				}
 			}
 
 			wxTreeItemId varNode = tree->AppendItem(groupNode, wxString::FromUTF8(v.label), -1, -1, vdata);

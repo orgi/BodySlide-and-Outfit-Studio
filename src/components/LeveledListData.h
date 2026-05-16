@@ -110,6 +110,8 @@ struct OutfitVariantInfo {
 	std::string label;		   // display label (ARMO FULL/editorId, sub-LVLI editorId, or stub)
 	bool gatesSubLvli = false; // true if this variant points to another LVLI (nested gate)
 	FormId refFormId = 0;	   // referenced FormID (ARMO or LVLI), global plugin-space
+	bool resolved = true;	   // true if refFormId hit armoCache or lvliCache
+	std::string diagnostic;	   // when !resolved: human-readable reason (FormID, decoded plugin slot, etc.)
 };
 
 // Full description of a "Use Any" gate group introduced while resolving an
@@ -138,6 +140,17 @@ struct OutfitEntry {
 	// slot (even unresolved ones) with a stable label, so the variant tree UI
 	// can render the complete leveled-list structure verbatim.
 	std::vector<OutfitGroupInfo> useAnyGroups;
+
+	// Count of pieces with a non-empty nifPath — i.e. pieces the renderer can
+	// actually draw. Pieces whose ARMO/LVLI reference couldn't be resolved
+	// become stubs (empty nifPath) and don't count here.
+	int resolvedPieceCount = 0;
+	// Stub (unresolved) reference count.
+	int unresolvedPieceCount = 0;
+	// Free-form diagnostic explaining why the outfit can't render (when
+	// resolvedPieceCount == 0). Surfaced in the outfit-tree tooltip. Empty
+	// when the outfit is fully renderable.
+	std::string loadDiagnostics;
 };
 
 class LeveledListData {
@@ -308,6 +321,11 @@ private:
 	/// or 0 if loading failed. Cached by pluginPath; subsequent calls return
 	/// the previously-assigned index without reloading.
 	uint16_t EnsureDynamicMaster(const std::string& pluginPath, int masterLoadDepth = 0, bool noClobber = false);
+
+	/// Resolve a globalPluginIdx back to a human-readable plugin name.
+	/// Returns an empty string when the index is out of range or refers to
+	/// the synth-slot fallback (encoded master we couldn't locate on disk).
+	std::string LookupGlobalPluginName(uint16_t globalIdx) const;
 
 	/// Resolve LVLI entries recursively to collect referenced FormIDs and their levels.
 	/// Collects both resolved ARMOs and unresolved FormIDs.
