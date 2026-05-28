@@ -1835,6 +1835,8 @@ void LeveledListPreviewer::SelectNpc(const lldata::NPCEntry& npc, bool loadDefau
 			useAnyGroups_.clear();
 			shapeUseAnyPath_.clear();
 			variantNifLoadFailures_.clear();
+			loadedOutfitPieces_.clear();
+			renderPieceIdx_.clear();
 			currentOutfit = nullptr;
 			// Distinguish "no DOFT defined" (normal for creatures) from "DOFT exists
 			// but couldn't be resolved" (mod outfit chain not loaded).
@@ -2427,6 +2429,8 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 		useAnyGroups_.clear();
 		shapeUseAnyPath_.clear();
 		variantNifLoadFailures_.clear();
+		loadedOutfitPieces_.clear();
+		renderPieceIdx_.clear();
 	}
 
 	gls.RenderOneFrame();
@@ -2441,18 +2445,6 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	std::string baseGamePath = Config["GameDataPath"];
 	if (!baseGamePath.empty() && baseGamePath.back() != '/' && baseGamePath.back() != '\\')
 		baseGamePath += '/';
-
-	int loadedCount = 0;
-
-	// Track shapes per piece for variant group building
-	struct PieceShapeInfo {
-		std::vector<std::pair<int, int>> useAnyPath;
-		std::string pieceName;
-		std::string pieceEditorId;
-		uint32_t pieceFormId = 0;
-		std::vector<std::string> shapeNames;
-	};
-	std::vector<PieceShapeInfo> pieceInfos;
 
 	// Determine the selected NPC's race, if any. ARMOs that contain multiple
 	// ARMAs targeting different races (one ARMA per race) need to be filtered
@@ -2494,7 +2486,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	// rendered on a Redguard NPC just because they share the broad humanoid
 	// effective-race set.
 	constexpr uint32_t DEFAULT_RACE_FID = 0x00000019;
-	std::set<size_t> renderPieceIdx;
+	renderPieceIdx_.clear();
 	{
 		auto pieceMatchesAny = [](const lldata::OutfitPiece& p, const std::set<lldata::FormId>& set) -> bool {
 			if (set.count(p.armaRaceFormId))
@@ -2532,7 +2524,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 					return false;
 				for (size_t i : indices) {
 					if (pieceMatchesAny(outfit.pieces[i], tierSet))
-						renderPieceIdx.insert(i);
+						renderPieceIdx_.insert(i);
 					else
 						wxLogMessage("  Hiding ARMA variant of piece '%s' [%08X]: ARMA race %08X not in %s tier",
 									 outfit.pieces[i].name,
@@ -2551,301 +2543,46 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 				continue;
 			// No tier matched (or no race info): keep everything.
 			for (size_t i : indices)
-				renderPieceIdx.insert(i);
+				renderPieceIdx_.insert(i);
 		}
 	}
 
-	for (size_t pieceIdx = 0; pieceIdx < outfit.pieces.size(); ++pieceIdx) {
-		auto& piece = outfit.pieces[pieceIdx];
-		if (!renderPieceIdx.count(pieceIdx))
-			continue;
-		if (piece.nifPath.empty()) {
-			wxLogMessage("  Piece '%s' [%08X]: no model path, skipping", piece.name, piece.formId);
-			continue;
+	// Build the "Use Any" variant group state from the OutfitEntry's pre-built
+	// gate tree BEFORE loading any piece NIFs. Loading only walks pieces on
+	// the active gate path (default activeIndex = 0 everywhere); other variants
+	// are loaded lazily when the user switches to them via the tree UI. This
+	// keeps initial-load cost bounded when an OTFT/LVLI chain has expanded to
+	// thousands of mod-injected pieces (dungeon-filler NPCs whose DOFT
+	// references the heavily-patched generic bandit-gear leveled lists).
+	useAnyGroups_.clear();
+	for (auto& gi : outfit.useAnyGroups) {
+		UseAnyGroup group;
+		group.groupId = gi.groupId;
+		group.activeIndex = 0;
+		group.label = gi.label;
+		group.parentGroupId = gi.parentGroupId;
+		group.parentVariantIdx = gi.parentVariantIdx;
+		for (auto& vi : gi.variants) {
+			UseAnyVariant variant;
+			variant.variantIdx = vi.variantIdx;
+			variant.label = !vi.label.empty() ? vi.label : ("Variant " + std::to_string(vi.variantIdx));
+			variant.resolved = vi.resolved;
+			variant.diagnostic = vi.diagnostic;
+			group.variants.push_back(std::move(variant));
 		}
-
-		wxLogMessage("  Piece '%s' [%08X]: nifPath=%s (path depth=%zu)", piece.name, piece.formId, piece.nifPath, piece.useAnyPath.size());
-
-		// When in low weight mode, try the _0.nif variant of the piece
-		std::string piecePath = piece.nifPath;
-		if (!useHighWeight && piecePath.size() > 6) {
-			std::string ending = piecePath.substr(piecePath.size() - 6);
-			std::string endingLower = ending;
-			std::transform(endingLower.begin(), endingLower.end(), endingLower.begin(), ::tolower);
-			if (endingLower == "_1.nif") {
-				std::string lowPath = piecePath.substr(0, piecePath.size() - 6) + "_0.nif";
-				std::string resolvedLow = data.ResolveNifPath(lowPath);
-				if (!resolvedLow.empty()) {
-					piecePath = lowPath;
-					wxLogMessage("  Using low weight variant: %s", piecePath);
-				}
-			}
-		}
-
-		std::string resolvedPath = data.ResolveNifPath(piecePath);
-		if (resolvedPath.empty()) {
-			wxLogWarning("  NIF not found: %s", piecePath);
-			// Record the missing NIF against every gate slot in the piece's
-			// useAnyPath so the variant-tree tooltip can attribute the failure
-			// to the right (groupId, variantIdx). Empty path means an
-			// unconditional piece (no gating), nothing to record.
-			for (auto& slot : piece.useAnyPath)
-				variantNifLoadFailures_[slot].insert(piecePath);
-			continue;
-		}
-
-		wxLogMessage("  Resolved to: %s", resolvedPath);
-
-		// Load NIF file
-		NifFile nif;
-		std::string fullPath = resolvedPath;
-
-		// If resolvedPath is relative (from archive), try loading from archive
-		if (resolvedPath == piecePath) {
-			// Try loading from BSA/BA2
-			for (FSArchiveFile* archive : FSManager::archiveList()) {
-				if (archive && archive->hasFile(piecePath)) {
-					wxMemoryBuffer outData;
-					archive->fileContents(piecePath, outData);
-					if (!outData.IsEmpty()) {
-						std::string content(static_cast<char*>(outData.GetData()), outData.GetDataLen());
-						std::istringstream stream(content, std::istringstream::binary);
-						if (nif.Load(stream) == 0)
-							goto nifLoaded;
-					}
-				}
-			}
-			continue; // Could not load from archive
-		}
-		else {
-			// Loose file
-			if (nif.Load(fullPath) != 0)
-				continue;
-		}
-
-	nifLoaded:
-		// Extract SMP XML path from NIF extra data
-		{
-			std::string xmlPath = FindSmpXml(nif, piece.nifPath);
-			if (!xmlPath.empty()) {
-				smpXmlPaths_[piecePath] = xmlPath;
-				wxLogMessage("  SMP XML found for '%s': %s", piecePath, xmlPath);
-			}
-		}
-
-		// Add all shapes from NIF.
-		// Prefix each shape name with the piece's FormID and an index to avoid
-		// collisions when one ARMO has multiple pieces/NIFs (ARMAs) or when
-		// multiple pieces share shape names.
-		char piecePrefixBuf[32];
-		std::snprintf(piecePrefixBuf, sizeof(piecePrefixBuf), "%08X_%d_", piece.formId, loadedCount);
-		std::string piecePrefix = piecePrefixBuf;
-
-		// Try to pre-load .tri file for this piece NIF
-		TriFile* pieceTri = GetOrLoadTriFile(piecePath);
-
-		PieceShapeInfo psi;
-		psi.useAnyPath = piece.useAnyPath;
-		psi.pieceName = piece.name;
-		psi.pieceEditorId = piece.editorId;
-		psi.pieceFormId = piece.formId;
-
-		for (auto& shapeName : nif.GetShapeNames()) {
-			std::string displayName = piecePrefix + shapeName;
-			Mesh* m = gls.AddMeshFromNif(&nif, shapeName, displayName, nullptr, false);
-			if (!m)
-				continue;
-
-			outfitShapeNifName_[m->shapeName] = shapeName;
-
-			// Vertex colors
-			const std::vector<Color4>* vcolors = nif.GetColorsForShape(shapeName);
-			if (vcolors) {
-				for (size_t v = 0; v < vcolors->size(); v++) {
-					m->vcolors[v].x = vcolors->at(v).r;
-					m->vcolors[v].y = vcolors->at(v).g;
-					m->vcolors[v].z = vcolors->at(v).b;
-					m->valpha[v] = vcolors->at(v).a;
-				}
-			}
-
-			m->CreateBuffers();
-			const std::vector<lldata::TextureOverride>* overrides = piece.textureOverrides.empty() ? nullptr : &piece.textureOverrides;
-			// Pass original shapeName for texture override matching (overrides use NIF shape names)
-			bool hasTexture = AddNifShapeTextures(&nif, shapeName, overrides, m->shapeName);
-			if (!hasTexture) {
-				// Track for the "Show untextured" toggle but do NOT hide the
-				// shape: missing textures should be visible as the default
-				// untextured material (mirrors BodySlide's preview behaviour).
-				untexturedShapes.push_back(m->shapeName);
-			}
-
-			// Hide non-rendered helper shapes (SMP / collision / cloth-driver
-			// rigging meshes). The game uses two independent gates and we
-			// mirror both:
-			//   1. Shader property absent — authors strip the shader so the
-			//      shape never reaches the render pipeline.
-			//   2. `BSDismemberSkinInstance` present AND all biped-range
-			//      partitions (30..61) are outside the ARMA's BOD2/BODT
-			//      flag set. The engine only consults dismember partitions
-			//      when the shape carries one; shapes using plain
-			//      `NiSkinInstance` (no partitions) bypass this gate and
-			//      always render. This is why COCO Mysterious Mage shows
-			//      every shape (all use plain `NiSkinInstance`) while
-			//      Paragon Fey Lower's collision is hidden (uses
-			//      `BSDismemberSkinInstance` with partition 32, which is
-			//      not in the ARMA flags).
-			// A shape is hidden when EITHER gate trips.
-			bool hideShape = false;
-			std::string hideReason;
-			if (auto* nifShape = nif.FindBlockByName<NiShape>(shapeName)) {
-				NiShader* shader = nif.GetShader(nifShape);
-				if (!shader) {
-					hideShape = true;
-					hideReason = "no shader property";
-				}
-				else if (!piece.armaBodySlots.empty() && nifShape->HasSkinInstance()) {
-					auto* skinRef = nifShape->SkinInstanceRef();
-					BSDismemberSkinInstance* dismember = skinRef ? nif.GetHeader().GetBlock<BSDismemberSkinInstance>(*skinRef) : nullptr;
-					if (dismember) {
-						NiVector<BSDismemberSkinInstance::PartitionInfo> partInfo;
-						std::vector<int> triParts;
-						if (nif.GetShapePartitions(nifShape, partInfo, triParts)) {
-							std::set<int> armaSet(piece.armaBodySlots.begin(), piece.armaBodySlots.end());
-							bool hasBipedPart = false;
-							bool anyMatch = false;
-							for (auto& pi : partInfo) {
-								uint16_t p = pi.partID;
-								if (p >= 30 && p <= 61) {
-									hasBipedPart = true;
-									if (armaSet.count(static_cast<int>(p))) {
-										anyMatch = true;
-										break;
-									}
-								}
-							}
-							if (hasBipedPart && !anyMatch) {
-								hideShape = true;
-								hideReason = "biped partitions not in ARMA slots";
-							}
-						}
-					}
-				}
-			}
-			if (hideShape) {
-				wxLogMessage("  Hiding outfit shape '%s' (%s)", m->shapeName, hideReason);
-				gls.SetMeshVisibility(m->shapeName, false);
-			}
-			if (std::find(outfitShapeNames.begin(), outfitShapeNames.end(), m->shapeName) == outfitShapeNames.end())
-				outfitShapeNames.push_back(m->shapeName);
-			shapeNifSource[m->shapeName] = piecePath;
-			shapeArmoName[m->shapeName] = piece.name;
-			shapeArmoBodySlots[m->shapeName] = piece.bodySlots;
-			psi.shapeNames.push_back(m->shapeName);
-			++loadedCount;
-
-			// In Skyrim, NIF dismember partitions drive dismemberment effects
-			// (decapitation, severed limbs) — they do NOT gate rendering. The
-			// engine renders every shape in the equipped ARMA's NIF regardless
-			// of whether its partition is in the ARMO's biped slot mask.
-			//
-			// The one exception we still want to mirror is "ARMO bundles a
-			// duplicate body / hands / feet shape" (common in cloaks, hoods,
-			// helmets that ship a rigged-reference body). Those would double
-			// up with the body/hands/feet NIFs we load separately for the NPC
-			// or default character. So we hide an outfit shape ONLY when:
-			//   * its partition is one of the canonical body-slot IDs
-			//     (32 = Body, 33 = Hands, 37 = Feet), AND
-			//   * the piece's ARMO doesn't itself declare that body slot
-			//     (i.e. it's not legitimately a body-replacing armor).
-			// Other partition IDs (calf 38, head 30/31, helmet 42, custom
-			// 130+ etc.) are dismember markers, not body bundles, so we leave
-			// those shapes visible.
-			if (auto* nifShape = nif.FindBlockByName<NiShape>(shapeName)) {
-				NiVector<BSDismemberSkinInstance::PartitionInfo> partInfo;
-				std::vector<int> triParts;
-				if (nif.GetShapePartitions(nifShape, partInfo, triParts)) {
-					std::set<uint16_t> partIds;
-					std::string partList;
-					for (size_t i = 0; i < partInfo.size(); ++i) {
-						partIds.insert(partInfo[i].partID);
-						if (!partList.empty())
-							partList += ",";
-						partList += std::to_string(partInfo[i].partID);
-					}
-					if (!partIds.empty()) {
-						bodyShapePartMap[m->shapeName] = partIds;
-						wxLogMessage("  Outfit shape '%s' partitions: [%s]", m->shapeName, partList);
-					}
-				}
-
-				// Record the shape's Skin Tint flag (BSLightingShaderProperty).
-				// Outfit shapes marked skin-tinted receive the NPC's slot-resolved
-				// NAM1 skin TXST + QNAM tint in ReconcileBodyAndOutfitShapes; all
-				// other outfit shapes keep their NIF-embedded textures.
-				NiShader* outfitShader = nif.GetShader(nifShape);
-				bool outfitSkinTinted = outfitShader && outfitShader->IsSkinTinted();
-				shapeIsSkinTinted[m->shapeName] = outfitSkinTinted;
-				if (outfitSkinTinted)
-					wxLogMessage("  Outfit shape '%s' is skin-tinted", m->shapeName);
-			}
-
-			// Cache game verts for reset and .tri morphing
-			if (pieceTri && m->nVerts > 0) {
-				std::vector<Vector3> gameVerts(m->nVerts);
-				for (int i = 0; i < m->nVerts; i++)
-					gameVerts[i] = Mesh::TransformPosMeshToNif(m->verts[i]);
-				outfitGameVerts[m->shapeName] = std::move(gameVerts);
-				wxLogMessage("  Outfit morph: '%s' has .tri (nif shape '%s', %d verts)", m->shapeName, shapeName, m->nVerts);
-			}
-		}
-
-		if (!psi.shapeNames.empty())
-			pieceInfos.push_back(std::move(psi));
+		useAnyGroups_.push_back(std::move(group));
 	}
 
+	// Walk all eligible pieces and load the ones whose gates are currently
+	// active. EnsurePiecesLoadedForActivePath records each loaded piece in
+	// loadedOutfitPieces_ so the lazy-load path on variant switch skips it.
+	EnsurePiecesLoadedForActivePath();
 
-	// Build "Use Any" variant groups from the OutfitEntry's pre-built gate
-	// tree. ResolveLVLIGrouped records every variant slot of every "Use Any"
-	// LVLI, including ones that resolve to stubs / unresolved refs / empty
-	// records — so the tree UI displays the complete leveled-list structure
-	// verbatim (no missing variant indices). Earlier inference-from-pieces
-	// logic silently dropped variants whose entries produced no pieces.
-	{
-		useAnyGroups_.clear();
-		for (auto& gi : outfit.useAnyGroups) {
-			UseAnyGroup group;
-			group.groupId = gi.groupId;
-			group.activeIndex = 0;
-			group.label = gi.label;
-			group.parentGroupId = gi.parentGroupId;
-			group.parentVariantIdx = gi.parentVariantIdx;
-			for (auto& vi : gi.variants) {
-				UseAnyVariant variant;
-				variant.variantIdx = vi.variantIdx;
-				variant.label = !vi.label.empty() ? vi.label : ("Variant " + std::to_string(vi.variantIdx));
-				variant.resolved = vi.resolved;
-				variant.diagnostic = vi.diagnostic;
-				group.variants.push_back(std::move(variant));
-			}
-			useAnyGroups_.push_back(std::move(group));
-		}
+	// Apply initial visibility for every gated shape.
+	ApplyUseAnyVisibility();
 
-		// Register every gated shape's full path so visibility can be evaluated
-		// by AND-ing across the chain.
-		for (auto& psi : pieceInfos) {
-			if (psi.useAnyPath.empty())
-				continue;
-			for (auto& sn : psi.shapeNames)
-				shapeUseAnyPath_[sn] = psi.useAnyPath;
-		}
-
-		// Apply initial visibility for every gated shape.
-		ApplyUseAnyVisibility();
-
-		for (auto& g : useAnyGroups_) {
-			wxLogMessage("  Use Any group %d ('%s', parent=%d/%d): %zu variants", g.groupId, g.label, g.parentGroupId, g.parentVariantIdx, g.variants.size());
-		}
+	for (auto& g : useAnyGroups_) {
+		wxLogMessage("  Use Any group %d ('%s', parent=%d/%d): %zu variants", g.groupId, g.label, g.parentGroupId, g.parentVariantIdx, g.variants.size());
 	}
 
 	if (smpToggle_) {
@@ -2928,7 +2665,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	}
 
 	wxLog::FlushActive();
-	SetStatusText(wxString::Format(_("Outfit: %s — %d meshes loaded"), outfit.name, loadedCount));
+	SetStatusText(wxString::Format(_("Outfit: %s — %zu meshes loaded"), outfit.name, outfitShapeNames.size()));
 
 	// After all outfit pieces are loaded, hide race body shapes that duplicate
 	// outfit-bundled body shapes, and apply NPC/race skin TXST to the bundled
@@ -3155,6 +2892,11 @@ void LeveledListPreviewer::SwitchUseAnyVariant(size_t groupIdx, int newVariantId
 	group.activeIndex = newVariantIdx;
 	wxLogMessage("  Switched Use Any group %d to variant %d ('%s')", group.groupId, newVariantIdx, group.variants[newVariantIdx].label);
 
+	// The newly active variant's pieces may not have been loaded yet (initial
+	// outfit load only walks the all-zero gate path). Pull them in now so
+	// visibility flipping has shapes to act on.
+	EnsurePiecesLoadedForActivePath();
+
 	// Re-evaluate visibility for every gated shape — switching this group may
 	// have also (de)activated dependent child groups deeper in the tree.
 	ApplyUseAnyVisibility();
@@ -3236,6 +2978,9 @@ void LeveledListPreviewer::ActivateVariantChain(int groupId, int variantIdx, boo
 		}
 	}
 
+	// Lazy-load any piece whose gates just opened.
+	EnsurePiecesLoadedForActivePath();
+
 	ApplyUseAnyVisibility();
 	UpdateActiveSlotsAndVisibility();
 	gls.RenderOneFrame();
@@ -3252,13 +2997,25 @@ void LeveledListPreviewer::PopulateVariantSubtree(wxTreeCtrl* tree, wxTreeItemId
 	if (useAnyGroups_.empty())
 		return;
 
-	// Precompute "does any visible-eligible shape exist on this gate slot?"
-	// to drive the greyed-out status. A variant slot counts as available when
-	// at least one shape's gating path passes through (groupId, variantIdx).
+	// Precompute "does any renderable piece exist on this gate slot?" to drive
+	// the greyed-out status. A variant slot counts as available when at least
+	// one race-tier-eligible piece with a NIF path walks through (groupId,
+	// variantIdx). We deliberately read from `currentOutfit->pieces` (every
+	// variant's pieces, loaded or not) rather than `shapeUseAnyPath_` (only
+	// loaded shapes) because pieces on inactive variants are lazy-loaded and
+	// wouldn't yet have registered any shape.
 	std::set<std::pair<int, int>> slotsWithShapes;
-	for (auto& [shape, path] : shapeUseAnyPath_)
-		for (auto& step : path)
-			slotsWithShapes.insert(step);
+	if (currentOutfit) {
+		for (size_t i = 0; i < currentOutfit->pieces.size(); ++i) {
+			auto& p = currentOutfit->pieces[i];
+			if (p.nifPath.empty())
+				continue;
+			if (!renderPieceIdx_.empty() && !renderPieceIdx_.count(i))
+				continue;
+			for (auto& step : p.useAnyPath)
+				slotsWithShapes.insert(step);
+		}
+	}
 
 	// Build adjacency: children of each (groupId, variantIdx) slot.
 	std::map<std::pair<int, int>, std::vector<const UseAnyGroup*>> childrenByGateSlot;
@@ -3408,6 +3165,300 @@ bool LeveledListPreviewer::IsUseAnyPathActive(const std::vector<std::pair<int, i
 			return false;
 	}
 	return true;
+}
+
+bool LeveledListPreviewer::IsUseAnyPathActiveOrDefault(const std::vector<std::pair<int, int>>& path) const {
+	if (path.empty())
+		return true;
+	if (useAnyGroups_.empty()) {
+		// First-time load: useAnyGroups_ is populated only after the initial
+		// piece sweep finishes, so during that sweep every gate's activeIndex
+		// is conceptually 0. A piece is "active" iff its path is all-zero.
+		for (auto& [gid, vid] : path) {
+			(void)gid;
+			if (vid != 0)
+				return false;
+		}
+		return true;
+	}
+	return IsUseAnyPathActive(path);
+}
+
+void LeveledListPreviewer::EnsurePiecesLoadedForActivePath() {
+	if (!currentOutfit)
+		return;
+
+	int loadedCount = static_cast<int>(outfitShapeNames.size());
+	bool anyNew = false;
+	for (size_t i = 0; i < currentOutfit->pieces.size(); ++i) {
+		if (loadedOutfitPieces_.count(i))
+			continue;
+		if (!renderPieceIdx_.count(i))
+			continue;
+		if (!IsUseAnyPathActiveOrDefault(currentOutfit->pieces[i].useAnyPath))
+			continue;
+		LoadOutfitPieceShapes(*currentOutfit, i, /*baseGamePath*/ std::string{}, loadedCount);
+		anyNew = true;
+	}
+
+	if (anyNew) {
+		// Newly loaded shapes need the same downstream treatment a fresh outfit
+		// load gets: re-skin body-chain bundled shapes from the NPC, re-apply
+		// the active BodySlide preset morphs, and refresh the overlay panel.
+		// SMP toggle / simulator sync is handled by the caller path that
+		// invoked the variant switch (which already pumps these where needed).
+		ReconcileBodyAndOutfitShapes();
+		if (!outfitGameVerts.empty() && !currentPresetName.empty() && currentPresetName != "(none)")
+			ApplyPresetToOutfit(currentPresetName, true);
+	}
+}
+
+void LeveledListPreviewer::LoadOutfitPieceShapes(const lldata::OutfitEntry& outfit, size_t pieceIdx, const std::string& /*baseGamePath*/, int& loadedCount) {
+	// Mark the piece as loaded up-front so a partial load (e.g. unresolved NIF)
+	// still prevents endless re-attempts on subsequent variant switches.
+	loadedOutfitPieces_.insert(pieceIdx);
+
+	auto& piece = outfit.pieces[pieceIdx];
+	if (piece.nifPath.empty()) {
+		wxLogMessage("  Piece '%s' [%08X]: no model path, skipping", piece.name, piece.formId);
+		return;
+	}
+
+	wxLogMessage("  Piece '%s' [%08X]: nifPath=%s (path depth=%zu)", piece.name, piece.formId, piece.nifPath, piece.useAnyPath.size());
+
+	// When in low weight mode, try the _0.nif variant of the piece
+	std::string piecePath = piece.nifPath;
+	if (!useHighWeight && piecePath.size() > 6) {
+		std::string ending = piecePath.substr(piecePath.size() - 6);
+		std::string endingLower = ending;
+		std::transform(endingLower.begin(), endingLower.end(), endingLower.begin(), ::tolower);
+		if (endingLower == "_1.nif") {
+			std::string lowPath = piecePath.substr(0, piecePath.size() - 6) + "_0.nif";
+			std::string resolvedLow = data.ResolveNifPath(lowPath);
+			if (!resolvedLow.empty()) {
+				piecePath = lowPath;
+				wxLogMessage("  Using low weight variant: %s", piecePath);
+			}
+		}
+	}
+
+	std::string resolvedPath = data.ResolveNifPath(piecePath);
+	if (resolvedPath.empty()) {
+		wxLogWarning("  NIF not found: %s", piecePath);
+		// Record the missing NIF against every gate slot in the piece's
+		// useAnyPath so the variant-tree tooltip can attribute the failure
+		// to the right (groupId, variantIdx). Empty path means an
+		// unconditional piece (no gating), nothing to record.
+		for (auto& slot : piece.useAnyPath)
+			variantNifLoadFailures_[slot].insert(piecePath);
+		return;
+	}
+
+	wxLogMessage("  Resolved to: %s", resolvedPath);
+
+	// Load NIF file
+	NifFile nif;
+	std::string fullPath = resolvedPath;
+	bool nifOk = false;
+
+	// If resolvedPath is relative (from archive), try loading from archive
+	if (resolvedPath == piecePath) {
+		// Try loading from BSA/BA2
+		for (FSArchiveFile* archive : FSManager::archiveList()) {
+			if (archive && archive->hasFile(piecePath)) {
+				wxMemoryBuffer outData;
+				archive->fileContents(piecePath, outData);
+				if (!outData.IsEmpty()) {
+					std::string content(static_cast<char*>(outData.GetData()), outData.GetDataLen());
+					std::istringstream stream(content, std::istringstream::binary);
+					if (nif.Load(stream) == 0) {
+						nifOk = true;
+						break;
+					}
+				}
+			}
+		}
+		if (!nifOk)
+			return; // Could not load from archive
+	}
+	else {
+		// Loose file
+		if (nif.Load(fullPath) != 0)
+			return;
+	}
+
+	// Extract SMP XML path from NIF extra data
+	{
+		std::string xmlPath = FindSmpXml(nif, piece.nifPath);
+		if (!xmlPath.empty()) {
+			smpXmlPaths_[piecePath] = xmlPath;
+			wxLogMessage("  SMP XML found for '%s': %s", piecePath, xmlPath);
+		}
+	}
+
+	// Add all shapes from NIF.
+	// Prefix each shape name with the piece's FormID and an index to avoid
+	// collisions when one ARMO has multiple pieces/NIFs (ARMAs) or when
+	// multiple pieces share shape names.
+	char piecePrefixBuf[32];
+	std::snprintf(piecePrefixBuf, sizeof(piecePrefixBuf), "%08X_%d_", piece.formId, loadedCount);
+	std::string piecePrefix = piecePrefixBuf;
+
+	// Try to pre-load .tri file for this piece NIF
+	TriFile* pieceTri = GetOrLoadTriFile(piecePath);
+
+	for (auto& shapeName : nif.GetShapeNames()) {
+		std::string displayName = piecePrefix + shapeName;
+		Mesh* m = gls.AddMeshFromNif(&nif, shapeName, displayName, nullptr, false);
+		if (!m)
+			continue;
+
+		outfitShapeNifName_[m->shapeName] = shapeName;
+
+		// Vertex colors
+		const std::vector<Color4>* vcolors = nif.GetColorsForShape(shapeName);
+		if (vcolors) {
+			for (size_t v = 0; v < vcolors->size(); v++) {
+				m->vcolors[v].x = vcolors->at(v).r;
+				m->vcolors[v].y = vcolors->at(v).g;
+				m->vcolors[v].z = vcolors->at(v).b;
+				m->valpha[v] = vcolors->at(v).a;
+			}
+		}
+
+		m->CreateBuffers();
+		const std::vector<lldata::TextureOverride>* overrides = piece.textureOverrides.empty() ? nullptr : &piece.textureOverrides;
+		// Pass original shapeName for texture override matching (overrides use NIF shape names)
+		bool hasTexture = AddNifShapeTextures(&nif, shapeName, overrides, m->shapeName);
+		if (!hasTexture) {
+			// Track for the "Show untextured" toggle but do NOT hide the
+			// shape: missing textures should be visible as the default
+			// untextured material (mirrors BodySlide's preview behaviour).
+			untexturedShapes.push_back(m->shapeName);
+		}
+
+		// Hide non-rendered helper shapes (SMP / collision / cloth-driver
+		// rigging meshes). The game uses two independent gates and we
+		// mirror both:
+		//   1. Shader property absent — authors strip the shader so the
+		//      shape never reaches the render pipeline.
+		//   2. `BSDismemberSkinInstance` present AND all biped-range
+		//      partitions (30..61) are outside the ARMA's BOD2/BODT
+		//      flag set. The engine only consults dismember partitions
+		//      when the shape carries one; shapes using plain
+		//      `NiSkinInstance` (no partitions) bypass this gate and
+		//      always render. This is why COCO Mysterious Mage shows
+		//      every shape (all use plain `NiSkinInstance`) while
+		//      Paragon Fey Lower's collision is hidden (uses
+		//      `BSDismemberSkinInstance` with partition 32, which is
+		//      not in the ARMA flags).
+		// A shape is hidden when EITHER gate trips.
+		bool hideShape = false;
+		std::string hideReason;
+		if (auto* nifShape = nif.FindBlockByName<NiShape>(shapeName)) {
+			NiShader* shader = nif.GetShader(nifShape);
+			if (!shader) {
+				hideShape = true;
+				hideReason = "no shader property";
+			}
+			else if (!piece.armaBodySlots.empty() && nifShape->HasSkinInstance()) {
+				auto* skinRef = nifShape->SkinInstanceRef();
+				BSDismemberSkinInstance* dismember = skinRef ? nif.GetHeader().GetBlock<BSDismemberSkinInstance>(*skinRef) : nullptr;
+				if (dismember) {
+					NiVector<BSDismemberSkinInstance::PartitionInfo> partInfo;
+					std::vector<int> triParts;
+					if (nif.GetShapePartitions(nifShape, partInfo, triParts)) {
+						std::set<int> armaSet(piece.armaBodySlots.begin(), piece.armaBodySlots.end());
+						bool hasBipedPart = false;
+						bool anyMatch = false;
+						for (auto& pi : partInfo) {
+							uint16_t p = pi.partID;
+							if (p >= 30 && p <= 61) {
+								hasBipedPart = true;
+								if (armaSet.count(static_cast<int>(p))) {
+									anyMatch = true;
+									break;
+								}
+							}
+						}
+						if (hasBipedPart && !anyMatch) {
+							hideShape = true;
+							hideReason = "biped partitions not in ARMA slots";
+						}
+					}
+				}
+			}
+		}
+		if (hideShape) {
+			wxLogMessage("  Hiding outfit shape '%s' (%s)", m->shapeName, hideReason);
+			gls.SetMeshVisibility(m->shapeName, false);
+		}
+		if (std::find(outfitShapeNames.begin(), outfitShapeNames.end(), m->shapeName) == outfitShapeNames.end())
+			outfitShapeNames.push_back(m->shapeName);
+		shapeNifSource[m->shapeName] = piecePath;
+		shapeArmoName[m->shapeName] = piece.name;
+		shapeArmoBodySlots[m->shapeName] = piece.bodySlots;
+		// Register this shape's full gate path so visibility evaluation can
+		// AND across the chain. Empty path → unconditional, no entry needed.
+		if (!piece.useAnyPath.empty())
+			shapeUseAnyPath_[m->shapeName] = piece.useAnyPath;
+		++loadedCount;
+
+		// In Skyrim, NIF dismember partitions drive dismemberment effects
+		// (decapitation, severed limbs) — they do NOT gate rendering. The
+		// engine renders every shape in the equipped ARMA's NIF regardless
+		// of whether its partition is in the ARMO's biped slot mask.
+		//
+		// The one exception we still want to mirror is "ARMO bundles a
+		// duplicate body / hands / feet shape" (common in cloaks, hoods,
+		// helmets that ship a rigged-reference body). Those would double
+		// up with the body/hands/feet NIFs we load separately for the NPC
+		// or default character. So we hide an outfit shape ONLY when:
+		//   * its partition is one of the canonical body-slot IDs
+		//     (32 = Body, 33 = Hands, 37 = Feet), AND
+		//   * the piece's ARMO doesn't itself declare that body slot
+		//     (i.e. it's not legitimately a body-replacing armor).
+		// Other partition IDs (calf 38, head 30/31, helmet 42, custom
+		// 130+ etc.) are dismember markers, not body bundles, so we leave
+		// those shapes visible.
+		if (auto* nifShape = nif.FindBlockByName<NiShape>(shapeName)) {
+			NiVector<BSDismemberSkinInstance::PartitionInfo> partInfo;
+			std::vector<int> triParts;
+			if (nif.GetShapePartitions(nifShape, partInfo, triParts)) {
+				std::set<uint16_t> partIds;
+				std::string partList;
+				for (size_t i = 0; i < partInfo.size(); ++i) {
+					partIds.insert(partInfo[i].partID);
+					if (!partList.empty())
+						partList += ",";
+					partList += std::to_string(partInfo[i].partID);
+				}
+				if (!partIds.empty()) {
+					bodyShapePartMap[m->shapeName] = partIds;
+					wxLogMessage("  Outfit shape '%s' partitions: [%s]", m->shapeName, partList);
+				}
+			}
+
+			// Record the shape's Skin Tint flag (BSLightingShaderProperty).
+			// Outfit shapes marked skin-tinted receive the NPC's slot-resolved
+			// NAM1 skin TXST + QNAM tint in ReconcileBodyAndOutfitShapes; all
+			// other outfit shapes keep their NIF-embedded textures.
+			NiShader* outfitShader = nif.GetShader(nifShape);
+			bool outfitSkinTinted = outfitShader && outfitShader->IsSkinTinted();
+			shapeIsSkinTinted[m->shapeName] = outfitSkinTinted;
+			if (outfitSkinTinted)
+				wxLogMessage("  Outfit shape '%s' is skin-tinted", m->shapeName);
+		}
+
+		// Cache game verts for reset and .tri morphing
+		if (pieceTri && m->nVerts > 0) {
+			std::vector<Vector3> gameVerts(m->nVerts);
+			for (int i = 0; i < m->nVerts; i++)
+				gameVerts[i] = Mesh::TransformPosMeshToNif(m->verts[i]);
+			outfitGameVerts[m->shapeName] = std::move(gameVerts);
+			wxLogMessage("  Outfit morph: '%s' has .tri (nif shape '%s', %d verts)", m->shapeName, shapeName, m->nVerts);
+		}
+	}
 }
 
 void LeveledListPreviewer::ApplyUseAnyVisibility() {

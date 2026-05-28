@@ -208,6 +208,18 @@ class LeveledListPreviewer : public wxFrame {
 	// Used post-load to delete default body shapes whose slots are fully claimed by the outfit.
 	std::set<int> outfitDeclaredSlots;
 
+	// Indices (into currentOutfit->pieces) of pieces whose NIFs are already
+	// loaded into the GL surface. Outfits with deep "Use Any" trees can expand
+	// to thousands of pieces (one per variant of every gate); loading every
+	// piece up-front stalls the UI. We load only pieces on the active gate path
+	// at outfit-select time and lazy-load others when their variant becomes
+	// active. Cleared whenever the outfit changes.
+	std::set<size_t> loadedOutfitPieces_;
+	// Race-tier-filtered piece indices for the current outfit (subset of
+	// currentOutfit->pieces matching the NPC's race). Computed once in
+	// LoadOutfitMeshes and reused by the lazy-loader on variant switch.
+	std::set<size_t> renderPieceIdx_;
+
 	wxDECLARE_EVENT_TABLE();
 
 public:
@@ -324,6 +336,21 @@ private:
 	// inactive count as inactive (so a piece is hidden if any ancestor gate is
 	// closed, regardless of the local gate's selection).
 	bool IsUseAnyPathActive(const std::vector<std::pair<int, int>>& path) const;
+	// Like IsUseAnyPathActive, but during initial load (useAnyGroups_ empty)
+	// treats every gate's activeIndex as 0 to match the default-variant
+	// rendering. Used by LoadOutfitMeshes / EnsurePiecesLoadedForActivePath so
+	// the first display only loads pieces on the all-zero gate path.
+	bool IsUseAnyPathActiveOrDefault(const std::vector<std::pair<int, int>>& path) const;
+	// Walk currentOutfit->pieces and load NIFs for any piece that (a) passes
+	// the race-tier filter, (b) is on the active gate path, and (c) hasn't been
+	// loaded yet. Called from LoadOutfitMeshes (initial set) and from
+	// SwitchUseAnyVariant / ActivateVariantChain (lazy-load on variant switch).
+	void EnsurePiecesLoadedForActivePath();
+	// Load the NIF for a single outfit piece into the GL surface, register all
+	// the per-shape state (textures, partitions, .tri, gate path), and record
+	// the piece as loaded. Returns the number of shapes added (used for unique
+	// shape-name prefixes across pieces).
+	void LoadOutfitPieceShapes(const lldata::OutfitEntry& outfit, size_t pieceIdx, const std::string& baseGamePath, int& loadedCount);
 
 	// SMP physics helpers
 	void SetupSmpSimulation();
