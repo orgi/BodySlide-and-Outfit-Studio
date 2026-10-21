@@ -869,6 +869,13 @@ bool LeveledListPreviewer::LoadNifFromPath(const std::string& relativePath, cons
 		return false;
 
 	for (auto& shapeName : nif.GetShapeNames()) {
+		// Head geometry comes from the NPC's FaceGen NIF only. A shape named
+		// after an HDPT record is head-part geometry and is not loaded from here.
+		if (data.IsHeadPartEditorId(shapeName)) {
+			wxLogMessage("  Ignoring head part shape '%s' in '%s' (head is provided by FaceGen NIF)", shapeName, relativePath);
+			continue;
+		}
+
 		// Use prefix to avoid name collisions with outfit shapes
 		std::string displayName = prefix.empty() ? shapeName : (prefix + shapeName);
 		Mesh* m = gls.AddMeshFromNif(&nif, shapeName, displayName, nullptr, false);
@@ -1620,97 +1627,13 @@ void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
 
 	UpdateHeadVisibility();
 
-	// Load additional head parts (eyes, hair, etc.) if they have separate NIFs.
-	for (lldata::FormId hpFid : npc.headParts) {
-		std::string hpRelPath = data.ResolveHeadPartNif(hpFid);
-		if (hpRelPath.empty())
-			continue;
-
-		// Skip paths that are already loaded as part of the main FaceGen NIF
-		// (rare but possible if the cache is messy).
-		bool alreadyLoaded = false;
-		auto toLower = [](std::string s) {
-			for (auto& c : s)
-				c = std::tolower(static_cast<unsigned char>(c));
-			return s;
-		};
-		for (auto const& [meshName, source] : shapeNifSource) {
-			if (toLower(source) == toLower(hpRelPath)) {
-				alreadyLoaded = true;
-				break;
-			}
-		}
-		if (alreadyLoaded)
-			continue;
-
-		NifFile hpNif;
-		std::string hpFullPath = baseGamePath + hpRelPath;
-		bool hpLoaded = false;
-		if (wxFileName::FileExists(hpFullPath))
-			hpLoaded = (hpNif.Load(hpFullPath) == 0);
-		if (!hpLoaded) {
-			std::string resolved = lldata::LeveledListData::ResolveCaseInsensitive(baseGamePath, hpRelPath);
-			if (!resolved.empty())
-				hpLoaded = (hpNif.Load(resolved) == 0);
-		}
-		if (!hpLoaded) {
-			for (FSArchiveFile* archive : FSManager::archiveList()) {
-				if (!archive || !archive->hasFile(hpRelPath))
-					continue;
-				wxMemoryBuffer outData;
-				archive->fileContents(hpRelPath, outData);
-				if (outData.IsEmpty())
-					continue;
-				std::string content(static_cast<char*>(outData.GetData()), outData.GetDataLen());
-				std::istringstream stream(content, std::istringstream::binary);
-				hpLoaded = (hpNif.Load(stream) == 0);
-				break;
-			}
-		}
-
-		if (!hpLoaded) {
-			wxLogWarning("LeveledListPreviewer: HeadPart NIF not found: %s", hpRelPath);
-			continue;
-		}
-
-		for (auto& shapeName : hpNif.GetShapeNames()) {
-			std::string meshName = "_head_" + shapeName;
-			// Avoid name collisions if multiple NIFs have the same shape name
-			int suffix = 1;
-			while (std::find(headShapeNames.begin(), headShapeNames.end(), meshName) != headShapeNames.end()) {
-				meshName = "_head_" + shapeName + "_" + std::to_string(suffix++);
-			}
-
-			Mesh* m = gls.AddMeshFromNif(&hpNif, shapeName, meshName, nullptr, false);
-			if (!m)
-				continue;
-
-			applyHeadCorrection(m, hpNif, shapeName);
-
-			m->CreateBuffers();
-			AddNifShapeTextures(&hpNif, shapeName, nullptr, meshName);
-			headShapeNames.push_back(meshName);
-			shapeNifSource[meshName] = hpRelPath;
-			headShapeNifName_[meshName] = shapeName;
-			if (m->nVerts > 0) {
-				std::vector<Vector3> gameVerts(m->nVerts);
-				for (int i = 0; i < m->nVerts; i++)
-					gameVerts[i] = Mesh::TransformPosMeshToNif(m->verts[i]);
-				headGameVerts[meshName] = std::move(gameVerts);
-			}
-			GetOrLoadTriFile(hpRelPath);
-		}
-	}
-
-	UpdateHeadVisibility();
-
 	// Apply the active BodySlide preset to head morphs so the head's neck
 	// vertices follow the body's morphed neck (closes the otherwise-visible
 	// neck seam on the standard races).
 	if (!currentPresetName.empty() && currentPresetName != "(none)")
 		ApplyPresetToHead(currentPresetName, true);
 
-	wxLogMessage("LeveledListPreviewer: Loaded head NIF + parts for NPC '%s' (%s): %zu shapes", npc.editorId, formIdBuf, headShapeNames.size());
+	wxLogMessage("LeveledListPreviewer: Loaded head NIF for NPC '%s' (%s): %zu shapes", npc.editorId, formIdBuf, headShapeNames.size());
 	gls.RenderOneFrame();
 }
 

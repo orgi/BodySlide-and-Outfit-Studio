@@ -2213,6 +2213,17 @@ std::string LeveledListData::ResolveHeadPartNif(FormId headPartFormId) const {
 	return it->second.model;
 }
 
+bool LeveledListData::IsHeadPartEditorId(const std::string& editorId) const {
+	for (auto& [fid, hp] : headPartCache) {
+		(void)fid;
+		if (hp.editorId.size() == editorId.size() && std::equal(hp.editorId.begin(), hp.editorId.end(), editorId.begin(), [](char a, char b) {
+				return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+			}))
+			return true;
+	}
+	return false;
+}
+
 LeveledListData::BodyNifPaths LeveledListData::ResolveNpcBodyNifPaths(const std::string& npcEditorId, bool highWeight) {
 	BodyNifPaths result;
 	if (npcEditorId.empty())
@@ -2456,7 +2467,7 @@ uint16_t LeveledListData::EnsureDynamicMaster(const std::string& pluginPath, int
 	}
 	wxLogMessage("EnsureDynamicMaster: loading '%s' at globalPluginIdx=%u%s", pluginPath, static_cast<unsigned>(globalIdx), noClobber ? " (no-clobber)" : "");
 	dynamicMasters.push_back(pluginPath);
-	LoadRecordsFromESP(pluginPath, {"RACE", "ARMO", "ARMA", "TXST", "OTFT", "LVLI", "NPC_"}, globalIdx, espMasters, masterLoadDepth, noClobber);
+	LoadRecordsFromESP(pluginPath, {"RACE", "ARMO", "ARMA", "TXST", "OTFT", "LVLI", "NPC_", "HDPT"}, globalIdx, espMasters, masterLoadDepth, noClobber);
 	return globalIdx;
 }
 

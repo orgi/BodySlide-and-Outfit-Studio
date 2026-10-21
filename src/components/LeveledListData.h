@@ -255,6 +255,9 @@ public:
 	/// Resolve a head part's relative NIF path from its FormID.
 	std::string ResolveHeadPartNif(FormId headPartFormId) const;
 
+	/// True if any loaded HDPT record has this editor id (case-insensitive).
+	bool IsHeadPartEditorId(const std::string& editorId) const;
+
 	/// Info about an NPC's skin override found by scanning all plugins.
 	/// All active plugins are loaded eagerly via LoadAllActivePlugins during
 	/// LoadESP, so both remappedWnam and remappedRace are always resolvable
