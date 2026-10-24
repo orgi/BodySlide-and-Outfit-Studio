@@ -7,14 +7,15 @@
 
 #pragma once
 
+#include "../components/ActorAnimation.h"
 #include "../components/LeveledListData.h"
 #include "../components/SliderPresets.h"
-#include "../components/SmpSimulator.h"
 #include "../files/TriFile.h"
 #include "../render/GLSurface.h"
 #include "../utils/ConfigurationManager.h"
 
 #include <array>
+#include <chrono>
 #include <memory>
 #include <map>
 #include <set>
@@ -196,13 +197,22 @@ class LeveledListPreviewer : public wxFrame {
 	std::unordered_map<std::string, std::vector<nifly::Vector3>> headGameVerts; // displayName ("_head_<shape>") → game verts
 	std::unordered_map<std::string, std::string> headShapeNifName_;				 // displayName → original NIF shape name
 
-	// SMP physics simulation
-	std::unique_ptr<SmpSimulator> smpSimulator_;
-	wxTimer smpTimer_;
+	// The displayed actor in motion: idle animation and FSMP physics, each
+	// switched by its checkbox. The timer runs while either is on.
+	ActorAnimation actorAnim_;
+	wxTimer actorTimer_;
 	wxCheckBox* smpToggle_ = nullptr;
+	wxCheckBox* animToggle_ = nullptr;
 	bool smpRunning_ = false;
-	// SMP XML paths discovered for the current outfit (displayName → xmlPath)
-	std::unordered_map<std::string, std::string> smpXmlPaths_;
+	bool animRunning_ = false;
+	// Actor the skeleton and clip were loaded for (currentHeadEditorId at load
+	// time) and a flag forcing a reload after the plugin data changed.
+	std::string animActorEditorId_;
+	bool animActorDirty_ = true;
+	std::chrono::steady_clock::time_point animLastTick_;
+	// Race skin shape → whether a shown outfit shape covers its slot
+	// (ApplyRaceBodyPartVisibility). The actor doesn't wear covered skin.
+	std::unordered_map<std::string, bool> raceBodyShapeCovered_;
 
 	// Body slots declared by the current outfit's ARMO records (e.g. 32=body, 33=hands, 37=feet).
 	// Used post-load to delete default body shapes whose slots are fully claimed by the outfit.
@@ -270,7 +280,8 @@ public:
 	void OnToggleUntextured(wxCommandEvent& event);
 	void OnToggleBody(wxCommandEvent& event);
 	void OnToggleSmp(wxCommandEvent& event);
-	void OnSmpTimer(wxTimerEvent& event);
+	void OnToggleAnim(wxCommandEvent& event);
+	void OnActorTimer(wxTimerEvent& event);
 
 	friend class LLPreviewCanvas;
 
@@ -352,11 +363,14 @@ private:
 	// shape-name prefixes across pieces).
 	void LoadOutfitPieceShapes(const lldata::OutfitEntry& outfit, size_t pieceIdx, const std::string& baseGamePath, int& loadedCount);
 
-	// SMP physics helpers
-	void SetupSmpSimulation();
-	void StopSmpSimulation();
-	std::string FindSmpXml(nifly::NifFile& nif, const std::string& nifRelativePath);
 	std::string FindSkeletonNifPath();
+
+	// Actor motion helpers
+	// Starts or stops the actor timer after a checkbox changed.
+	void UpdateActorMotion();
+	// Loads skeleton + idle clip for the current actor. Returns false while the
+	// plugin data isn't loaded yet (`pending`) or when the actor can't be set up.
+	bool LoadAnimationActor(bool& pending);
 
 	enum {
 		ID_LoadESP = wxID_HIGHEST + 500,
@@ -367,7 +381,8 @@ private:
 		ID_Preset,
 		ID_HighWeight,
 		ID_ToggleSmp,
-		ID_SmpTimer,
+		ID_ToggleAnim,
+		ID_ActorTimer,
 		ID_NpcList,
 		ID_NpcSearch,
 		ID_LoadAllNpcs,

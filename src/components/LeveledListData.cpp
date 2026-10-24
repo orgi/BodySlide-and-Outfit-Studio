@@ -12,6 +12,7 @@
 #include <climits>
 #include <cstdio>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <set>
 #include <tuple>
@@ -849,6 +850,10 @@ void LeveledListData::LoadRecordsFromESP(
 		CachedRACE cr;
 		cr.editorId = r.editorId;
 		cr.skinFormId = r.skinFormId != 0 ? remapFid(r.skinFormId) : 0;
+		for (int sex = 0; sex < 2; sex++) {
+			cr.skeletonModel[sex] = r.skeletonModel[sex];
+			cr.behaviorGraph[sex] = r.behaviorGraph[sex];
+		}
 		raceCache[remappedId] = std::move(cr);
 		if (!r.editorId.empty())
 			raceByEditorId[r.editorId] = remappedId;
@@ -1920,6 +1925,58 @@ std::string LeveledListData::ResolveNifPath(const std::string& relativePath) con
 	}
 
 	return {};
+}
+
+bool LeveledListData::ReadGameFile(const std::string& relativePath, std::vector<char>& outData) const {
+	outData.clear();
+	if (relativePath.empty())
+		return false;
+
+	std::string loosePath = baseDataPath + relativePath;
+	if (!wxFileName::FileExists(loosePath))
+		loosePath = ResolveCaseInsensitive(baseDataPath, relativePath);
+	if (!loosePath.empty()) {
+		std::ifstream file(loosePath, std::ios::binary);
+		if (file) {
+			outData.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+			return true;
+		}
+		wxLogError("ReadGameFile: Failed to open '%s'", loosePath);
+		return false;
+	}
+
+	for (FSArchiveFile* archive : FSManager::archiveList()) {
+		if (!archive || !archive->hasFile(relativePath))
+			continue;
+		wxMemoryBuffer buf;
+		if (!archive->fileContents(relativePath, buf)) {
+			wxLogError("ReadGameFile: Failed to extract '%s' from archive", relativePath);
+			return false;
+		}
+		const char* bytes = static_cast<const char*>(buf.GetData());
+		outData.assign(bytes, bytes + buf.GetDataLen());
+		return true;
+	}
+	return false;
+}
+
+LeveledListData::RaceAnimationFiles LeveledListData::GetRaceAnimationFiles(FormId raceFormId, bool female) const {
+	RaceAnimationFiles files;
+	auto it = raceCache.find(raceFormId);
+	if (it == raceCache.end())
+		return files;
+
+	auto toDataPath = [](const std::string& meshesRelative) -> std::string {
+		if (meshesRelative.empty())
+			return {};
+		std::string p = "meshes/" + meshesRelative;
+		std::replace(p.begin(), p.end(), '\\', '/');
+		return p;
+	};
+	const int sex = female ? 1 : 0;
+	files.skeletonNif = toDataPath(it->second.skeletonModel[sex]);
+	files.behaviorProject = toDataPath(it->second.behaviorGraph[sex]);
+	return files;
 }
 
 // ---------------------------------------------------------------------------

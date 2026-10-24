@@ -670,6 +670,28 @@ static RaceRecord ParseRace(const Record& rec) {
 			r.skinFormId = ReadLE<uint32_t>(wnam->data.data());
 	}
 
+	// RACE subrecords are positional: empty MNAM / FNAM markers select the sex
+	// of the following entries, NAMx markers start a new section. Skeleton
+	// models (ANAM) precede the first section marker, behavior graphs (MODL)
+	// follow NAM3.
+	enum class Section { Skeleton, Behavior, Other };
+	Section section = Section::Skeleton;
+	int sex = -1;
+	for (auto& sr : rec.subrecords) {
+		if (sr.type.size() == 4 && sr.type.compare(0, 3, "NAM") == 0) {
+			section = sr.type == "NAM3" ? Section::Behavior : Section::Other;
+			sex = -1;
+		}
+		else if (sr.type == "MNAM")
+			sex = 0;
+		else if (sr.type == "FNAM")
+			sex = 1;
+		else if (sex >= 0 && section == Section::Skeleton && sr.type == "ANAM")
+			r.skeletonModel[sex] = ReadString(sr.data);
+		else if (sex >= 0 && section == Section::Behavior && sr.type == "MODL")
+			r.behaviorGraph[sex] = ReadString(sr.data);
+	}
+
 	return r;
 }
 

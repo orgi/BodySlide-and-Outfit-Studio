@@ -156,6 +156,9 @@ struct RaceRecord {
 	uint32_t formId = 0;
 	std::string editorId;
 	uint32_t skinFormId = 0; // WNAM: default skin ARMO for this race
+	// Index 0 = male, 1 = female. Paths are relative to meshes/.
+	std::string skeletonModel[2]; // ANAM after the MNAM / FNAM markers before NAM1
+	std::string behaviorGraph[2]; // MODL after the MNAM / FNAM markers following NAM3
 };
 
 // ---------------------------------------------------------------------------

@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 find_package(wxWidgets REQUIRED gl core base net xrc adv qa html propgrid)
 find_package(OpenGL REQUIRED)
 find_package(GLEW REQUIRED)
-find_package(Bullet REQUIRED)
+include(src/fsmp/fsmp.cmake)
 set(fbxsdk_dir ../fbxsdk)
 find_library(fbxsdk fbxsdk PATHS ${fbxsdk_dir}/lib/release)
 
@@ -95,9 +95,10 @@ set(OSsources
 set(BSsources
 	${commonsources}
 	src/files/wxDDSImage.cpp
+	src/components/ActorAnimation.cpp
 	src/components/BuildSelection.cpp
 	src/components/LeveledListData.cpp
-	src/components/SmpSimulator.cpp
+	src/files/HkxFile.cpp
 	src/program/BodySlideApp.cpp
 	src/program/NormalsGenDialog.cpp
 	src/program/PreviewWindow.cpp
@@ -108,8 +109,9 @@ set(BSsources
 set(LLsources
 	${commonsources}
 	src/files/wxDDSImage.cpp
+	src/files/HkxFile.cpp
+	src/components/ActorAnimation.cpp
 	src/components/LeveledListData.cpp
-	src/components/SmpSimulator.cpp
 	src/program/LeveledListApp.cpp
 	src/program/LeveledListPreviewer.cpp
 	)
@@ -127,11 +129,9 @@ target_include_directories(OutfitStudio SYSTEM PRIVATE
 	)
 target_include_directories(BodySlide SYSTEM PRIVATE
 	/usr/include/wine/windows
-	${BULLET_INCLUDE_DIRS}
 	)
 target_include_directories(LeveledListViewer SYSTEM PRIVATE
 	/usr/include/wine/windows
-	${BULLET_INCLUDE_DIRS}
 	)
 target_include_directories(OutfitStudio PUBLIC
 	lib/gli
@@ -164,7 +164,7 @@ target_link_libraries(BodySlide
 	${wxWidgets_LIBRARIES}
 	${OPENGL_LIBRARIES}
 	${GLEW_LIBRARIES}
-	${BULLET_LIBRARIES}
+	fsmp
 	xml2
 	z)
 
@@ -172,6 +172,6 @@ target_link_libraries(LeveledListViewer
 	${wxWidgets_LIBRARIES}
 	${OPENGL_LIBRARIES}
 	${GLEW_LIBRARIES}
-	${BULLET_LIBRARIES}
+	fsmp
 	xml2
 	z)

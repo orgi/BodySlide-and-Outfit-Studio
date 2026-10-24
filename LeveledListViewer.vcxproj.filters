@@ -74,13 +74,16 @@
     <ClInclude Include="lib\TinyXML-2\tinyxml2.h">
       <Filter>Libraries\TinyXML-2</Filter>
     </ClInclude>
+    <ClInclude Include="src\components\ActorAnimation.h">
+      <Filter>Components</Filter>
+    </ClInclude>
     <ClInclude Include="src\components\LeveledListData.h">
       <Filter>Components</Filter>
     </ClInclude>
-    <ClInclude Include="src\components\SmpSimulator.h">
-      <Filter>Components</Filter>
-    </ClInclude>
     <ClInclude Include="src\files\ESPReader.h">
+      <Filter>Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\files\HkxFile.h">
       <Filter>Files</Filter>
     </ClInclude>
     <ClInclude Include="src\files\MaterialFile.h">
@@ -199,13 +202,16 @@
     <ClCompile Include="lib\TinyXML-2\tinyxml2.cpp">
       <Filter>Libraries\TinyXML-2</Filter>
     </ClCompile>
+    <ClCompile Include="src\components\ActorAnimation.cpp">
+      <Filter>Components</Filter>
+    </ClCompile>
     <ClCompile Include="src\components\LeveledListData.cpp">
       <Filter>Components</Filter>
     </ClCompile>
-    <ClCompile Include="src\components\SmpSimulator.cpp">
-      <Filter>Components</Filter>
-    </ClCompile>
     <ClCompile Include="src\files\ESPReader.cpp">
+      <Filter>Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\files\HkxFile.cpp">
       <Filter>Files</Filter>
     </ClCompile>
     <ClCompile Include="src\files\MaterialFile.cpp">

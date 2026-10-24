@@ -232,9 +232,10 @@
     <ClInclude Include="lib\FSEngine\FSEngine.h" />
     <ClInclude Include="lib\FSEngine\FSManager.h" />
     <ClInclude Include="lib\TinyXML-2\tinyxml2.h" />
+    <ClInclude Include="src\components\ActorAnimation.h" />
     <ClInclude Include="src\components\LeveledListData.h" />
-    <ClInclude Include="src\components\SmpSimulator.h" />
     <ClInclude Include="src\files\ESPReader.h" />
+    <ClInclude Include="src\files\HkxFile.h" />
     <ClInclude Include="src\files\MaterialFile.h" />
     <ClInclude Include="src\files\ResourceLoader.h" />
     <ClInclude Include="src\files\TriFile.h" />
@@ -279,9 +280,10 @@
     <ClCompile Include="lib\SOIL2\SOIL2.c" />
     <ClCompile Include="lib\SOIL2\wfETC.c" />
     <ClCompile Include="lib\TinyXML-2\tinyxml2.cpp" />
+    <ClCompile Include="src\components\ActorAnimation.cpp" />
     <ClCompile Include="src\components\LeveledListData.cpp" />
-    <ClCompile Include="src\components\SmpSimulator.cpp" />
     <ClCompile Include="src\files\ESPReader.cpp" />
+    <ClCompile Include="src\files\HkxFile.cpp" />
     <ClCompile Include="src\files\MaterialFile.cpp" />
     <ClCompile Include="src\files\ResourceLoader.cpp" />
     <ClCompile Include="src\files\TriFile.cpp" />

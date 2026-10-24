@@ -188,6 +188,10 @@ public:
 	/// Walks path components from baseDir and finds case-insensitive matches on disk.
 	static std::string ResolveCaseInsensitive(const std::string& baseDir, const std::string& relativePath);
 
+	/// Read a game data file by data-relative path: loose file first (case-insensitive),
+	/// then BSA/BA2 archives. Returns false if the file exists in neither.
+	bool ReadGameFile(const std::string& relativePath, std::vector<char>& outData) const;
+
 	/// Get the loaded ESP filename.
 	const std::string& GetFilename() const { return espFilename; }
 
@@ -243,6 +247,15 @@ public:
 		FormId skinArmoFormId = 0; // race's WNAM (remapped); 0 if unknown
 	};
 	EffectiveRace GetEffectiveNpcRace(const std::string& npcEditorId);
+
+	/// Skeleton NIF (RACE ANAM) and behavior project (RACE MODL after NAM3) of a
+	/// race for one sex, as data-relative paths ("meshes/..."). Empty if the race
+	/// is unknown or doesn't define them.
+	struct RaceAnimationFiles {
+		std::string skeletonNif;
+		std::string behaviorProject;
+	};
+	RaceAnimationFiles GetRaceAnimationFiles(FormId raceFormId, bool female) const;
 
 	/// "Effective armor races" for outfit-piece filtering: the races the
 	/// engine treats this NPC as compatible with for ARMA matching. Includes
@@ -479,7 +492,9 @@ struct CachedOTFT {
 
 struct CachedRACE {
 	std::string editorId;
-	FormId skinFormId = 0; // WNAM — default skin ARMO for this race (global plugin-space)
+	FormId skinFormId = 0;		  // WNAM — default skin ARMO for this race (global plugin-space)
+	std::string skeletonModel[2]; // ANAM per sex (0 = male, 1 = female), relative to meshes/
+	std::string behaviorGraph[2]; // behavior project per sex, relative to meshes/
 };
 
 struct CachedHeadPart {

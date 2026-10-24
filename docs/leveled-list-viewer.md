@@ -28,6 +28,39 @@ The currently selected NPC (`currentHeadEditorId`) is preserved across tab switc
 * `OTFT` `INAM` entries pointing at `LVLI` are expanded via `ResolveLVLIGrouped` and treated as **Use Any** groups. The previewer's default `UseAnyGroup::activeIndex = 0` naturally selects the **first valid variant**, matching the requirement.
 * NPCs whose DOFT points at an OTFT or LVLI defined in a plugin **not** in the loaded ESP's master chain currently resolve to nullptr; the previewer logs the unresolved case and leaves the NPC standing in race body + head only.
 
+## Idle animation and SMP physics
+
+The **Idle Animation** checkbox (config key `AnimEnabled`) plays the actor's default standing idle, the clip the race menu shows. The **SMP Physics Preview** checkbox (config key `SmpEnabled`) runs FSMP on the actor. Both can be on at the same time; while either is on, the actor timer poses, simulates and skins the meshes every frame. Implemented in `src/components/ActorAnimation.*` on top of the Havok reader in `src/files/HkxFile.*` and FSMP in `src/fsmp/` (see `src/components/agents.md`).
+
+### The actor
+
+* The actor is an FSMP scene (`fsmp::Actor`): the race skeleton NIF (RACE `ANAM` for the NPC's sex) is the actor's 3D. Every model the previewer loads is registered with `ActorAnimation::RegisterModel()` right after its shapes were added to the GL surface, and the actor wears it the way the engine equips it:
+  * Race skin NIFs (body, hands, feet) and outfit pieces are attached as armor: FSMP's armor attach event (FSMP merges the model's nodes into the skeleton, renaming them with its `hdtSSEPhysics_AutoRename_Armor_…` prefix), the model's skin bound to the skeleton's nodes by bone name, attach event again (FSMP builds the physics system).
+  * The NPC's FaceGen NIF is attached through FSMP's head skinning events (`SkinAllHeadGeometryEvent` / `SkinSingleHeadGeometryEvent`); FSMP binds the head's bones and reads its physics the way it does for a FaceGen head in game.
+  * Order: armors in load order, then the head.
+* Which models are worn follows what the game equips: an outfit piece while its Use Any variants are active (`IsUseAnyPathActive`), a race skin model unless shown outfit shapes cover all of its slots (`ApplyRaceBodyPartVisibility`), the FaceGen head always. Shapes hidden for display only (helper / collision shapes, unchecked shapes) stay on the worn model, as in game, so FSMP uses them.
+* Each model is attached as a clone, like the engine clones cached models. The clone carries the meshes' current rest pose, preset morphs included: when the preset or the weight changes (`RestPoseChanged()`), when the worn set changes or when a checkbox is toggled, the actor is set up again from scratch.
+* The actor's records as FSMP reads them: NPC form id and name, race skeleton paths, and the Havok rig with its reference pose (FSMP builds physics systems in it). Without a selected NPC, the vanilla female actor files are used and there is no head.
+
+### Idle animation
+
+* **Clip resolution follows the game's chain**, no hard-coded clip paths: RACE `MODL` after the `NAM3` marker (behavior project for the NPC's sex, e.g. `Actors\Character\DefaultFemale.hkx`) → `hkbProjectStringData.characterFilenames[0]` → `hkbCharacterStringData`: `rigName` (e.g. `skeleton_female.hkx`) and the entry of `animationNames` whose file name is `MT_Idle.hkx`. All paths in these files are relative to the behavior project's folder. Files are read loose first, then from archives (`LeveledListData::ReadGameFile`).
+* Without a selected NPC the outfit is shown on the vanilla female body, so the vanilla female actor files (`skeleton_female.nif`, `defaultfemale.hkx`) are used. This is the only default; with an NPC selected, a race without `ANAM` is an error (log + status bar, no motion), a race without `MODL` or a broken clip chain is an error that only disables the idle.
+* Only the base `MT_Idle` loop is played. The behavior graph's random idle variations (sigh, shoulder roll, …) are not evaluated.
+* Supported data: 64-bit `hk_2010.2.0-r1` packfiles (Skyrim SE) with `hkaSplineCompressedAnimation`. Other Havok versions, 32-bit (LE) files, additive clips and the `THREECOMP24` / `STRAIGHT16` rotation encodings are rejected with an error.
+* **Pose**: each frame the clip is sampled; rig bones without a track get the rig's reference pose. Rig bones are bound to the actor's nodes by name, case-insensitively like the engine; rig bones without a node are not displayed (logged). Nodes the clip doesn't drive keep their NIF transform. World transforms are then updated for the whole actor, like the engine's node update.
+
+### SMP physics
+
+* FSMP runs as in game: its configuration comes from the loose `Data/SKSE/Plugins/hdtSkinnedMeshConfigs/configs.xml` (FSMP's defaults apply without it), physics files from the `HDT Skinned Mesh Physics Object` string extra data of a model's root or from `defaultBBPs.xml`, every frame is one frame event and one frame sync event with the time since the last frame. Errors in physics files (unknown bones, bad elements) are reported and handled by FSMP itself; its log lines go to the log with an `FSMP:` prefix (FSMP's trace and debug lines only in verbose logs).
+* The engine around FSMP is emulated by `src/fsmp/FsmpScene.*`: data files are read relative to the Data folder, loose files first, then archives (a path starting with `Data\` is read relative to the Data folder too, as the previewer did before; how the engine treats that prefix is not verified), there is no world geometry (nothing blocks the line of sight), no weather (no wind), and the camera is at the actor (it is never culled).
+* Without physics, nothing simulates: the worn models' bones follow their parents.
+
+### Skinning
+
+* **Skinning** happens on the CPU for every visible skinned shape of a worn model: `Σ w · boneWorld · skinToBone · v`, using the shape's own skin data and the world transforms of the bones its attached clone is bound to (after FSMP wrote its bones). At most four influences per vertex (the strongest are kept, the rest are dropped with a warning), no weight renormalization. Unweighted vertices collapse to the origin, as in game. Unskinned shapes stay static.
+* **Rest-pose invariant**: posed vertices exist in a mesh only between `ActorAnimation::Update()` and `RestoreRestPose()` inside the actor timer tick (the GPU keeps the posed copy). All other code — preset morphs, morph-base capture — always reads and writes the rest pose. New mesh-loading paths must register their models with `actorAnim_.RegisterModel()` after `GLSurface::AddMeshFromNif()`.
+
 ## "Load all NPCs" button
 
 By default only vanilla NPCs and overrides reachable from the loaded ESP's master chain are listed. The **Load all NPCs** button scans every non-vanilla plugin in the data directory for *native* `NPC_` records (top-byte == self) and appends them via `LeveledListData::LoadAllPluginNativeNPCs()`. After the scan the autocomplete map and the NPCs list are rebuilt.
