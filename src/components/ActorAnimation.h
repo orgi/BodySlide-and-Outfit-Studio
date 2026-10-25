@@ -76,6 +76,11 @@ public:
 	bool LoadClip(const std::string& name);
 	// Holds the animation at its current time; physics keeps running.
 	void SetPaused(bool pause) { paused = pause; }
+	// Plays the character's animations with these file names (e.g.
+	// "MT_RunForward.hkx") instead of the chosen one: one after the other, the
+	// last one looping, also while paused. An empty list returns to the chosen
+	// animation where it left off. Logs file names the character doesn't list.
+	void SetTemporaryClips(const std::vector<std::string>& fileNames);
 
 	// Hands the NIF that the meshes in `shapes` were loaded from to the actor.
 	// Skinned shapes are posed; unskinned ones stay static.
@@ -86,7 +91,12 @@ public:
 	// actor re-equips its models with it.
 	void RestPoseChanged() { sceneDirty = true; }
 
-	// Advances the actor by `dt` seconds: the idle if `animate`, FSMP if
+	// Whether the next Update() with these arguments sets the actor up again
+	// (the worn models, the switches or the rest pose changed), which takes a
+	// moment.
+	bool NeedsSetup(bool animate, bool simulate, const MeshLookup& getMesh);
+
+	// Advances the actor by `dt` seconds: the animation if `animate`, FSMP if
 	// `simulate`. Writes posed vertices, normals and tangents into every
 	// visible registered mesh that `getMesh` still returns and queues them for
 	// upload; render, then call RestoreRestPose().
@@ -122,6 +132,9 @@ private:
 		std::vector<nifly::MatTransform> skinning; // per bone: rest vertex → posed vertex, mesh space
 	};
 
+	// Reads one of the character's animations and checks it against the rig. Logs every failure.
+	bool ReadClip(const std::string& name, hkx::SplineAnimation& out);
+	bool Animates() const { return clipLoaded || !temporaryClips.empty(); }
 	void PruneMeshes(const MeshLookup& getMesh);
 	std::vector<bool> WornModels() const;
 	void BuildScene(const MeshLookup& getMesh, bool simulate);
@@ -147,6 +160,12 @@ private:
 	hkx::Skeleton rig;
 	hkx::SplineAnimation clip;
 	float clock = 0.0f;
+	std::unordered_map<std::string, std::string> clipByFileName; // lower-case file name → name in clipNames
+	std::unordered_map<std::string, hkx::SplineAnimation> temporaryCache; // by name in clipNames
+	std::vector<std::string> temporaryFileNames;
+	std::vector<const hkx::SplineAnimation*> temporaryClips;
+	size_t temporaryIndex = 0;
+	float temporaryClock = 0.0f;
 	std::vector<hkx::QsTransform> samples;
 
 	std::vector<std::unique_ptr<Model>> models;

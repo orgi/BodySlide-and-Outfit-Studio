@@ -198,9 +198,13 @@ class LeveledListPreviewer : public wxFrame {
 	std::unordered_map<std::string, std::string> headShapeNifName_;				 // displayName → original NIF shape name
 
 	// The displayed actor in motion: idle animation and FSMP physics, each
-	// switched by its checkbox. The timer runs while either is on.
+	// switched by its checkbox. Frames run while either is on, each one once
+	// the event loop is idle (OnActorIdle), so input and repaints come first.
 	ActorAnimation actorAnim_;
 	wxTimer actorTimer_;
+	bool actorMotion_ = false;
+	std::chrono::steady_clock::time_point actorFrameTime_; // start of the last frame
+	uint8_t movementKeys_ = 0;							   // held movement keys (MovementKey)
 	wxCheckBox* smpToggle_ = nullptr;
 	wxCheckBox* animToggle_ = nullptr;
 	wxTextCtrl* clipText_ = nullptr;
@@ -282,11 +286,18 @@ public:
 	}
 	void OnToggleUntextured(wxCommandEvent& event);
 	void OnToggleBody(wxCommandEvent& event);
+	void OnToggleWireframe(wxCommandEvent& event);
 	void OnToggleSmp(wxCommandEvent& event);
 	void OnToggleAnim(wxCommandEvent& event);
 	void OnChooseClip(wxCommandEvent& event);
 	void OnTogglePause(wxCommandEvent& event);
 	void OnActorTimer(wxTimerEvent& event);
+	void OnActorIdle(wxIdleEvent& event);
+
+	// Movement keys pressed or released in the 3D view (W, A, S, D, Ctrl to
+	// sneak, Space to jump). Returns false for other keys.
+	bool MovementKey(int keyCode, bool down);
+	void ReleaseMovementKeys();
 
 	friend class LLPreviewCanvas;
 
@@ -371,19 +382,26 @@ private:
 	std::string FindSkeletonNifPath();
 
 	// Actor motion helpers
-	// Starts or stops the actor timer after a checkbox changed.
+	// Starts or stops the actor's frames after a checkbox changed.
 	void UpdateActorMotion();
+	// One frame of the actor: sets it up if needed, poses, simulates, renders.
+	void ActorFrame();
 	// Loads skeleton + idle clip for the current actor. Returns false while the
 	// plugin data isn't loaded yet (`pending`) or when the actor can't be set up.
 	bool LoadAnimationActor(bool& pending);
 	// Shows the playing animation and whether there are animations to choose from.
 	void RefreshClipChoice();
+	// Plays one of the actor's animations and turns the animation on.
+	void PlayClip(const std::string& name);
+	// Plays the animations of the held movement keys in place of the chosen one.
+	void UpdateMovementClips();
 
 	enum {
 		ID_LoadESP = wxID_HIGHEST + 500,
 		ID_ReloadESP,
 		ID_ToggleUntextured,
 		ID_ToggleBody,
+		ID_ToggleWireframe,
 		ID_HeadNPC,
 		ID_Preset,
 		ID_HighWeight,
@@ -410,7 +428,9 @@ public:
 	LLPreviewCanvas(LeveledListPreviewer* pw, wxWindow* parent, const wxGLAttributes& attribs);
 
 	void OnPaint(wxPaintEvent& event);
+	void OnKeyDown(wxKeyEvent& event);
 	void OnKeyUp(wxKeyEvent& event);
+	void OnKillFocus(wxFocusEvent& event);
 	void OnMotion(wxMouseEvent& event);
 	void OnMouseWheel(wxMouseEvent& event);
 	void OnResized(wxSizeEvent& event);

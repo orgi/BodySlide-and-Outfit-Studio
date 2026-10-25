@@ -142,6 +142,12 @@ void ActorAnimation::ClearActor() {
 	rig = {};
 	clip = {};
 	clock = 0.0f;
+	clipByFileName.clear();
+	temporaryCache.clear();
+	temporaryFileNames.clear();
+	temporaryClips.clear();
+	temporaryIndex = 0;
+	temporaryClock = 0.0f;
 	sceneDirty = true;
 }
 
@@ -200,6 +206,8 @@ bool ActorAnimation::LoadActor(const std::string& skeletonNifPath, const std::st
 
 	clipNames = character.animationNames;
 	std::sort(clipNames.begin(), clipNames.end(), [](const std::string& a, const std::string& b) { return ToLower(a) < ToLower(b); });
+	for (auto& name : clipNames)
+		clipByFileName.emplace(FileNameOf(ToLower(NormalizePath(name))), name);
 
 	// The preferred clip by its path in the character file, then by file name; MT_Idle otherwise.
 	std::string chosen;
@@ -224,6 +232,31 @@ bool ActorAnimation::LoadActor(const std::string& skeletonNifPath, const std::st
 	return true;
 }
 
+bool ActorAnimation::ReadClip(const std::string& name, hkx::SplineAnimation& out) {
+	const std::string path = projectDir + NormalizePath(name);
+	std::string error;
+	hkx::Packfile clipFile;
+	if (!LoadPackfile(readGameFile, path, clipFile, error) || !out.Load(clipFile, error)) {
+		wxLogError("ActorAnimation: Animation '%s': %s", path, error);
+		return false;
+	}
+
+	const auto& trackToBone = out.TrackToBone();
+	if (trackToBone.empty() && out.TrackCount() > rig.boneNames.size()) {
+		wxLogError("ActorAnimation: Animation '%s' has %zu tracks but rig '%s' only %zu bones", path, out.TrackCount(), rigPath, rig.boneNames.size());
+		return false;
+	}
+	for (int16_t bone : trackToBone) {
+		if (bone < 0 || static_cast<size_t>(bone) >= rig.boneNames.size()) {
+			wxLogError("ActorAnimation: Animation '%s' binds a track to bone %d, rig '%s' has %zu bones", path, bone, rigPath, rig.boneNames.size());
+			return false;
+		}
+	}
+	if (ToLower(out.SkeletonName()) != ToLower(rig.name))
+		wxLogWarning("ActorAnimation: Animation '%s' was bound to skeleton '%s', rig is '%s'", path, out.SkeletonName(), rig.name);
+	return true;
+}
+
 bool ActorAnimation::LoadClip(const std::string& name) {
 	clipLoaded = false;
 	clip = {};
@@ -231,31 +264,12 @@ bool ActorAnimation::LoadClip(const std::string& name) {
 	if (rig.boneNames.empty() || !readGameFile)
 		return false;
 
+	if (!ReadClip(name, clip)) {
+		clip = {};
+		return false;
+	}
+
 	const std::string path = projectDir + NormalizePath(name);
-	std::string error;
-	hkx::Packfile clipFile;
-	if (!LoadPackfile(readGameFile, path, clipFile, error) || !clip.Load(clipFile, error)) {
-		wxLogError("ActorAnimation: Animation '%s': %s", path, error);
-		clip = {};
-		return false;
-	}
-
-	const auto& trackToBone = clip.TrackToBone();
-	if (trackToBone.empty() && clip.TrackCount() > rig.boneNames.size()) {
-		wxLogError("ActorAnimation: Animation '%s' has %zu tracks but rig '%s' only %zu bones", path, clip.TrackCount(), rigPath, rig.boneNames.size());
-		clip = {};
-		return false;
-	}
-	for (int16_t bone : trackToBone) {
-		if (bone < 0 || static_cast<size_t>(bone) >= rig.boneNames.size()) {
-			wxLogError("ActorAnimation: Animation '%s' binds a track to bone %d, rig '%s' has %zu bones", path, bone, rigPath, rig.boneNames.size());
-			clip = {};
-			return false;
-		}
-	}
-	if (ToLower(clip.SkeletonName()) != ToLower(rig.name))
-		wxLogWarning("ActorAnimation: Animation '%s' was bound to skeleton '%s', rig is '%s'", path, clip.SkeletonName(), rig.name);
-
 	clipName = name;
 	clipPath = path;
 	clipLoaded = true;
@@ -267,6 +281,33 @@ bool ActorAnimation::LoadClip(const std::string& name) {
 				 rig.boneNames.size(),
 				 skeletonPath);
 	return true;
+}
+
+void ActorAnimation::SetTemporaryClips(const std::vector<std::string>& fileNames) {
+	if (fileNames == temporaryFileNames)
+		return;
+	temporaryFileNames = fileNames;
+	temporaryClips.clear();
+	temporaryIndex = 0;
+	temporaryClock = 0.0f;
+	if (rig.boneNames.empty() || !readGameFile)
+		return;
+
+	for (auto& fileName : fileNames) {
+		auto found = clipByFileName.find(ToLower(fileName));
+		if (found == clipByFileName.end()) {
+			wxLogError("ActorAnimation: The actor's character (%s) lists no animation '%s'", projectDir, fileName);
+			continue;
+		}
+		auto cached = temporaryCache.find(found->second);
+		if (cached == temporaryCache.end()) {
+			hkx::SplineAnimation loaded;
+			if (!ReadClip(found->second, loaded))
+				continue;
+			cached = temporaryCache.emplace(found->second, std::move(loaded)).first;
+		}
+		temporaryClips.push_back(&cached->second);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -483,8 +524,10 @@ void ActorAnimation::PoseSkeleton() {
 			fsmp::Actor::SetLocal(rigToNode[b], ToMatTransform(rig.referencePose[b]));
 	}
 
-	clip.Sample(clock, samples);
-	const auto& trackToBone = clip.TrackToBone();
+	const bool temporary = !temporaryClips.empty();
+	const hkx::SplineAnimation& playing = temporary ? *temporaryClips[temporaryIndex] : clip;
+	playing.Sample(temporary ? temporaryClock : clock, samples);
+	const auto& trackToBone = playing.TrackToBone();
 	for (size_t t = 0; t < samples.size(); t++) {
 		size_t bone = trackToBone.empty() ? t : static_cast<size_t>(trackToBone[t]);
 		if (bone < rigToNode.size() && rigToNode[bone])
@@ -560,16 +603,25 @@ void ActorAnimation::FinishSkin(Shape& s) {
 	s.posed = true;
 }
 
-void ActorAnimation::Update(float dt, bool animate, bool simulate, const MeshLookup& getMesh) {
+bool ActorAnimation::NeedsSetup(bool animate, bool simulate, const MeshLookup& getMesh) {
 	if (!skeleton)
-		return;
-	animate = animate && clipLoaded;
-	dt = std::max(0.0f, dt);
+		return false;
+	animate = animate && Animates();
 
 	PruneMeshes(getMesh);
 	if (WornModels() != attached || animate != sceneAnimated || simulate != sceneSimulated)
 		sceneDirty = true;
-	if (sceneDirty || !actor) {
+	return sceneDirty || !actor;
+}
+
+void ActorAnimation::Update(float dt, bool animate, bool simulate, const MeshLookup& getMesh) {
+	if (!skeleton)
+		return;
+	const bool setup = NeedsSetup(animate, simulate, getMesh);
+	animate = animate && Animates();
+	dt = std::max(0.0f, dt);
+
+	if (setup) {
 		BuildScene(getMesh, simulate);
 		sceneDirty = false;
 		sceneAnimated = animate;
@@ -580,7 +632,19 @@ void ActorAnimation::Update(float dt, bool animate, bool simulate, const MeshLoo
 	auto start = std::chrono::steady_clock::now();
 
 	if (animate) {
-		if (!paused)
+		if (!temporaryClips.empty()) {
+			// Each temporary animation plays once, the last one loops.
+			temporaryClock += dt;
+			while (temporaryIndex + 1 < temporaryClips.size() && temporaryClock >= temporaryClips[temporaryIndex]->Duration()) {
+				temporaryClock -= temporaryClips[temporaryIndex]->Duration();
+				temporaryIndex++;
+			}
+			if (temporaryIndex + 1 == temporaryClips.size()) {
+				const float duration = temporaryClips.back()->Duration();
+				temporaryClock = duration > 0.0f ? std::fmod(temporaryClock, duration) : 0.0f;
+			}
+		}
+		else if (!paused)
 			clock = clip.Duration() > 0.0f ? std::fmod(clock + dt, clip.Duration()) : 0.0f;
 		PoseSkeleton();
 	}

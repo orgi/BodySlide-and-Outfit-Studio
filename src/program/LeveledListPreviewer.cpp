@@ -10,6 +10,7 @@
 #include <cctype>
 #include <functional>
 #include <map>
+#include <optional>
 #include <regex>
 #include <sstream>
 #include <unordered_set>
@@ -18,6 +19,7 @@
 #include <Shaders.hpp>
 #include <wx/dir.h>
 #include <wx/filename.h>
+#include <wx/listctrl.h>
 #include <wx/treectrl.h>
 
 using namespace nifly;
@@ -56,10 +58,12 @@ wxBEGIN_EVENT_TABLE(LeveledListPreviewer, wxFrame)
 	EVT_MENU(LeveledListPreviewer::ID_ReloadESP, LeveledListPreviewer::OnReloadESP)
 	EVT_MENU(LeveledListPreviewer::ID_ToggleUntextured, LeveledListPreviewer::OnToggleUntextured)
 	EVT_MENU(LeveledListPreviewer::ID_ToggleBody, LeveledListPreviewer::OnToggleBody)
+	EVT_MENU(LeveledListPreviewer::ID_ToggleWireframe, LeveledListPreviewer::OnToggleWireframe)
 	EVT_TEXT_ENTER(LeveledListPreviewer::ID_HeadNPC, LeveledListPreviewer::OnHeadEntered)
 	EVT_COMBOBOX(LeveledListPreviewer::ID_Preset, LeveledListPreviewer::OnPresetChanged)
 	EVT_CHECKBOX(LeveledListPreviewer::ID_HighWeight, LeveledListPreviewer::OnHighWeightChanged)
 	EVT_TIMER(LeveledListPreviewer::ID_ActorTimer, LeveledListPreviewer::OnActorTimer)
+	EVT_IDLE(LeveledListPreviewer::OnActorIdle)
 	EVT_FSWATCHER(wxID_ANY, LeveledListPreviewer::OnFileChanged)
 wxEND_EVENT_TABLE()
 
@@ -85,6 +89,8 @@ LeveledListPreviewer::LeveledListPreviewer(wxEvtHandler* handler)
 	viewMenu->Check(ID_ToggleUntextured, false);
 	viewMenu->AppendCheckItem(ID_ToggleBody, _("Show &Body\tB"), _("Show default body, hands and feet underneath outfit"));
 	viewMenu->Check(ID_ToggleBody, true);
+	viewMenu->AppendCheckItem(ID_ToggleWireframe, _("&Wireframe\tF"), _("Draw the meshes as wireframes"));
+	viewMenu->Check(ID_ToggleWireframe, false);
 	menuBar->Append(viewMenu, _("&View"));
 
 	SetMenuBar(menuBar);
@@ -3666,6 +3672,10 @@ void LeveledListPreviewer::OnToggleUntextured(wxCommandEvent& event) {
 	gls.RenderOneFrame();
 }
 
+void LeveledListPreviewer::OnToggleWireframe(wxCommandEvent& WXUNUSED(event)) {
+	ToggleWireframe();
+}
+
 void LeveledListPreviewer::OnToggleBody(wxCommandEvent& event) {
 	showBody = event.IsChecked();
 	for (auto& name : bodyShapeNames)
@@ -3708,6 +3718,7 @@ void LeveledListPreviewer::MouseWheel(int dW) {
 void LeveledListPreviewer::OnClose(wxCloseEvent& WXUNUSED(event)) {
 	animRunning_ = false;
 	smpRunning_ = false;
+	actorMotion_ = false;
 	actorTimer_.Stop();
 
 	if (meshOverlayPanel)
@@ -3813,6 +3824,118 @@ std::string RecordModelPath(const std::string& meshesPath) {
 	return path;
 }
 
+// Frame interval of the actor in motion (~60 FPS).
+constexpr std::chrono::milliseconds kActorFrameInterval(16);
+
+// Movement keys of the 3D view, bound like the game's default controls.
+enum MovementKeyBit : uint8_t {
+	MoveForward = 1,
+	MoveBack = 2,
+	MoveLeft = 4,
+	MoveRight = 8,
+	MoveSneak = 16,
+	MoveJump = 32
+};
+
+uint8_t MovementKeyBitOf(int keyCode) {
+	switch (keyCode) {
+		case 'W': return MoveForward;
+		case 'S': return MoveBack;
+		case 'A': return MoveLeft;
+		case 'D': return MoveRight;
+		case WXK_CONTROL: return MoveSneak;
+		case WXK_SPACE: return MoveJump;
+		default: return 0;
+	}
+}
+
+// The animations (file names) the game plays for the held movement keys,
+// unarmed and running (the game's default): a jump, else running or sneaking
+// in the held direction, else sneaking in place. None without such keys.
+std::vector<std::string> MovementClips(uint8_t keys) {
+	if (keys & MoveJump)
+		return {"MT_Jump.hkx", "MT_JumpFall.hkx"};
+
+	const int forward = ((keys & MoveForward) ? 1 : 0) - ((keys & MoveBack) ? 1 : 0);
+	const int right = ((keys & MoveRight) ? 1 : 0) - ((keys & MoveLeft) ? 1 : 0);
+	// By (forward + 1) * 3 + (right + 1).
+	static const char* const run[9] = {
+		"MT_RunBackwardLeft.hkx", "MT_RunBackward.hkx", "MT_RunBackwardRight.hkx",
+		"MT_RunLeft.hkx", nullptr, "MT_RunRight.hkx",
+		"MT_RunForwardLeft.hkx", "MT_RunForward.hkx", "MT_RunForwardRight.hkx"};
+	static const char* const sneak[9] = {
+		"SneakRun_BckwrdLeft.hkx", "SneakRun_Backward.hkx", "SneakRun_BckwrdRight.hkx",
+		"SneakRun_Left.hkx", "SneakMTIdle.hkx", "SneakRun_Right.hkx",
+		"SneakRun_FrwrdLeft.hkx", "SneakRun_Forward.hkx", "SneakRun_FrwrdRight.hkx"};
+	const char* clip = ((keys & MoveSneak) ? sneak : run)[(forward + 1) * 3 + (right + 1)];
+	if (!clip)
+		return {};
+	return {clip};
+}
+
+std::string LowerAscii(std::string text) {
+	std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return std::tolower(c); });
+	return text;
+}
+
+// The animations of the animation dialog, filtered by a search text. A
+// character can list tens of thousands of them, so the list only asks for
+// the rows it draws.
+class ClipListView : public wxListView {
+public:
+	ClipListView(wxWindow* parent, const std::vector<std::string>& clipNames)
+		: wxListView(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT | wxLC_VIRTUAL | wxLC_NO_HEADER | wxLC_SINGLE_SEL)
+		, names(clipNames) {
+		lowerNames.reserve(names.size());
+		for (auto& name : names)
+			lowerNames.push_back(LowerAscii(name));
+		AppendColumn(wxEmptyString);
+		Bind(wxEVT_SIZE, [this](wxSizeEvent& event) {
+			SetColumnWidth(0, GetClientSize().x);
+			event.Skip();
+		});
+	}
+
+	// Shows the names that contain `filter` (case-insensitive) and selects `selection` if it's one of them.
+	void Filter(const std::string& filter, const std::string& selection) {
+		for (long row = GetFirstSelected(); row != -1; row = GetNextSelected(row))
+			Select(row, false);
+
+		const std::string lowerFilter = LowerAscii(filter);
+		shown.clear();
+		for (size_t i = 0; i < names.size(); i++) {
+			if (lowerNames[i].find(lowerFilter) != std::string::npos)
+				shown.push_back(i);
+		}
+		SetItemCount(static_cast<long>(shown.size()));
+		Refresh();
+
+		for (size_t row = 0; row < shown.size(); row++) {
+			if (names[shown[row]] == selection) {
+				Select(static_cast<long>(row));
+				Focus(static_cast<long>(row));
+				EnsureVisible(static_cast<long>(row));
+				break;
+			}
+		}
+	}
+
+	// The selected name, empty without a selection.
+	std::string Selected() const {
+		long row = GetFirstSelected();
+		return row >= 0 && static_cast<size_t>(row) < shown.size() ? names[shown[row]] : std::string();
+	}
+
+protected:
+	wxString OnGetItemText(long item, long WXUNUSED(column)) const override { return wxString::FromUTF8(names[shown[item]]); }
+
+private:
+	// A copy: the actor can be loaded again while the dialog is open.
+	std::vector<std::string> names;
+	std::vector<std::string> lowerNames;
+	std::vector<size_t> shown; // indices into names
+};
+
 } // namespace
 
 bool LeveledListPreviewer::LoadAnimationActor(bool& pending) {
@@ -3859,6 +3982,8 @@ bool LeveledListPreviewer::LoadAnimationActor(bool& pending) {
 		files.behaviorProject = "meshes/actors/character/defaultfemale.hkx";
 	}
 
+	// Reading the actor's files takes a moment.
+	wxBusyCursor wait;
 	auto readFile = [this](const std::string& path, std::vector<char>& out) { return data.ReadGameFile(path, out); };
 
 	// FSMP reads its configuration from the loose file in the game's Data folder.
@@ -3869,6 +3994,7 @@ bool LeveledListPreviewer::LoadAnimationActor(bool& pending) {
 	ActorAnimation::InitialisePhysics(readFile, configsFile);
 
 	bool loaded = actorAnim_.LoadActor(files.skeletonNif, files.behaviorProject, info, Config["AnimClip"], readFile);
+	actorAnim_.SetTemporaryClips(MovementClips(movementKeys_));
 	RefreshClipChoice();
 	return loaded;
 }
@@ -3881,41 +4007,53 @@ void LeveledListPreviewer::RefreshClipChoice() {
 }
 
 void LeveledListPreviewer::OnChooseClip(wxCommandEvent& WXUNUSED(event)) {
-	const auto& names = actorAnim_.ClipNames();
-	if (names.empty())
+	if (actorAnim_.ClipNames().empty())
 		return;
 
-	// A character lists hundreds of animations: a list with a search field.
 	wxDialog dialog(this, wxID_ANY, _("Animation"), wxDefaultPosition, wxSize(520, 640), wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
 	auto* sizer = new wxBoxSizer(wxVERTICAL);
 	auto* search = new wxSearchCtrl(&dialog, wxID_ANY);
-	auto* list = new wxListBox(&dialog, wxID_ANY);
+	auto* list = new ClipListView(&dialog, actorAnim_.ClipNames());
 	sizer->Add(search, 0, wxEXPAND | wxALL, 5);
 	sizer->Add(list, 1, wxEXPAND | wxLEFT | wxRIGHT, 5);
 	sizer->Add(dialog.CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxEXPAND | wxALL, 5);
 	dialog.SetSizer(sizer);
+	dialog.Layout();
 
-	const wxString current = wxString::FromUTF8(actorAnim_.ClipName());
-	auto fill = [&]() {
-		const wxString filter = search->GetValue().Lower();
-		wxArrayString shown;
-		for (auto& name : names) {
-			wxString entry = wxString::FromUTF8(name);
-			if (filter.empty() || entry.Lower().Contains(filter))
-				shown.Add(entry);
-		}
-		list->Set(shown);
-		list->SetStringSelection(current);
-	};
-	search->Bind(wxEVT_TEXT, [&](wxCommandEvent&) { fill(); });
-	list->Bind(wxEVT_LISTBOX_DCLICK, [&](wxCommandEvent&) { dialog.EndModal(wxID_OK); });
-	fill();
+	// The selection stays while it matches the search text.
+	const std::string current = actorAnim_.ClipName();
+	search->Bind(wxEVT_TEXT, [&](wxCommandEvent&) {
+		const std::string selected = list->Selected();
+		list->Filter(std::string(search->GetValue().ToUTF8()), selected.empty() ? current : selected);
+	});
+	// A click plays the animation; Cancel goes back to the one before.
+	const bool wasAnimating = animRunning_;
+	list->Bind(wxEVT_LIST_ITEM_SELECTED, [&](wxListEvent&) {
+		const std::string name = list->Selected();
+		if (!name.empty() && !(actorAnim_.HasClip() && name == actorAnim_.ClipName()))
+			PlayClip(name);
+	});
+	list->Bind(wxEVT_LIST_ITEM_ACTIVATED, [&](wxListEvent&) { dialog.EndModal(wxID_OK); });
+	list->Filter({}, current);
 
-	if (dialog.ShowModal() != wxID_OK || list->GetSelection() == wxNOT_FOUND)
+	if (dialog.ShowModal() == wxID_OK) {
+		if (actorAnim_.HasClip())
+			Config.SetValue("AnimClip", actorAnim_.ClipName());
 		return;
+	}
 
-	std::string name(list->GetStringSelection().ToUTF8());
-	Config.SetValue("AnimClip", name);
+	if (!current.empty() && !(actorAnim_.HasClip() && actorAnim_.ClipName() == current))
+		PlayClip(current);
+	if (!wasAnimating && animRunning_ && animToggle_) {
+		animToggle_->SetValue(false);
+		animRunning_ = false;
+		Config.SetValue("AnimEnabled", "false");
+		UpdateActorMotion();
+	}
+}
+
+void LeveledListPreviewer::PlayClip(const std::string& name) {
+	wxBusyCursor wait;
 	if (!actorAnim_.LoadClip(name))
 		SetStatusText(_("The animation can't be played (see log)"));
 	else if (!animRunning_ && animToggle_) {
@@ -3927,17 +4065,46 @@ void LeveledListPreviewer::OnChooseClip(wxCommandEvent& WXUNUSED(event)) {
 	RefreshClipChoice();
 }
 
+bool LeveledListPreviewer::MovementKey(int keyCode, bool down) {
+	const uint8_t key = MovementKeyBitOf(keyCode);
+	if (!key)
+		return false;
+	// Held keys repeat their key-down events.
+	const uint8_t keys = down ? (movementKeys_ | key) : (movementKeys_ & ~key);
+	if (keys != movementKeys_) {
+		movementKeys_ = keys;
+		UpdateMovementClips();
+	}
+	return true;
+}
+
+void LeveledListPreviewer::ReleaseMovementKeys() {
+	if (movementKeys_) {
+		movementKeys_ = 0;
+		UpdateMovementClips();
+	}
+}
+
+void LeveledListPreviewer::UpdateMovementClips() {
+	actorAnim_.SetTemporaryClips(MovementClips(movementKeys_));
+	if (movementKeys_ && !animRunning_)
+		SetStatusText(_("Movement keys play their animations while Animation is on"));
+}
+
 void LeveledListPreviewer::OnTogglePause(wxCommandEvent& event) {
 	actorAnim_.SetPaused(event.IsChecked());
 }
 
 void LeveledListPreviewer::UpdateActorMotion() {
 	const bool running = animRunning_ || smpRunning_;
-	if (running && !actorTimer_.IsRunning()) {
+	if (running && !actorMotion_) {
+		// The first frame starts from OnActorIdle.
+		actorMotion_ = true;
 		animLastTick_ = std::chrono::steady_clock::now();
-		actorTimer_.Start(16); // ~60 FPS
+		actorFrameTime_ = animLastTick_;
 	}
-	else if (!running && actorTimer_.IsRunning()) {
+	else if (!running && actorMotion_) {
+		actorMotion_ = false;
 		actorTimer_.Stop();
 		if (canvas && context)
 			canvas->SetCurrent(*context);
@@ -3946,13 +4113,13 @@ void LeveledListPreviewer::UpdateActorMotion() {
 	}
 
 	if (animRunning_ && smpRunning_)
-		SetStatusText(_("Idle animation and SMP physics active"));
+		SetStatusText(_("Animation and SMP physics active"));
 	else if (animRunning_)
-		SetStatusText(_("Idle animation active"));
+		SetStatusText(_("Animation active"));
 	else if (smpRunning_)
 		SetStatusText(_("SMP physics active"));
 	else
-		SetStatusText(_("Idle animation and SMP physics stopped"));
+		SetStatusText(_("Animation and SMP physics stopped"));
 }
 
 void LeveledListPreviewer::OnToggleSmp(wxCommandEvent& event) {
@@ -3967,8 +4134,30 @@ void LeveledListPreviewer::OnToggleAnim(wxCommandEvent& event) {
 	UpdateActorMotion();
 }
 
+void LeveledListPreviewer::OnActorIdle(wxIdleEvent& event) {
+	event.Skip();
+	if (!actorMotion_ || actorTimer_.IsRunning())
+		return;
+
+	// A frame only starts when nothing else is waiting, so clicks and repaints
+	// never wait for the actor. The timer keeps frames from coming faster
+	// than the frame interval.
+	auto wait = std::chrono::ceil<std::chrono::milliseconds>(kActorFrameInterval - (std::chrono::steady_clock::now() - actorFrameTime_));
+	if (wait.count() > 0) {
+		actorTimer_.StartOnce(static_cast<int>(wait.count()));
+		return;
+	}
+	ActorFrame();
+	event.RequestMore();
+}
+
 void LeveledListPreviewer::OnActorTimer(wxTimerEvent& WXUNUSED(event)) {
-	if ((!animRunning_ && !smpRunning_) || isLoadingESP_)
+	ActorFrame();
+}
+
+void LeveledListPreviewer::ActorFrame() {
+	actorFrameTime_ = std::chrono::steady_clock::now();
+	if (!actorMotion_ || isLoadingESP_)
 		return;
 
 	auto getMesh = [this](const std::string& name) { return gls.GetMesh(name); };
@@ -3987,12 +4176,17 @@ void LeveledListPreviewer::OnActorTimer(wxTimerEvent& WXUNUSED(event)) {
 				SetStatusText(_("The actor can't be set up (see log)"));
 			}
 			else if (animRunning_ && !actorAnim_.HasClip())
-				SetStatusText(_("Idle animation unavailable for this actor (see log)"));
+				SetStatusText(_("Animation unavailable for this actor (see log)"));
 		}
 		animLastTick_ = std::chrono::steady_clock::now();
 	}
 	if (!actorAnim_.IsLoaded())
 		return;
+
+	// Setting the actor up again (other models or switches) takes a moment.
+	std::optional<wxBusyCursor> busy;
+	if (actorAnim_.NeedsSetup(animRunning_, smpRunning_, getMesh))
+		busy.emplace();
 
 	auto now = std::chrono::steady_clock::now();
 	float dt = std::chrono::duration<float>(now - animLastTick_).count();
@@ -4008,7 +4202,9 @@ void LeveledListPreviewer::OnActorTimer(wxTimerEvent& WXUNUSED(event)) {
 // ---------------------------------------------------------------------------
 
 wxBEGIN_EVENT_TABLE(LLPreviewCanvas, wxGLCanvas)
+	EVT_KEY_DOWN(LLPreviewCanvas::OnKeyDown)
 	EVT_KEY_UP(LLPreviewCanvas::OnKeyUp)
+	EVT_KILL_FOCUS(LLPreviewCanvas::OnKillFocus)
 	EVT_MOTION(LLPreviewCanvas::OnMotion)
 	EVT_MOUSEWHEEL(LLPreviewCanvas::OnMouseWheel)
 	EVT_PAINT(LLPreviewCanvas::OnPaint)
@@ -4027,13 +4223,25 @@ void LLPreviewCanvas::OnPaint(wxPaintEvent& WXUNUSED(event)) {
 	previewer->Render();
 }
 
+void LLPreviewCanvas::OnKeyDown(wxKeyEvent& event) {
+	if (!previewer->MovementKey(event.GetKeyCode(), true))
+		event.Skip();
+}
+
 void LLPreviewCanvas::OnKeyUp(wxKeyEvent& event) {
+	if (previewer->MovementKey(event.GetKeyCode(), false))
+		return;
+
 	switch (event.GetKeyCode()) {
 		case 'T': previewer->ToggleTextures(); break;
-		case 'W': previewer->ToggleWireframe(); break;
 		case 'U':
-		case 'B': {
-			int menuId = (event.GetKeyCode() == 'U') ? LeveledListPreviewer::ID_ToggleUntextured : LeveledListPreviewer::ID_ToggleBody;
+		case 'B':
+		case 'F': {
+			int menuId = LeveledListPreviewer::ID_ToggleWireframe;
+			if (event.GetKeyCode() == 'U')
+				menuId = LeveledListPreviewer::ID_ToggleUntextured;
+			else if (event.GetKeyCode() == 'B')
+				menuId = LeveledListPreviewer::ID_ToggleBody;
 			wxMenuBar* mb = previewer->GetMenuBar();
 			if (mb) {
 				bool newState = !mb->IsChecked(menuId);
@@ -4045,6 +4253,12 @@ void LLPreviewCanvas::OnKeyUp(wxKeyEvent& event) {
 			break;
 		}
 	}
+}
+
+void LLPreviewCanvas::OnKillFocus(wxFocusEvent& event) {
+	// Key releases after the focus left aren't seen.
+	previewer->ReleaseMovementKeys();
+	event.Skip();
 }
 
 void LLPreviewCanvas::OnMotion(wxMouseEvent& event) {
