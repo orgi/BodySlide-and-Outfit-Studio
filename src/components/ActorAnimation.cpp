@@ -146,10 +146,21 @@ void LogFsmp(fsmp::LogLevel level, const std::string& message) {
 	}
 }
 
+void LogCbpc(cbpc::LogLevel level, const std::string& message) {
+	if (level == cbpc::LogLevel::Error)
+		wxLogError("CBPC: %s", message);
+	else
+		wxLogMessage("CBPC: %s", message);
+}
+
 } // namespace
 
 void ActorAnimation::InitialisePhysics(const FileReader& readFile, const std::string& configsFile) {
 	fsmp::Initialise(readFile, &LogFsmp, configsFile);
+}
+
+void ActorAnimation::InitialiseCbpc(cbpc::GameData data, const std::string& gameFolder) {
+	cbpc::Initialise(std::move(data), &LogCbpc, gameFolder);
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +168,9 @@ void ActorAnimation::InitialisePhysics(const FileReader& readFile, const std::st
 // ---------------------------------------------------------------------------
 
 void ActorAnimation::ClearActor() {
+	cbpcActor.reset();
+	cbpcObjects.clear();
+	cbpcInfo.reset();
 	actor.reset();
 	rigToNode.clear();
 	attached.clear();
@@ -441,7 +455,7 @@ void ActorAnimation::SamplePose(const Track& track, std::vector<hkx::QsTransform
 // Model registration
 // ---------------------------------------------------------------------------
 
-void ActorAnimation::RegisterModel(NifFile& nif, const std::string& nifPath, ModelKind kind, const std::vector<std::pair<NiShape*, Mesh*>>& meshes, WornCheck worn, const std::optional<fsmp::WornItem>& item) {
+void ActorAnimation::RegisterModel(NifFile& nif, const std::string& nifPath, ModelKind kind, const std::vector<std::pair<NiShape*, Mesh*>>& meshes, WornCheck worn, const std::optional<fsmp::WornItem>& item, uint32_t itemFormId) {
 	auto model = std::make_unique<Model>();
 	model->scene = fsmp::LoadModel(nif, nifPath);
 	if (!model->scene)
@@ -449,6 +463,7 @@ void ActorAnimation::RegisterModel(NifFile& nif, const std::string& nifPath, Mod
 	model->kind = kind;
 	model->worn = std::move(worn);
 	model->item = item;
+	model->itemFormId = itemFormId;
 
 	for (auto& [shape, mesh] : meshes) {
 		if (!shape || !mesh)
@@ -518,6 +533,7 @@ void ActorAnimation::RegisterModel(NifFile& nif, const std::string& nifPath, Mod
 }
 
 void ActorAnimation::ForgetModels() {
+	cbpcObjects.clear();
 	actor.reset();
 	rigToNode.clear();
 	attached.clear();
@@ -544,6 +560,7 @@ void ActorAnimation::PruneMeshes(const MeshLookup& getMesh) {
 		if (meshes.empty()) {
 			if (actor) {
 				// The actor still wears the model's clone; take it off with the actor.
+				cbpcObjects.clear();
 				actor.reset();
 				rigToNode.clear();
 			}
@@ -566,7 +583,8 @@ std::vector<bool> ActorAnimation::WornModels() const {
 // Scene
 // ---------------------------------------------------------------------------
 
-void ActorAnimation::BuildScene(const MeshLookup& getMesh, bool simulate) {
+void ActorAnimation::BuildScene(const MeshLookup& getMesh, bool simulate, bool cbpc) {
+	cbpcObjects.clear();
 	actor.reset();
 	rigToNode.clear();
 	attached = WornModels();
@@ -641,7 +659,47 @@ void ActorAnimation::BuildScene(const MeshLookup& getMesh, bool simulate) {
 	}
 
 	actor->UpdateWorld();
-	wxLogMessage("ActorAnimation: Actor set up with %zu of %zu models%s", worn, models.size(), simulate ? ", FSMP physics running" : "");
+
+	// CBPC keeps its reference while the actor equips other models; the
+	// models' 3D was attached again, so CBPC's mirror of the 3D follows.
+	if (cbpc && !cbpcInfo) {
+		wxLogMessage("ActorAnimation: CBPC runs on NPCs only (it reads the actor's records); no NPC is shown");
+		cbpcActor.reset();
+	}
+	else if (!cbpc)
+		cbpcActor.reset();
+	else {
+		if (!cbpcActor)
+			cbpcActor = std::make_unique<cbpc::Actor>(*cbpcInfo);
+		std::vector<uint32_t> armors;
+		for (size_t i = 0; i < models.size(); i++) {
+			if (!attached[i] || !models[i]->item)
+				continue;
+			if (models[i]->itemFormId == 0)
+				wxLogError("ActorAnimation: '%s' is from a plugin outside the game's active load order; CBPC doesn't find it in the actor's inventory", models[i]->item->name);
+			else if (std::find(armors.begin(), armors.end(), models[i]->itemFormId) == armors.end())
+				armors.push_back(models[i]->itemFormId);
+		}
+		cbpcActor->SetWornItems(armors);
+
+		std::vector<cbpc::SceneNode> nodes;
+		for (auto& object : actor->SceneGraph()) {
+			nodes.push_back({object.name, object.parent, object.isNode});
+			cbpcObjects.push_back(object.object);
+		}
+		cbpcActor->SetScene(nodes);
+	}
+
+	wxLogMessage("ActorAnimation: Actor set up with %zu of %zu models%s%s", worn, models.size(), simulate ? ", FSMP physics running" : "", cbpcActor ? ", CBPC physics running" : "");
+}
+
+void ActorAnimation::StepCbpc(float dt) {
+	cbpcTransforms.resize(cbpcObjects.size());
+	for (size_t i = 0; i < cbpcObjects.size(); i++)
+		fsmp::Actor::GetTransforms(cbpcObjects[i], cbpcTransforms[i].local, cbpcTransforms[i].world);
+	cbpcActor->Step(dt, cbpcTransforms);
+	for (size_t i = 0; i < cbpcObjects.size(); i++)
+		fsmp::Actor::SetTransforms(cbpcObjects[i], cbpcTransforms[i].local, cbpcTransforms[i].world);
 }
 
 void ActorAnimation::PoseSkeleton() {
@@ -734,34 +792,47 @@ void ActorAnimation::FinishSkin(Shape& s) {
 	s.posed = true;
 }
 
-bool ActorAnimation::NeedsSetup(bool animate, bool simulate, const MeshLookup& getMesh) {
+void ActorAnimation::SetCbpcActor(const std::optional<cbpc::ActorInfo>& info) {
+	if (info == cbpcInfo)
+		return;
+	cbpcInfo = info;
+	cbpcActor.reset();
+	cbpcObjects.clear();
+	sceneDirty = true;
+}
+
+bool ActorAnimation::NeedsSetup(bool animate, bool simulate, bool cbpc, const MeshLookup& getMesh) {
 	if (!skeleton)
 		return false;
 	animate = animate && Animates();
 
 	PruneMeshes(getMesh);
-	if (WornModels() != attached || animate != sceneAnimated || simulate != sceneSimulated)
+	if (WornModels() != attached || animate != sceneAnimated || simulate != sceneSimulated || cbpc != sceneCbpc)
 		sceneDirty = true;
 	return sceneDirty || !actor;
 }
 
-void ActorAnimation::Update(float dt, bool animate, bool simulate, const MeshLookup& getMesh) {
+void ActorAnimation::Update(float dt, bool animate, bool simulate, bool cbpc, const MeshLookup& getMesh) {
 	if (!skeleton)
 		return;
-	const bool setup = NeedsSetup(animate, simulate, getMesh);
+	const bool setup = NeedsSetup(animate, simulate, cbpc, getMesh);
 	animate = animate && Animates();
 	dt = std::max(0.0f, dt);
 
 	if (setup) {
-		BuildScene(getMesh, simulate);
+		BuildScene(getMesh, simulate, cbpc);
 		sceneDirty = false;
 		sceneAnimated = animate;
 		sceneSimulated = simulate;
+		sceneCbpc = cbpc;
 		firstFrame = true;
 	}
 
 	auto start = std::chrono::steady_clock::now();
 
+	// The game's main update starts with CBPC's frame update.
+	if (cbpcActor)
+		StepCbpc(dt);
 	if (animate) {
 		Advance(dt);
 		PoseSkeleton();

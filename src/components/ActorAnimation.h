@@ -7,6 +7,10 @@
  * (e.g. Actors\Character\DefaultFemale.hkx) → character file → rig
  * (skeleton.hkx) and the character's animations, MT_Idle by default.
  *
+ * CBPC (src/cbpc/CbpcScene.h) runs on the same actor: each frame starts with
+ * CBPC's frame update on the scene graph, like the game's main update does,
+ * then the clip poses the skeleton and FSMP simulates.
+ *
  * The actor lives in an FSMP scene (src/fsmp/FsmpScene.h): the race skeleton
  * NIF as its 3D, the worn models attached like the engine equips them and the
  * FaceGen head attached like the engine loads it. Each frame the clip poses
@@ -20,6 +24,7 @@
 
 #pragma once
 
+#include "../cbpc/CbpcScene.h"
 #include "../files/HkxFile.h"
 #include "../fsmp/FsmpScene.h"
 
@@ -57,6 +62,8 @@ public:
 	// FSMP's plugin load (once per process). `configsFile` is the loose
 	// SKSE/Plugins/hdtSkinnedMeshConfigs/configs.xml, empty if there is none.
 	static void InitialisePhysics(const FileReader& readFile, const std::string& configsFile);
+	// CBPC's plugin load, see cbpc::Initialise.
+	static void InitialiseCbpc(cbpc::GameData data, const std::string& gameFolder);
 
 	// Loads the skeleton NIF and the rig and animations of the behavior
 	// project's character. Both paths are data-relative. Plays `preferredClip`
@@ -92,23 +99,29 @@ public:
 
 	// Hands the NIF that the meshes in `shapes` were loaded from to the actor.
 	// Skinned shapes are posed; unskinned ones stay static.
-	// `item` is the inventory item that equips the model (outfit pieces).
-	void RegisterModel(nifly::NifFile& nif, const std::string& nifPath, ModelKind kind, const std::vector<std::pair<nifly::NiShape*, Mesh*>>& shapes, WornCheck worn, const std::optional<fsmp::WornItem>& item = std::nullopt);
+	// `item` is the inventory item that equips the model (outfit pieces);
+	// `itemFormId` is its FormID in the game's load order (0: the item's
+	// plugin isn't in the active load order).
+	void RegisterModel(nifly::NifFile& nif, const std::string& nifPath, ModelKind kind, const std::vector<std::pair<nifly::NiShape*, Mesh*>>& shapes, WornCheck worn, const std::optional<fsmp::WornItem>& item = std::nullopt, uint32_t itemFormId = 0);
 	void ForgetModels();
 	// The rest pose of registered meshes changed (preset morphs, weight); the
 	// actor re-equips its models with it.
 	void RestPoseChanged() { sceneDirty = true; }
 
+	// The actor as CBPC sees it; CBPC needs the actor's NPC record. Another
+	// one places a new reference for CBPC.
+	void SetCbpcActor(const std::optional<cbpc::ActorInfo>& info);
+
 	// Whether the next Update() with these arguments sets the actor up again
 	// (the worn models, the switches or the rest pose changed), which takes a
 	// moment.
-	bool NeedsSetup(bool animate, bool simulate, const MeshLookup& getMesh);
+	bool NeedsSetup(bool animate, bool simulate, bool cbpc, const MeshLookup& getMesh);
 
-	// Advances the actor by `dt` seconds: the animation if `animate`, FSMP if
-	// `simulate`. Writes posed vertices, normals and tangents into every
-	// visible registered mesh that `getMesh` still returns and queues them for
-	// upload; render, then call RestoreRestPose().
-	void Update(float dt, bool animate, bool simulate, const MeshLookup& getMesh);
+	// Advances the actor by `dt` seconds: CBPC if `cbpc`, the animation if
+	// `animate`, FSMP if `simulate`. Writes posed vertices, normals and
+	// tangents into every visible registered mesh that `getMesh` still returns
+	// and queues them for upload; render, then call RestoreRestPose().
+	void Update(float dt, bool animate, bool simulate, bool cbpc, const MeshLookup& getMesh);
 	void RestoreRestPose();
 	// Queues the rest pose of every registered mesh for upload to the GPU.
 	void QueueRestPoseUpload(const MeshLookup& getMesh);
@@ -124,6 +137,7 @@ private:
 		ModelKind kind = ModelKind::Armor;
 		WornCheck worn;
 		std::optional<fsmp::WornItem> item;
+		uint32_t itemFormId = 0;
 		std::vector<std::pair<std::string, Mesh*>> meshes; // every mesh loaded from the model
 	};
 
@@ -160,7 +174,8 @@ private:
 	void SamplePose(const Track& track, std::vector<hkx::QsTransform>& out);
 	void PruneMeshes(const MeshLookup& getMesh);
 	std::vector<bool> WornModels() const;
-	void BuildScene(const MeshLookup& getMesh, bool simulate);
+	void BuildScene(const MeshLookup& getMesh, bool simulate, bool cbpc);
+	void StepCbpc(float dt);
 	void PoseSkeleton();
 	// Skinning of one shape: PrepareSkin, SkinRange over all vertices (any
 	// thread, disjoint ranges), FinishSkin.
@@ -209,6 +224,12 @@ private:
 	bool sceneDirty = true;
 	bool sceneAnimated = false;
 	bool sceneSimulated = false;
+	bool sceneCbpc = false;
+
+	std::optional<cbpc::ActorInfo> cbpcInfo;
+	std::unique_ptr<cbpc::Actor> cbpcActor;
+	std::vector<fsmp::Node*> cbpcObjects; // the actor's 3D in the order CBPC's mirror has it
+	std::vector<cbpc::NodeTransforms> cbpcTransforms;
 	bool firstFrame = true;
 	std::vector<nifly::MatTransform> boneWorlds;
 };

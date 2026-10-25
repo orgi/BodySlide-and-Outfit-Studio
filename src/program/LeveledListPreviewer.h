@@ -197,8 +197,8 @@ class LeveledListPreviewer : public wxFrame {
 	std::unordered_map<std::string, std::vector<nifly::Vector3>> headGameVerts; // displayName ("_head_<shape>") → game verts
 	std::unordered_map<std::string, std::string> headShapeNifName_;				 // displayName → original NIF shape name
 
-	// The displayed actor in motion: idle animation and FSMP physics, each
-	// switched by its checkbox. Frames run while either is on, each one once
+	// The displayed actor in motion: idle animation, FSMP and CBPC physics,
+	// each switched by its checkbox. Frames run while one is on, each one once
 	// the event loop is idle (OnActorIdle), so input and repaints come first.
 	ActorAnimation actorAnim_;
 	wxTimer actorTimer_;
@@ -208,12 +208,15 @@ class LeveledListPreviewer : public wxFrame {
 	uint8_t ground_ = 0;								   // what the keys make the actor do on the ground
 	bool jumping_ = false;
 	wxCheckBox* smpToggle_ = nullptr;
+	wxCheckBox* cbpcToggle_ = nullptr;
 	wxCheckBox* animToggle_ = nullptr;
 	wxTextCtrl* clipText_ = nullptr;
 	wxButton* clipButton_ = nullptr;
 	wxCheckBox* pauseToggle_ = nullptr;
 	bool smpRunning_ = false;
+	bool cbpcRunning_ = false;
 	bool animRunning_ = false;
+	uint32_t cbpcNpcFormId_ = 0; // the shown NPC's FormID in the game's load order, 0 without one
 	// Actor the skeleton and clip were loaded for (currentHeadEditorId at load
 	// time) and a flag forcing a reload after the plugin data changed.
 	std::string animActorEditorId_;
@@ -290,6 +293,7 @@ public:
 	void OnToggleBody(wxCommandEvent& event);
 	void OnToggleWireframe(wxCommandEvent& event);
 	void OnToggleSmp(wxCommandEvent& event);
+	void OnToggleCbpc(wxCommandEvent& event);
 	void OnToggleAnim(wxCommandEvent& event);
 	void OnChooseClip(wxCommandEvent& event);
 	void OnTogglePause(wxCommandEvent& event);
@@ -413,6 +417,7 @@ private:
 		ID_Preset,
 		ID_HighWeight,
 		ID_ToggleSmp,
+		ID_ToggleCbpc,
 		ID_ToggleAnim,
 		ID_AnimClip,
 		ID_AnimPause,

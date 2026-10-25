@@ -15,6 +15,7 @@
 #include <NifFile.hpp>
 
 #include <filesystem>
+#include <functional>
 #include <random>
 #include <sstream>
 #include <system_error>
@@ -759,6 +760,37 @@ Node* Actor::FindNode(const std::string& name) const {
 void Actor::SetLocal(Node* node, const nifly::MatTransform& local) {
 	if (node)
 		reinterpret_cast<RE::NiAVObject*>(node)->local = ToNi(local);
+}
+
+std::vector<Actor::SceneObject> Actor::SceneGraph() const {
+	std::vector<SceneObject> objects;
+	if (!impl->root)
+		return objects;
+	std::function<void(RE::NiAVObject*, int)> visit = [&](RE::NiAVObject* object, int parent) {
+		const int index = static_cast<int>(objects.size());
+		auto* node = object->AsNode();
+		objects.push_back({reinterpret_cast<Node*>(object), parent, object->name.c_str(), node != nullptr});
+		if (!node)
+			return;
+		for (auto& child : node->GetChildren()) {
+			if (child)
+				visit(child.get(), index);
+		}
+	};
+	visit(impl->root.get(), -1);
+	return objects;
+}
+
+void Actor::GetTransforms(const Node* object, nifly::MatTransform& local, nifly::MatTransform& world) {
+	auto* av = reinterpret_cast<const RE::NiAVObject*>(object);
+	local = ToNifly(av->local);
+	world = ToNifly(av->world);
+}
+
+void Actor::SetTransforms(Node* object, const nifly::MatTransform& local, const nifly::MatTransform& world) {
+	auto* av = reinterpret_cast<RE::NiAVObject*>(object);
+	av->local = ToNi(local);
+	av->world = ToNi(world);
 }
 
 void Actor::UpdateWorld() {

@@ -1,6 +1,6 @@
 // Stand-in for the Microsoft Parallel Patterns Library on compilers without
-// it, for FSMP and Bullet's PPL task scheduler. The loops and tasks run in
-// order on the calling thread.
+// it, for FSMP, Bullet's PPL task scheduler and CBPC. The loops and tasks run
+// in order on the calling thread.
 #pragma once
 
 #include <functional>
@@ -31,6 +31,12 @@ namespace concurrency
 			a_function(*a_first);
 	}
 
+	template <class... Functions>
+	void parallel_invoke(const Functions&... a_functions)
+	{
+		(a_functions(), ...);
+	}
+
 	template <class T>
 	class task
 	{};
@@ -51,6 +57,12 @@ namespace concurrency
 		T combine(Function) const
 		{
 			return _value;
+		}
+
+		template <class Function>
+		void combine_each(Function a_function)
+		{
+			a_function(_value);
 		}
 
 		void clear() { _value = T(); }

@@ -11,6 +11,8 @@
 #include <cctype>
 #include <climits>
 #include <cstdio>
+#include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <map>
@@ -673,6 +675,7 @@ void LeveledListData::LoadRecordsFromESP(
 		wxLogWarning("LeveledListData: Failed to load %s", filepath);
 		return;
 	}
+	CacheEngineRecords(reader);
 
 	// Build FormID remapping table.
 	// This file's own records have top byte == len(its masters) → remap to globalPluginIdx.
@@ -1385,10 +1388,11 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 
 	// Load the main ESP first
 	esp::ESPReader mainReader;
-	if (!mainReader.Load(filepath, {"ARMO", "ARMA", "TXST", "LVLI", "OTFT", "HDPT"}))
+	if (!mainReader.Load(filepath, {"ARMO", "ARMA", "TXST", "LVLI", "OTFT", "HDPT", "KYWD", "FACT", "CLAS", "CSTY", "VTYP", "RACE", "NPC_"}))
 		return false;
 
 	espFilename = mainReader.GetFilename();
+	CacheEngineRecords(mainReader);
 
 	// Load master files. The main ESP's TES4 master list is a flat dependency
 	// declaration; its declared *order* is not authoritative for override
@@ -1490,7 +1494,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 			continue;
 		}
 
-		LoadRecordsFromESP(masterPath, {"ARMO", "ARMA", "TXST", "NPC_", "RACE", "HDPT", "OTFT", "LVLI"}, masterIdx, masters);
+		LoadRecordsFromESP(masterPath, {"ARMO", "ARMA", "TXST", "NPC_", "RACE", "HDPT", "OTFT", "LVLI", "KYWD", "FACT", "CLAS", "CSTY", "VTYP"}, masterIdx, masters);
 		++mastersLoaded;
 	}
 
@@ -2524,7 +2528,7 @@ uint16_t LeveledListData::EnsureDynamicMaster(const std::string& pluginPath, int
 	}
 	wxLogMessage("EnsureDynamicMaster: loading '%s' at globalPluginIdx=%u%s", pluginPath, static_cast<unsigned>(globalIdx), noClobber ? " (no-clobber)" : "");
 	dynamicMasters.push_back(pluginPath);
-	LoadRecordsFromESP(pluginPath, {"RACE", "ARMO", "ARMA", "TXST", "OTFT", "LVLI", "NPC_", "HDPT"}, globalIdx, espMasters, masterLoadDepth, noClobber);
+	LoadRecordsFromESP(pluginPath, {"RACE", "ARMO", "ARMA", "TXST", "OTFT", "LVLI", "NPC_", "HDPT", "KYWD", "FACT", "CLAS", "CSTY", "VTYP"}, globalIdx, espMasters, masterLoadDepth, noClobber);
 	return globalIdx;
 }
 
@@ -3044,6 +3048,262 @@ std::array<std::string, 8> LeveledListData::ResolveSkinTexturesForNPC(const std:
 	if (textures[0].empty())
 		wxLogMessage("ResolveSkinTexturesForNPC: no body textures found for '%s'", npcEditorId);
 	return textures;
+}
+
+// ---------------------------------------------------------------------------
+// Engine load order and records
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The record types CacheEngineRecords keeps; the loaders read them in addition to their own.
+const std::set<std::string> kEngineRecordTypes = {"KYWD", "FACT", "CLAS", "CSTY", "VTYP", "RACE", "NPC_", "ARMO"};
+
+// TES4 record flags of a plugin file; false if it isn't one.
+bool ReadPluginFlags(const std::string& path, uint32_t& flags) {
+	std::ifstream file(path, std::ios::binary);
+	char header[12];
+	if (!file.read(header, sizeof(header)) || std::string(header, 4) != "TES4")
+		return false;
+	flags = static_cast<uint32_t>(static_cast<unsigned char>(header[8])) | (static_cast<uint32_t>(static_cast<unsigned char>(header[9])) << 8) |
+			(static_cast<uint32_t>(static_cast<unsigned char>(header[10])) << 16) | (static_cast<uint32_t>(static_cast<unsigned char>(header[11])) << 24);
+	return true;
+}
+
+uint32_t ReadU32(const esp::Subrecord* subrecord, size_t offset = 0) {
+	if (!subrecord || subrecord->data.size() < offset + 4)
+		return 0;
+	uint32_t value;
+	std::memcpy(&value, subrecord->data.data() + offset, sizeof(value));
+	return value;
+}
+
+} // namespace
+
+const std::vector<EnginePlugin>& LeveledListData::GetEngineLoadOrder() {
+	if (engineLoadOrderBuilt)
+		return engineLoadOrder;
+	if (baseDataPath.empty()) {
+		wxLogError("LeveledListData: Engine load order: no game data folder");
+		return engineLoadOrder;
+	}
+	engineLoadOrderBuilt = true;
+
+	// Plugin files of the Data folder by lower-case name.
+	std::unordered_map<std::string, std::string> files;
+	std::error_code error;
+	for (std::filesystem::directory_iterator it(std::filesystem::path(baseDataPath), error), end; !error && it != end; it.increment(error)) {
+		const std::string name = it->path().filename().string();
+		const std::string ext = ToLower(it->path().extension().string());
+		if (ext == ".esp" || ext == ".esm" || ext == ".esl")
+			files[ToLower(name)] = name;
+	}
+	if (error)
+		wxLogError("LeveledListData: Engine load order: can't list '%s': %s", baseDataPath, error.message());
+
+	std::vector<std::string> names;
+	std::unordered_set<std::string> listed;
+	auto add = [&](std::string name) {
+		while (!name.empty() && (name.back() == '\r' || name.back() == ' '))
+			name.pop_back();
+		auto file = files.find(ToLower(name));
+		if (file != files.end() && listed.insert(file->first).second)
+			names.push_back(file->second);
+	};
+
+	static const char* baseGame[] = {"Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm"};
+	for (const char* name : baseGame)
+		add(name);
+
+	std::filesystem::path dataFolder(baseDataPath);
+	if (!dataFolder.has_filename())
+		dataFolder = dataFolder.parent_path();
+	const std::string ccc = ResolveCaseInsensitive(dataFolder.parent_path().string() + "/", "Skyrim.ccc");
+	if (!ccc.empty()) {
+		std::ifstream file(ccc);
+		std::string line;
+		while (std::getline(file, line))
+			add(line);
+	}
+
+	const std::string pluginsTxt = FindSkyrimPluginsTxt(baseDataPath);
+	if (pluginsTxt.empty())
+		wxLogError("LeveledListData: Engine load order: Plugins.txt not found; only the base game's and Creation Club plugins are active");
+	else {
+		std::ifstream file(pluginsTxt);
+		std::string line;
+		while (std::getline(file, line)) {
+			if (!line.empty() && line.front() == '*')
+				add(line.substr(1));
+		}
+	}
+
+	// Master files load before the others.
+	struct Entry {
+		std::string name;
+		bool master = false;
+		bool light = false;
+	};
+	std::vector<Entry> entries;
+	for (auto& name : names) {
+		uint32_t flags = 0;
+		if (!ReadPluginFlags(baseDataPath + (baseDataPath.back() == '/' || baseDataPath.back() == '\\' ? "" : "/") + name, flags)) {
+			wxLogError("LeveledListData: Engine load order: '%s' is no plugin; it is left out", name);
+			continue;
+		}
+		const std::string ext = ToLower(std::filesystem::path(name).extension().string());
+		entries.push_back({name, (flags & 0x1) != 0 || ext == ".esm" || ext == ".esl", (flags & 0x200) != 0 || ext == ".esl"});
+	}
+	std::stable_partition(entries.begin(), entries.end(), [](const Entry& entry) { return entry.master; });
+
+	uint32_t nextIndex = 0;
+	uint32_t nextLightIndex = 0;
+	size_t lightCount = 0;
+	for (auto& entry : entries) {
+		EnginePlugin plugin;
+		plugin.name = entry.name;
+		plugin.light = entry.light;
+		if (entry.light) {
+			if (nextLightIndex > 0xFFF) {
+				wxLogError("LeveledListData: Engine load order: more than 4096 light plugins; '%s' is left out", entry.name);
+				continue;
+			}
+			plugin.index = 0xFE;
+			plugin.lightIndex = static_cast<uint16_t>(nextLightIndex++);
+			lightCount++;
+		}
+		else {
+			if (nextIndex > 0xFD) {
+				wxLogError("LeveledListData: Engine load order: more than 254 plugins; '%s' is left out", entry.name);
+				continue;
+			}
+			plugin.index = static_cast<uint8_t>(nextIndex++);
+		}
+		enginePluginByName[ToLower(plugin.name)] = engineLoadOrder.size();
+		engineLoadOrder.push_back(std::move(plugin));
+	}
+	wxLogMessage("LeveledListData: Engine load order: %zu plugins (%zu light)", engineLoadOrder.size(), lightCount);
+	return engineLoadOrder;
+}
+
+uint32_t LeveledListData::EngineFormId(const std::string& plugin, uint32_t localFormId) {
+	GetEngineLoadOrder();
+	auto it = enginePluginByName.find(ToLower(plugin));
+	if (it == enginePluginByName.end())
+		return 0;
+	const EnginePlugin& p = engineLoadOrder[it->second];
+	if (p.light)
+		return 0xFE000000u | (static_cast<uint32_t>(p.lightIndex) << 12) | (localFormId & 0xFFFu);
+	return (static_cast<uint32_t>(p.index) << 24) | (localFormId & 0x00FFFFFFu);
+}
+
+uint32_t LeveledListData::EngineFormId(FormId formId) {
+	const std::string plugin = LookupGlobalPluginName(FormIdPlugin(formId));
+	return plugin.empty() ? 0 : EngineFormId(plugin, FormIdLocal(formId));
+}
+
+const EngineRecord* LeveledListData::FindEngineRecord(uint32_t engineFormId) const {
+	auto it = engineRecords.find(engineFormId);
+	return it != engineRecords.end() ? &it->second.record : nullptr;
+}
+
+uint32_t LeveledListData::FindEngineKeyword(const std::string& editorId) const {
+	auto it = engineKeywords.find(ToLower(editorId));
+	return it != engineKeywords.end() ? it->second.second : 0;
+}
+
+void LeveledListData::CacheEngineRecords(const esp::ESPReader& reader) {
+	GetEngineLoadOrder();
+	auto self = enginePluginByName.find(ToLower(reader.GetFilename()));
+	if (self == enginePluginByName.end())
+		return; // the engine doesn't load the plugin
+	const size_t rank = self->second;
+
+	const auto& masters = reader.GetMasters();
+	auto toEngine = [&](uint32_t fid) -> uint32_t {
+		const size_t topByte = fid >> 24;
+		return EngineFormId(topByte < masters.size() ? masters[topByte] : reader.GetFilename(), fid);
+	};
+
+	// Localized names whose strings are only in the archives.
+	const std::unordered_map<uint32_t, std::string>* strings = nullptr;
+	if (reader.IsLocalized() && reader.GetStringTable().empty()) {
+		auto& table = engineStrings[ToLower(reader.GetFilename())];
+		if (table.empty()) {
+			table = LoadStringsFromBSA(reader.GetFilename());
+			if (table.empty())
+				wxLogWarning("LeveledListData: %s is localized and has no .STRINGS file (loose or in an archive); the names of its records are empty for the engine records", reader.GetFilename());
+		}
+		strings = &table;
+	}
+	auto fullName = [&](const esp::Record& rec) -> std::string {
+		if (!strings)
+			return reader.ResolveFullName(rec);
+		auto* full = rec.GetSubrecord("FULL");
+		if (!full || full->data.size() < 4)
+			return {};
+		auto it = strings->find(ReadU32(full));
+		return it != strings->end() ? it->second : std::string();
+	};
+
+	for (auto& [localId, rec] : reader.GetRecords()) {
+		if (!kEngineRecordTypes.count(rec.type) || (rec.flags & 0x20) != 0)
+			continue;
+		const uint32_t formId = toEngine(rec.formId);
+		if (formId == 0)
+			continue;
+		auto existing = engineRecords.find(formId);
+		if (existing != engineRecords.end() && existing->second.rank > rank)
+			continue;
+
+		EngineRecord record;
+		record.type = rec.type;
+		record.formId = formId;
+		record.editorId = rec.EditorId();
+		// Overrides written by the Creation Kit can lack the editor ID; the engine keeps the record's.
+		if (record.editorId.empty() && existing != engineRecords.end())
+			record.editorId = existing->second.record.editorId;
+		if (rec.type == "NPC_" || rec.type == "RACE" || rec.type == "ARMO")
+			record.fullName = fullName(rec);
+		if (auto* kwda = rec.GetSubrecord("KWDA")) {
+			for (size_t offset = 0; offset + 4 <= kwda->data.size(); offset += 4) {
+				if (uint32_t keyword = toEngine(ReadU32(kwda, offset)))
+					record.keywords.push_back(keyword);
+			}
+		}
+		if (rec.type == "RACE")
+			record.flags = ReadU32(rec.GetSubrecord("DATA"), 32);
+		else if (rec.type == "NPC_") {
+			record.flags = ReadU32(rec.GetSubrecord("ACBS"));
+			auto reference = [&](const char* type) {
+				const uint32_t fid = ReadU32(rec.GetSubrecord(type));
+				return fid ? toEngine(fid) : 0;
+			};
+			record.race = reference("RNAM");
+			record.voiceType = reference("VTCK");
+			record.combatStyle = reference("ZNAM");
+			record.npcClass = reference("CNAM");
+			if (auto* nam7 = rec.GetSubrecord("NAM7"); nam7 && nam7->data.size() >= 4)
+				std::memcpy(&record.weight, nam7->data.data(), sizeof(record.weight));
+			for (auto* snam : rec.GetSubrecords("SNAM")) {
+				if (snam->data.size() < 5)
+					continue;
+				if (uint32_t faction = toEngine(ReadU32(snam)))
+					record.factions.emplace_back(faction, static_cast<int8_t>(snam->data[4]));
+			}
+		}
+		else if (rec.type == "ARMO") {
+			auto* bod2 = rec.GetSubrecord("BOD2");
+			record.bipedSlots = ReadU32(bod2 ? bod2 : rec.GetSubrecord("BODT"));
+		}
+
+		if (rec.type == "KYWD" && !record.editorId.empty()) {
+			auto& keyword = engineKeywords[ToLower(record.editorId)];
+			if (keyword.second == 0 || keyword.first <= rank)
+				keyword = {rank, formId};
+		}
+		engineRecords[formId] = {rank, std::move(record)};
+	}
 }
 
 } // namespace lldata

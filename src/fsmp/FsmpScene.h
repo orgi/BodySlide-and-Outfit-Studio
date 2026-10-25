@@ -104,6 +104,18 @@ public:
 	Node* FindNode(const std::string& name) const;
 	static void SetLocal(Node* node, const nifly::MatTransform& local);
 
+	// An object of the actor's 3D (nodes and geometry).
+	struct SceneObject {
+		Node* object = nullptr;
+		int parent = -1; // index in the list, -1 for the actor's root
+		std::string name;
+		bool isNode = true;
+	};
+	// The actor's 3D in depth-first order, parents before their children.
+	std::vector<SceneObject> SceneGraph() const;
+	static void GetTransforms(const Node* object, nifly::MatTransform& local, nifly::MatTransform& world);
+	static void SetTransforms(Node* object, const nifly::MatTransform& local, const nifly::MatTransform& world);
+
 	// Updates the world transforms of the whole actor from the local ones.
 	void UpdateWorld();
 	// One displayed frame for FSMP.

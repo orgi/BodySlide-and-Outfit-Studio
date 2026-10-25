@@ -17,6 +17,10 @@
 #include <unordered_set>
 #include <vector>
 
+namespace esp {
+class ESPReader;
+}
+
 namespace lldata {
 
 // Global FormID type. Encodes a record as `(globalPluginIdx << 24) | localId24`,
@@ -151,6 +155,34 @@ struct OutfitEntry {
 	// resolvedPieceCount == 0). Surfaced in the outfit-tree tooltip. Empty
 	// when the outfit is fully renderable.
 	std::string loadDiagnostics;
+};
+
+/// A plugin of the active load order, with the index the engine gives it.
+struct EnginePlugin {
+	std::string name;
+	bool light = false;		 // light plugins share index 0xFE and have a light index
+	uint8_t index = 0xFF;	 // 0xFE for light plugins
+	uint16_t lightIndex = 0; // light plugins only
+};
+
+/// A record as the engine has it once the active load order is loaded: the
+/// last plugin of the load order with the record wins. FormIDs are the ones
+/// the engine assigns (load order index in the top byte; for light plugins
+/// 0xFE, the light index and 12 bits of the record's own id).
+struct EngineRecord {
+	std::string type; // "KYWD", "NPC_", ...
+	uint32_t formId = 0;
+	std::string editorId;
+	std::string fullName;							   // NPC_, RACE, ARMO
+	std::vector<uint32_t> keywords;					   // KWDA: NPC_, RACE, ARMO
+	uint32_t flags = 0;								   // RACE: DATA flags; NPC_: ACBS flags
+	uint32_t bipedSlots = 0;						   // ARMO: bit n is biped slot 30 + n
+	uint32_t race = 0;								   // NPC_ RNAM
+	uint32_t voiceType = 0;							   // NPC_ VTCK
+	uint32_t combatStyle = 0;						   // NPC_ ZNAM
+	uint32_t npcClass = 0;							   // NPC_ CNAM
+	float weight = 0.0f;							   // NPC_ NAM7
+	std::vector<std::pair<uint32_t, int8_t>> factions; // NPC_ SNAM: faction, rank
 };
 
 class LeveledListData {
@@ -314,7 +346,24 @@ public:
 	/// "Load all NPCs" action because scanning every mod plugin is slow.
 	void LoadAllPluginNativeNPCs();
 
+	/// The active load order the way the engine loads it: the base game's
+	/// masters, the Creation Club plugins of Skyrim.ccc, the active plugins of
+	/// Plugins.txt; master files before the others.
+	const std::vector<EnginePlugin>& GetEngineLoadOrder();
+	/// The engine's FormID of a record defined in `plugin` (low 24 bits of
+	/// its id); 0 if the plugin is not in the active load order.
+	uint32_t EngineFormId(const std::string& plugin, uint32_t localFormId);
+	/// The engine's FormID of a record of the caches; 0 if its plugin is not in the active load order.
+	uint32_t EngineFormId(FormId formId);
+	/// Engine records of the types the loaded plugins were read with (KYWD,
+	/// FACT, CLAS, CSTY, VTYP, RACE, NPC_, ARMO). Null if no loaded plugin has it.
+	const EngineRecord* FindEngineRecord(uint32_t engineFormId) const;
+	/// The engine's FormID of the keyword with this editor ID (any case); 0 if there is none.
+	uint32_t FindEngineKeyword(const std::string& editorId) const;
+
 private:
+	/// Adds the engine records of a loaded plugin (see FindEngineRecord).
+	void CacheEngineRecords(const esp::ESPReader& reader);
 	/// Load records from a single ESP/ESM into the caches.
 	/// masterIndex: the index of this file in the main ESP's master list.
 	/// mainMasters: the master list of the main ESP, used to remap cross-references.
@@ -436,6 +485,18 @@ private:
 	// Keyed by NPC editorId. Cleared in LoadESP / LoadNPCs because OTFT FormIDs
 	// remapped into otftCache become stale on reload.
 	mutable std::unordered_map<std::string, OutfitEntry> npcOutfitCache;
+
+	// Engine load order and records. They don't depend on the main ESP and stay across LoadESP.
+	std::vector<EnginePlugin> engineLoadOrder;
+	bool engineLoadOrderBuilt = false;
+	std::unordered_map<std::string, size_t> enginePluginByName; // lower-case file name → position in engineLoadOrder
+	struct RankedEngineRecord {
+		size_t rank = 0; // position of the record's plugin in engineLoadOrder
+		EngineRecord record;
+	};
+	std::unordered_map<uint32_t, RankedEngineRecord> engineRecords;
+	std::unordered_map<std::string, std::pair<size_t, uint32_t>> engineKeywords; // lower-case editor ID → (rank, FormID)
+	std::unordered_map<std::string, std::unordered_map<uint32_t, std::string>> engineStrings; // lower-case plugin → strings from the archives
 };
 
 // Internal cache structs (defined in .cpp)

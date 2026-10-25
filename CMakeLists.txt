@@ -8,6 +8,7 @@ find_package(wxWidgets REQUIRED gl core base net xrc adv qa html propgrid)
 find_package(OpenGL REQUIRED)
 find_package(GLEW REQUIRED)
 include(src/fsmp/fsmp.cmake)
+include(src/cbpc/cbpc.cmake)
 set(fbxsdk_dir ../fbxsdk)
 find_library(fbxsdk fbxsdk PATHS ${fbxsdk_dir}/lib/release)
 
@@ -165,6 +166,7 @@ target_link_libraries(BodySlide
 	${OPENGL_LIBRARIES}
 	${GLEW_LIBRARIES}
 	fsmp
+	cbpc
 	xml2
 	z)
 
@@ -173,5 +175,6 @@ target_link_libraries(LeveledListViewer
 	${OPENGL_LIBRARIES}
 	${GLEW_LIBRARIES}
 	fsmp
+	cbpc
 	xml2
 	z)

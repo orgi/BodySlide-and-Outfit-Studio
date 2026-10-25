@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <optional>
@@ -129,6 +130,15 @@ LeveledListPreviewer::LeveledListPreviewer(wxEvtHandler* handler)
 	smpToggle_->SetToolTip(_("Simulate cloth, hair and body physics with FSMP, as configured by the meshes' physics XML files and defaultBBPs.xml"));
 	smpToggle_->Bind(wxEVT_CHECKBOX, &LeveledListPreviewer::OnToggleSmp, this);
 	smpSizer->Add(smpToggle_, 0, wxALIGN_CENTER_VERTICAL);
+	cbpcToggle_ = new wxCheckBox(leftPanel, ID_ToggleCbpc, _("CBPC Physics"));
+	if (cbpc::Available())
+		cbpcToggle_->SetToolTip(wxString::Format(_("Simulate body physics and collisions with CBPC %s, as configured by its files in Data/SKSE/Plugins; switching it on loads them again"), wxString::FromUTF8(cbpc::Version())));
+	else {
+		cbpcToggle_->SetToolTip(_("Built without CBPC: unpack CBPC's source archive into lib/CBPC and build again"));
+		cbpcToggle_->Disable();
+	}
+	cbpcToggle_->Bind(wxEVT_CHECKBOX, &LeveledListPreviewer::OnToggleCbpc, this);
+	smpSizer->Add(cbpcToggle_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 10);
 	animToggle_ = new wxCheckBox(leftPanel, ID_ToggleAnim, _("Animation"));
 	animToggle_->SetToolTip(_("Play an animation of the actor's character, resolved through the race's behavior project (default: the idle MT_Idle)"));
 	animToggle_->Bind(wxEVT_CHECKBOX, &LeveledListPreviewer::OnToggleAnim, this);
@@ -384,6 +394,10 @@ void LeveledListPreviewer::OnShown() {
 	if (Config["SmpEnabled"] == "true" && smpToggle_) {
 		smpToggle_->SetValue(true);
 		smpRunning_ = true;
+	}
+	if (Config["CbpcEnabled"] == "true" && cbpcToggle_ && cbpcToggle_->IsEnabled()) {
+		cbpcToggle_->SetValue(true);
+		cbpcRunning_ = true;
 	}
 	UpdateActorMotion();
 }
@@ -3392,7 +3406,7 @@ void LeveledListPreviewer::LoadOutfitPieceShapes(const lldata::OutfitEntry& outf
 	}
 	actorAnim_.RegisterModel(nif, piecePath, ActorAnimation::ModelKind::Armor, modelMeshes, [this, path = piece.useAnyPath]() {
 		return path.empty() || IsUseAnyPathActive(path);
-	}, item);
+	}, item, data.EngineFormId(piece.formId));
 }
 
 void LeveledListPreviewer::ApplyUseAnyVisibility() {
@@ -3718,6 +3732,7 @@ void LeveledListPreviewer::MouseWheel(int dW) {
 void LeveledListPreviewer::OnClose(wxCloseEvent& WXUNUSED(event)) {
 	animRunning_ = false;
 	smpRunning_ = false;
+	cbpcRunning_ = false;
 	actorMotion_ = false;
 	actorTimer_.Stop();
 
@@ -3810,10 +3825,41 @@ std::string LeveledListPreviewer::FindSkeletonNifPath() {
 }
 
 // ---------------------------------------------------------------------------
-// Actor motion: idle animation and FSMP physics
+// Actor motion: idle animation, FSMP and CBPC physics
 // ---------------------------------------------------------------------------
 
 namespace {
+
+// An engine record as CBPC reads it.
+bool ToCbpcForm(const lldata::EngineRecord* record, cbpc::Form& form) {
+	if (!record)
+		return false;
+	static const std::map<std::string, cbpc::Form::Type> types = {
+		{"KYWD", cbpc::Form::Type::Keyword},
+		{"FACT", cbpc::Form::Type::Faction},
+		{"CLAS", cbpc::Form::Type::Class},
+		{"CSTY", cbpc::Form::Type::CombatStyle},
+		{"VTYP", cbpc::Form::Type::VoiceType},
+		{"RACE", cbpc::Form::Type::Race},
+		{"NPC_", cbpc::Form::Type::Npc},
+		{"ARMO", cbpc::Form::Type::Armor},
+	};
+	auto type = types.find(record->type);
+	form.type = type != types.end() ? type->second : cbpc::Form::Type::Other;
+	form.formId = record->formId;
+	form.editorId = record->editorId;
+	form.fullName = record->fullName;
+	form.keywords = record->keywords;
+	form.flags = record->flags;
+	form.bipedSlots = record->bipedSlots;
+	form.race = record->race;
+	form.voiceType = record->voiceType;
+	form.combatStyle = record->combatStyle;
+	form.npcClass = record->npcClass;
+	form.weight = record->weight;
+	form.factions = record->factions;
+	return true;
+}
 
 // Data-relative model path ("meshes/...") back to the form a record stores it in.
 std::string RecordModelPath(const std::string& meshesPath) {
@@ -4004,10 +4050,14 @@ bool LeveledListPreviewer::LoadAnimationActor(bool& pending) {
 
 		info.npcFormId = npc->formId;
 		info.name = npc->fullName;
+		cbpcNpcFormId_ = data.EngineFormId(npc->plugin, npc->formId);
+		if (cbpcNpcFormId_ == 0)
+			wxLogError("LeveledListPreviewer: Actor: NPC '%s' is from '%s', which is not in the game's active load order; CBPC doesn't see the actor", currentHeadEditorId, npc->plugin);
 		for (int sex = 0; sex < 2; sex++)
 			info.raceSkeleton[sex] = RecordModelPath(data.GetRaceAnimationFiles(race.formId, sex == 1).skeletonNif);
 	}
 	else {
+		cbpcNpcFormId_ = 0;
 		// Without an NPC the outfit is shown on the vanilla female body (see
 		// LoadBodyMeshes), so the vanilla female actor files drive it.
 		files.skeletonNif = "meshes/actors/character/character assets female/skeleton_female.nif";
@@ -4024,6 +4074,17 @@ bool LeveledListPreviewer::LoadAnimationActor(bool& pending) {
 		baseGamePath += '/';
 	std::string configsFile = lldata::LeveledListData::ResolveCaseInsensitive(baseGamePath, "SKSE/Plugins/hdtSkinnedMeshConfigs/configs.xml");
 	ActorAnimation::InitialisePhysics(readFile, configsFile);
+
+	// CBPC reads its configs from Data/SKSE/Plugins and the actor's records from the load order.
+	if (cbpc::Available()) {
+		cbpc::GameData cbpcData;
+		for (auto& plugin : data.GetEngineLoadOrder())
+			cbpcData.loadOrder.push_back({plugin.name, plugin.light, plugin.index, plugin.lightIndex});
+		cbpcData.findForm = [this](uint32_t formId, cbpc::Form& form) { return ToCbpcForm(data.FindEngineRecord(formId), form); };
+		cbpcData.findKeyword = [this](const std::string& editorId) { return data.FindEngineKeyword(editorId); };
+		const std::string gameFolder = std::filesystem::path(baseGamePath).parent_path().parent_path().string();
+		ActorAnimation::InitialiseCbpc(std::move(cbpcData), gameFolder);
+	}
 
 	bool loaded = actorAnim_.LoadActor(files.skeletonNif, files.behaviorProject, info, Config["AnimClip"], readFile);
 	RestartMovement();
@@ -4181,7 +4242,7 @@ void LeveledListPreviewer::OnTogglePause(wxCommandEvent& event) {
 }
 
 void LeveledListPreviewer::UpdateActorMotion() {
-	const bool running = animRunning_ || smpRunning_;
+	const bool running = animRunning_ || smpRunning_ || cbpcRunning_;
 	if (running && !actorMotion_) {
 		// The first frame starts from OnActorIdle.
 		actorMotion_ = true;
@@ -4197,19 +4258,32 @@ void LeveledListPreviewer::UpdateActorMotion() {
 		gls.RenderOneFrame();
 	}
 
-	if (animRunning_ && smpRunning_)
-		SetStatusText(_("Animation and SMP physics active"));
-	else if (animRunning_)
-		SetStatusText(_("Animation active"));
-	else if (smpRunning_)
-		SetStatusText(_("SMP physics active"));
-	else
-		SetStatusText(_("Animation and SMP physics stopped"));
+	std::vector<wxString> active;
+	if (animRunning_)
+		active.push_back(_("Animation"));
+	if (smpRunning_)
+		active.push_back(_("SMP physics"));
+	if (cbpcRunning_)
+		active.push_back(_("CBPC physics"));
+	if (active.empty()) {
+		SetStatusText(_("Animation and physics stopped"));
+		return;
+	}
+	wxString text = active[0];
+	for (size_t i = 1; i < active.size(); i++)
+		text += (i + 1 == active.size() ? _(" and ") : wxString(", ")) + active[i];
+	SetStatusText(wxString::Format(_("%s active"), text));
 }
 
 void LeveledListPreviewer::OnToggleSmp(wxCommandEvent& event) {
 	Config.SetValue("SmpEnabled", event.IsChecked() ? "true" : "false");
 	smpRunning_ = event.IsChecked();
+	UpdateActorMotion();
+}
+
+void LeveledListPreviewer::OnToggleCbpc(wxCommandEvent& event) {
+	Config.SetValue("CbpcEnabled", event.IsChecked() ? "true" : "false");
+	cbpcRunning_ = event.IsChecked();
 	UpdateActorMotion();
 }
 
@@ -4268,16 +4342,22 @@ void LeveledListPreviewer::ActorFrame() {
 	if (!actorAnim_.IsLoaded())
 		return;
 
+	// CBPC sees the NPC with the weight the body is shown with.
+	if (cbpcNpcFormId_)
+		actorAnim_.SetCbpcActor(cbpc::ActorInfo{cbpcNpcFormId_, useHighWeight ? 100.0f : 0.0f});
+	else
+		actorAnim_.SetCbpcActor(std::nullopt);
+
 	// Setting the actor up again (other models or switches) takes a moment.
 	std::optional<wxBusyCursor> busy;
-	if (actorAnim_.NeedsSetup(animRunning_, smpRunning_, getMesh))
+	if (actorAnim_.NeedsSetup(animRunning_, smpRunning_, cbpcRunning_, getMesh))
 		busy.emplace();
 
 	auto now = std::chrono::steady_clock::now();
 	float dt = std::chrono::duration<float>(now - animLastTick_).count();
 	animLastTick_ = now;
 
-	actorAnim_.Update(dt, animRunning_, smpRunning_, getMesh);
+	actorAnim_.Update(dt, animRunning_, smpRunning_, cbpcRunning_, getMesh);
 	gls.RenderOneFrame();
 	actorAnim_.RestoreRestPose();
 }
