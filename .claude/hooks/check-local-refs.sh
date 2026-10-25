@@ -29,8 +29,11 @@ esac
 
 violations=""
 
-# Absolute paths — Unix prefixes and Windows drive letters.
-abs_hits=$(grep -nE '/home/|/Users/|/Volumes/|/mnt/|/tmp/|/var/|[A-Za-z]:\\' "$file_path" 2>/dev/null | head -n 10)
+# Absolute paths — Unix prefixes and Windows drive letters. The drive-letter
+# pattern requires a word boundary before the letter AND a path separator
+# (\ or /) immediately after the colon, so an ordinary "foo:\n" or "host:8080"
+# in a string literal doesn't false-trip.
+abs_hits=$(grep -nE '/home/|/Users/|/Volumes/|/mnt/|/tmp/|/var/|(^|[^A-Za-z0-9_])[A-Za-z]:[\\/]' "$file_path" 2>/dev/null | head -n 10)
 if [ -n "$abs_hits" ]; then
 	violations="${violations}Absolute paths found:
 $abs_hits
