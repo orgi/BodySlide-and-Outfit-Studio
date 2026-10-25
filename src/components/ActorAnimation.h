@@ -76,11 +76,19 @@ public:
 	bool LoadClip(const std::string& name);
 	// Holds the animation at its current time; physics keeps running.
 	void SetPaused(bool pause) { paused = pause; }
-	// Plays the character's animations with these file names (e.g.
-	// "MT_RunForward.hkx") instead of the chosen one: one after the other, the
-	// last one looping, also while paused. An empty list returns to the chosen
-	// animation where it left off. Logs file names the character doesn't list.
-	void SetTemporaryClips(const std::vector<std::string>& fileNames);
+
+	// One animation of a sequence played instead of the chosen one.
+	struct SequenceStep {
+		std::string fileName; // in the character's animations, e.g. "MT_Jump.hkx"
+		float blend = 0.0f;	  // seconds it blends in over the pose before it, like the game's transitions
+		bool sync = false;	  // starts at the phase the animation before it had reached
+	};
+	// Plays `steps` instead of the chosen animation, each once, also while
+	// paused. Then the last step loops, or with `loopLast` false the chosen
+	// animation blends back in over `returnBlend` seconds where it left off.
+	// Without steps the chosen animation blends back in right away. Logs file
+	// names the character doesn't list; those steps are left out.
+	void PlaySequence(const std::vector<SequenceStep>& steps, bool loopLast, float returnBlend);
 
 	// Hands the NIF that the meshes in `shapes` were loaded from to the actor.
 	// Skinned shapes are posed; unskinned ones stay static.
@@ -134,7 +142,22 @@ private:
 
 	// Reads one of the character's animations and checks it against the rig. Logs every failure.
 	bool ReadClip(const std::string& name, hkx::SplineAnimation& out);
-	bool Animates() const { return clipLoaded || !temporaryClips.empty(); }
+	bool Animates() const { return clipLoaded || sequenceActive; }
+
+	// An animation at a point in time; times past the end of a track that
+	// doesn't loop hold its last frame. No clip: the rig's reference pose.
+	struct Track {
+		const hkx::SplineAnimation* clip = nullptr;
+		float time = 0.0f;
+		bool loop = true;
+	};
+	const hkx::SplineAnimation* SequenceClip(const std::string& fileName);
+	Track CurrentTrack() const;
+	// Blends from `from` (which keeps playing) to what plays next; a blend in
+	// progress is frozen at its current pose instead.
+	void BeginBlend(const Track& from, float duration);
+	void Advance(float dt);
+	void SamplePose(const Track& track, std::vector<hkx::QsTransform>& out);
 	void PruneMeshes(const MeshLookup& getMesh);
 	std::vector<bool> WornModels() const;
 	void BuildScene(const MeshLookup& getMesh, bool simulate);
@@ -161,11 +184,20 @@ private:
 	hkx::SplineAnimation clip;
 	float clock = 0.0f;
 	std::unordered_map<std::string, std::string> clipByFileName; // lower-case file name → name in clipNames
-	std::unordered_map<std::string, hkx::SplineAnimation> temporaryCache; // by name in clipNames
-	std::vector<std::string> temporaryFileNames;
-	std::vector<const hkx::SplineAnimation*> temporaryClips;
-	size_t temporaryIndex = 0;
-	float temporaryClock = 0.0f;
+	std::unordered_map<std::string, hkx::SplineAnimation> sequenceCache; // by name in clipNames
+	std::vector<std::pair<SequenceStep, const hkx::SplineAnimation*>> sequence;
+	bool sequenceActive = false; // a step plays instead of the chosen animation
+	size_t sequenceIndex = 0;
+	float stepTime = 0.0f;
+	bool sequenceLoopLast = true;
+	float sequenceReturnBlend = 0.0f;
+	Track blendFrom;
+	bool blendFromFrozen = false;
+	std::vector<hkx::QsTransform> blendFromPose;
+	float blendTime = 0.0f;
+	float blendDuration = 0.0f; // 0: no blend
+	std::vector<hkx::QsTransform> pose; // per rig bone, last posed
+	std::vector<hkx::QsTransform> targetPose, fromPose;
 	std::vector<hkx::QsTransform> samples;
 
 	std::vector<std::unique_ptr<Model>> models;

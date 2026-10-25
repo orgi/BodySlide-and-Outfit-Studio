@@ -205,6 +205,8 @@ class LeveledListPreviewer : public wxFrame {
 	bool actorMotion_ = false;
 	std::chrono::steady_clock::time_point actorFrameTime_; // start of the last frame
 	uint8_t movementKeys_ = 0;							   // held movement keys (MovementKey)
+	uint8_t ground_ = 0;								   // what the keys make the actor do on the ground
+	bool jumping_ = false;
 	wxCheckBox* smpToggle_ = nullptr;
 	wxCheckBox* animToggle_ = nullptr;
 	wxTextCtrl* clipText_ = nullptr;
@@ -393,8 +395,13 @@ private:
 	void RefreshClipChoice();
 	// Plays one of the actor's animations and turns the animation on.
 	void PlayClip(const std::string& name);
-	// Plays the animations of the held movement keys in place of the chosen one.
-	void UpdateMovementClips();
+	// The actor following the movement keys with the game's animations and
+	// transitions: moving or sneaking on the ground, jumping, landing.
+	void MoveOnGround();
+	void Jump();
+	void Land();
+	// Plays what the held movement keys play, without transitions (new actor).
+	void RestartMovement();
 
 	enum {
 		ID_LoadESP = wxID_HIGHEST + 500,

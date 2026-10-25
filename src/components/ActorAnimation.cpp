@@ -59,6 +59,36 @@ MatTransform ToMatTransform(const hkx::QsTransform& t) {
 	return m;
 }
 
+// a + (b - a) * w per bone; rotations normalized after interpolating on the
+// shorter arc.
+void BlendTransform(const hkx::QsTransform& a, const hkx::QsTransform& b, float w, hkx::QsTransform& out) {
+	for (int i = 0; i < 3; i++) {
+		out.translation[i] = a.translation[i] + (b.translation[i] - a.translation[i]) * w;
+		out.scale[i] = a.scale[i] + (b.scale[i] - a.scale[i]) * w;
+	}
+	float dot = 0.0f;
+	for (int i = 0; i < 4; i++)
+		dot += a.rotation[i] * b.rotation[i];
+	const float sign = dot < 0.0f ? -1.0f : 1.0f;
+	float length = 0.0f;
+	for (int i = 0; i < 4; i++) {
+		out.rotation[i] = a.rotation[i] + (sign * b.rotation[i] - a.rotation[i]) * w;
+		length += out.rotation[i] * out.rotation[i];
+	}
+	length = std::sqrt(length);
+	for (int i = 0; i < 4 && length > 0.0f; i++)
+		out.rotation[i] /= length;
+}
+
+// Time in `to` at the phase `from` has reached.
+float SyncedTime(const hkx::SplineAnimation* from, float fromTime, bool fromLoops, const hkx::SplineAnimation& to) {
+	if (!from || from->Duration() <= 0.0f)
+		return 0.0f;
+	const float duration = from->Duration();
+	const float phase = fromLoops ? std::fmod(fromTime, duration) / duration : std::min(fromTime / duration, 1.0f);
+	return phase * to.Duration();
+}
+
 // Vertices skinned per work item when shapes are posed in parallel.
 constexpr int kSkinChunk = 8192;
 
@@ -143,11 +173,15 @@ void ActorAnimation::ClearActor() {
 	clip = {};
 	clock = 0.0f;
 	clipByFileName.clear();
-	temporaryCache.clear();
-	temporaryFileNames.clear();
-	temporaryClips.clear();
-	temporaryIndex = 0;
-	temporaryClock = 0.0f;
+	sequenceCache.clear();
+	sequence.clear();
+	sequenceActive = false;
+	sequenceIndex = 0;
+	stepTime = 0.0f;
+	blendFrom = {};
+	blendFromPose.clear();
+	blendDuration = 0.0f;
+	pose.clear();
 	sceneDirty = true;
 }
 
@@ -283,30 +317,123 @@ bool ActorAnimation::LoadClip(const std::string& name) {
 	return true;
 }
 
-void ActorAnimation::SetTemporaryClips(const std::vector<std::string>& fileNames) {
-	if (fileNames == temporaryFileNames)
-		return;
-	temporaryFileNames = fileNames;
-	temporaryClips.clear();
-	temporaryIndex = 0;
-	temporaryClock = 0.0f;
+const hkx::SplineAnimation* ActorAnimation::SequenceClip(const std::string& fileName) {
 	if (rig.boneNames.empty() || !readGameFile)
-		return;
+		return nullptr;
+	auto found = clipByFileName.find(ToLower(fileName));
+	if (found == clipByFileName.end()) {
+		wxLogError("ActorAnimation: The actor's character (%s) lists no animation '%s'", projectDir, fileName);
+		return nullptr;
+	}
+	auto cached = sequenceCache.find(found->second);
+	if (cached == sequenceCache.end()) {
+		hkx::SplineAnimation loaded;
+		if (!ReadClip(found->second, loaded))
+			return nullptr;
+		cached = sequenceCache.emplace(found->second, std::move(loaded)).first;
+	}
+	return &cached->second;
+}
 
-	for (auto& fileName : fileNames) {
-		auto found = clipByFileName.find(ToLower(fileName));
-		if (found == clipByFileName.end()) {
-			wxLogError("ActorAnimation: The actor's character (%s) lists no animation '%s'", projectDir, fileName);
-			continue;
-		}
-		auto cached = temporaryCache.find(found->second);
-		if (cached == temporaryCache.end()) {
-			hkx::SplineAnimation loaded;
-			if (!ReadClip(found->second, loaded))
-				continue;
-			cached = temporaryCache.emplace(found->second, std::move(loaded)).first;
-		}
-		temporaryClips.push_back(&cached->second);
+ActorAnimation::Track ActorAnimation::CurrentTrack() const {
+	if (sequenceActive)
+		return {sequence[sequenceIndex].second, stepTime, sequenceLoopLast && sequenceIndex + 1 == sequence.size()};
+	return {clipLoaded ? &clip : nullptr, clock, true};
+}
+
+void ActorAnimation::BeginBlend(const Track& from, float duration) {
+	if (blendDuration > 0.0f) {
+		blendFromPose = pose;
+		blendFromFrozen = true;
+	}
+	else {
+		blendFrom = from;
+		blendFromFrozen = false;
+	}
+	blendTime = 0.0f;
+	// Nothing posed yet: nothing to blend from.
+	blendDuration = pose.empty() ? 0.0f : std::max(0.0f, duration);
+}
+
+void ActorAnimation::PlaySequence(const std::vector<SequenceStep>& steps, bool loopLast, float returnBlend) {
+	std::vector<std::pair<SequenceStep, const hkx::SplineAnimation*>> playable;
+	for (auto& step : steps) {
+		if (const hkx::SplineAnimation* stepClip = SequenceClip(step.fileName))
+			playable.emplace_back(step, stepClip);
+	}
+
+	const Track before = CurrentTrack();
+	sequence = std::move(playable);
+	sequenceIndex = 0;
+	sequenceLoopLast = loopLast;
+	sequenceReturnBlend = returnBlend;
+	if (sequence.empty()) {
+		if (sequenceActive)
+			BeginBlend(before, returnBlend);
+		sequenceActive = false;
+		return;
+	}
+
+	const auto& [first, firstClip] = sequence.front();
+	BeginBlend(before, first.blend);
+	stepTime = first.sync ? SyncedTime(before.clip, before.time, before.loop, *firstClip) : 0.0f;
+	sequenceActive = true;
+}
+
+void ActorAnimation::Advance(float dt) {
+	if (blendDuration > 0.0f) {
+		// The animation blended out keeps playing during the blend.
+		blendFrom.time += dt;
+		blendTime += dt;
+		if (blendTime >= blendDuration)
+			blendDuration = 0.0f;
+	}
+
+	if (!sequenceActive) {
+		if (!paused)
+			clock = clip.Duration() > 0.0f ? std::fmod(clock + dt, clip.Duration()) : 0.0f;
+		return;
+	}
+
+	stepTime += dt;
+	const float duration = sequence[sequenceIndex].second->Duration();
+	const bool last = sequenceIndex + 1 == sequence.size();
+	if (stepTime < duration)
+		return;
+	if (last && sequenceLoopLast) {
+		stepTime = duration > 0.0f ? std::fmod(stepTime, duration) : 0.0f;
+		return;
+	}
+
+	const Track ended = CurrentTrack();
+	if (last) {
+		BeginBlend(ended, sequenceReturnBlend);
+		sequenceActive = false;
+		return;
+	}
+	sequenceIndex++;
+	const auto& [next, nextClip] = sequence[sequenceIndex];
+	BeginBlend(ended, next.blend);
+	stepTime = next.sync ? SyncedTime(ended.clip, ended.time, ended.loop, *nextClip) : 0.0f;
+}
+
+void ActorAnimation::SamplePose(const Track& track, std::vector<hkx::QsTransform>& out) {
+	// Bones without a track keep the rig's reference pose, as Havok samples them.
+	out = rig.referencePose;
+	if (!track.clip)
+		return;
+	const float duration = track.clip->Duration();
+	float time = track.time;
+	if (track.loop)
+		time = duration > 0.0f ? std::fmod(time, duration) : 0.0f;
+	else
+		time = std::min(time, duration);
+	track.clip->Sample(time, samples);
+	const auto& trackToBone = track.clip->TrackToBone();
+	for (size_t t = 0; t < samples.size(); t++) {
+		size_t bone = trackToBone.empty() ? t : static_cast<size_t>(trackToBone[t]);
+		if (bone < out.size())
+			out[bone] = samples[t];
 	}
 }
 
@@ -518,20 +645,24 @@ void ActorAnimation::BuildScene(const MeshLookup& getMesh, bool simulate) {
 }
 
 void ActorAnimation::PoseSkeleton() {
-	// Bones without a track keep the rig's reference pose, as Havok samples them.
-	for (size_t b = 0; b < rig.boneNames.size(); b++) {
-		if (rigToNode[b])
-			fsmp::Actor::SetLocal(rigToNode[b], ToMatTransform(rig.referencePose[b]));
+	SamplePose(CurrentTrack(), targetPose);
+	if (blendDuration > 0.0f) {
+		if (!blendFromFrozen)
+			SamplePose(blendFrom, fromPose);
+		const std::vector<hkx::QsTransform>& from = blendFromFrozen ? blendFromPose : fromPose;
+		// Havok's smooth blend curve.
+		const float x = std::clamp(blendTime / blendDuration, 0.0f, 1.0f);
+		const float w = x * x * (3.0f - 2.0f * x);
+		pose.resize(targetPose.size());
+		for (size_t b = 0; b < targetPose.size() && b < from.size(); b++)
+			BlendTransform(from[b], targetPose[b], w, pose[b]);
 	}
+	else
+		pose = targetPose;
 
-	const bool temporary = !temporaryClips.empty();
-	const hkx::SplineAnimation& playing = temporary ? *temporaryClips[temporaryIndex] : clip;
-	playing.Sample(temporary ? temporaryClock : clock, samples);
-	const auto& trackToBone = playing.TrackToBone();
-	for (size_t t = 0; t < samples.size(); t++) {
-		size_t bone = trackToBone.empty() ? t : static_cast<size_t>(trackToBone[t]);
-		if (bone < rigToNode.size() && rigToNode[bone])
-			fsmp::Actor::SetLocal(rigToNode[bone], ToMatTransform(samples[t]));
+	for (size_t b = 0; b < rig.boneNames.size() && b < pose.size(); b++) {
+		if (rigToNode[b])
+			fsmp::Actor::SetLocal(rigToNode[b], ToMatTransform(pose[b]));
 	}
 }
 
@@ -632,20 +763,7 @@ void ActorAnimation::Update(float dt, bool animate, bool simulate, const MeshLoo
 	auto start = std::chrono::steady_clock::now();
 
 	if (animate) {
-		if (!temporaryClips.empty()) {
-			// Each temporary animation plays once, the last one loops.
-			temporaryClock += dt;
-			while (temporaryIndex + 1 < temporaryClips.size() && temporaryClock >= temporaryClips[temporaryIndex]->Duration()) {
-				temporaryClock -= temporaryClips[temporaryIndex]->Duration();
-				temporaryIndex++;
-			}
-			if (temporaryIndex + 1 == temporaryClips.size()) {
-				const float duration = temporaryClips.back()->Duration();
-				temporaryClock = duration > 0.0f ? std::fmod(temporaryClock, duration) : 0.0f;
-			}
-		}
-		else if (!paused)
-			clock = clip.Duration() > 0.0f ? std::fmod(clock + dt, clip.Duration()) : 0.0f;
+		Advance(dt);
 		PoseSkeleton();
 	}
 	actor->UpdateWorld();

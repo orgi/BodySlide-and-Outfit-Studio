@@ -3849,15 +3849,37 @@ uint8_t MovementKeyBitOf(int keyCode) {
 	}
 }
 
-// The animations (file names) the game plays for the held movement keys,
-// unarmed and running (the game's default): a jump, else running or sneaking
-// in the held direction, else sneaking in place. None without such keys.
-std::vector<std::string> MovementClips(uint8_t keys) {
-	if (keys & MoveJump)
-		return {"MT_Jump.hkx", "MT_JumpFall.hkx"};
+// Blend durations of the game's transitions, vanilla values of the behavior
+// graphs (mt_behavior.hkx, 0_master.hkx).
+constexpr float kBlendMoveStart = 0.2f;	  // moveStart: moveStartTransition (blendMoveStart)
+constexpr float kBlendMoveStop = 0.3f;	  // moveStop: moveStopTransition (blendMoveStop)
+constexpr float kBlendSneak = 0.2f;		  // SneakStart, SneakStop: DefaultSyncBlendTransition
+constexpr float kBlendDirection = 0.2f;	  // another direction while moving: the game's directional blend, synchronized
+constexpr float kBlendJumpStart = 0.2f;	  // JumpStandingStart, JumpDirectionalStart (blendDefault)
+constexpr float kBlendJumpFall = 0.5f;	  // JumpFall: JumpFallBlend
+constexpr float kBlendJumpLand = 0.1f;	  // JumpLand: JumpLandBlend
+constexpr float kBlendJumpLandEnd = 0.6f; // JumpLandEnd: JumpBlendTransitionEffect (BlendJump)
 
-	const int forward = ((keys & MoveForward) ? 1 : 0) - ((keys & MoveBack) ? 1 : 0);
-	const int right = ((keys & MoveRight) ? 1 : 0) - ((keys & MoveLeft) ? 1 : 0);
+// What the held keys make the actor do on the ground: the direction and
+// sneak bits, opposite directions cancelling out.
+uint8_t GroundOf(uint8_t keys) {
+	uint8_t ground = keys & (MoveForward | MoveBack | MoveLeft | MoveRight | MoveSneak);
+	if ((ground & MoveForward) && (ground & MoveBack))
+		ground &= ~(MoveForward | MoveBack);
+	if ((ground & MoveLeft) && (ground & MoveRight))
+		ground &= ~(MoveLeft | MoveRight);
+	return ground;
+}
+
+bool Moving(uint8_t ground) {
+	return (ground & (MoveForward | MoveBack | MoveLeft | MoveRight)) != 0;
+}
+
+// The animation (file name) the game plays on the ground, unarmed and running
+// (the game's default); empty when standing, which shows the chosen animation.
+std::string GroundClip(uint8_t ground) {
+	const int forward = ((ground & MoveForward) ? 1 : 0) - ((ground & MoveBack) ? 1 : 0);
+	const int right = ((ground & MoveRight) ? 1 : 0) - ((ground & MoveLeft) ? 1 : 0);
 	// By (forward + 1) * 3 + (right + 1).
 	static const char* const run[9] = {
 		"MT_RunBackwardLeft.hkx", "MT_RunBackward.hkx", "MT_RunBackwardRight.hkx",
@@ -3867,10 +3889,20 @@ std::vector<std::string> MovementClips(uint8_t keys) {
 		"SneakRun_BckwrdLeft.hkx", "SneakRun_Backward.hkx", "SneakRun_BckwrdRight.hkx",
 		"SneakRun_Left.hkx", "SneakMTIdle.hkx", "SneakRun_Right.hkx",
 		"SneakRun_FrwrdLeft.hkx", "SneakRun_Forward.hkx", "SneakRun_FrwrdRight.hkx"};
-	const char* clip = ((keys & MoveSneak) ? sneak : run)[(forward + 1) * 3 + (right + 1)];
-	if (!clip)
-		return {};
-	return {clip};
+	const char* clip = ((ground & MoveSneak) ? sneak : run)[(forward + 1) * 3 + (right + 1)];
+	return clip ? clip : std::string();
+}
+
+// The game's jump animations (start, fall, land): standing, or directional
+// with its sideways variants.
+std::array<const char*, 3> JumpClips(uint8_t ground) {
+	if (!Moving(ground))
+		return {"MT_Jump.hkx", "MT_JumpFall.hkx", "MT_JumpLand.hkx"};
+	if (!(ground & (MoveForward | MoveBack)) && (ground & MoveLeft))
+		return {"Mt_JumpFastLeft.hkx", "MT_JumpFallLeft.hkx", "MT_JumpLandLeft.hkx"};
+	if (!(ground & (MoveForward | MoveBack)) && (ground & MoveRight))
+		return {"Mt_JumpFastRight.hkx", "MT_JumpFallRight.hkx", "MT_JumpLandRight.hkx"};
+	return {"MT_JumpFast.hkx", "MT_JumpFall.hkx", "MT_JumpLand.hkx"};
 }
 
 std::string LowerAscii(std::string text) {
@@ -3994,7 +4026,7 @@ bool LeveledListPreviewer::LoadAnimationActor(bool& pending) {
 	ActorAnimation::InitialisePhysics(readFile, configsFile);
 
 	bool loaded = actorAnim_.LoadActor(files.skeletonNif, files.behaviorProject, info, Config["AnimClip"], readFile);
-	actorAnim_.SetTemporaryClips(MovementClips(movementKeys_));
+	RestartMovement();
 	RefreshClipChoice();
 	return loaded;
 }
@@ -4071,24 +4103,77 @@ bool LeveledListPreviewer::MovementKey(int keyCode, bool down) {
 		return false;
 	// Held keys repeat their key-down events.
 	const uint8_t keys = down ? (movementKeys_ | key) : (movementKeys_ & ~key);
-	if (keys != movementKeys_) {
-		movementKeys_ = keys;
-		UpdateMovementClips();
+	if (keys == movementKeys_)
+		return true;
+	movementKeys_ = keys;
+
+	if (key == MoveJump) {
+		if (down)
+			Jump();
+		else
+			Land();
 	}
+	// In the air the jump goes on; landing returns to the held keys.
+	else if (!jumping_)
+		MoveOnGround();
+	if (!animRunning_)
+		SetStatusText(_("Movement keys play their animations while Animation is on"));
 	return true;
 }
 
 void LeveledListPreviewer::ReleaseMovementKeys() {
-	if (movementKeys_) {
-		movementKeys_ = 0;
-		UpdateMovementClips();
-	}
+	if (!movementKeys_)
+		return;
+	movementKeys_ = 0;
+	if (jumping_)
+		Land();
+	else
+		MoveOnGround();
 }
 
-void LeveledListPreviewer::UpdateMovementClips() {
-	actorAnim_.SetTemporaryClips(MovementClips(movementKeys_));
-	if (movementKeys_ && !animRunning_)
-		SetStatusText(_("Movement keys play their animations while Animation is on"));
+void LeveledListPreviewer::MoveOnGround() {
+	const uint8_t ground = GroundOf(movementKeys_);
+	if (ground == ground_)
+		return;
+	// Starting or stopping to move, starting or stopping to sneak, else another direction.
+	float blend = kBlendDirection;
+	bool sync = true;
+	if (Moving(ground) != Moving(ground_)) {
+		blend = Moving(ground) ? kBlendMoveStart : kBlendMoveStop;
+		sync = false;
+	}
+	else if ((ground & MoveSneak) != (ground_ & MoveSneak))
+		blend = kBlendSneak;
+	ground_ = ground;
+
+	const std::string clip = GroundClip(ground);
+	if (clip.empty())
+		actorAnim_.PlaySequence({}, true, blend);
+	else
+		actorAnim_.PlaySequence({{clip, blend, sync}}, true, 0.0f);
+}
+
+void LeveledListPreviewer::Jump() {
+	jumping_ = true;
+	const auto clips = JumpClips(ground_);
+	actorAnim_.PlaySequence({{clips[0], kBlendJumpStart, false}, {clips[1], kBlendJumpFall, false}}, true, 0.0f);
+}
+
+void LeveledListPreviewer::Land() {
+	jumping_ = false;
+	const auto clips = JumpClips(ground_);
+	ground_ = GroundOf(movementKeys_);
+	const std::string clip = GroundClip(ground_);
+	std::vector<ActorAnimation::SequenceStep> steps{{clips[2], kBlendJumpLand, false}};
+	if (!clip.empty())
+		steps.push_back({clip, kBlendJumpLandEnd, false});
+	actorAnim_.PlaySequence(steps, !clip.empty(), kBlendJumpLandEnd);
+}
+
+void LeveledListPreviewer::RestartMovement() {
+	const std::string clip = jumping_ ? JumpClips(ground_)[1] : GroundClip(ground_);
+	if (!clip.empty())
+		actorAnim_.PlaySequence({{clip, 0.0f, false}}, true, 0.0f);
 }
 
 void LeveledListPreviewer::OnTogglePause(wxCommandEvent& event) {
