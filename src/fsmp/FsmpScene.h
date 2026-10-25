@@ -61,6 +61,13 @@ struct ActorInfo {
 	std::string faceGenPath;	 // data-relative FaceGen NIF of the NPC, empty without one
 };
 
+// An item the actor wears, as far as FSMP reads it from the actor's inventory.
+struct WornItem {
+	uint32_t formId = 0;	 // ARMO record
+	std::string name;		 // full name
+	uint32_t bipedSlots = 0; // bit n: biped slot 30 + n
+};
+
 // A bone of the actor's Havok rig with its reference pose.
 struct RigBone {
 	std::string name;
@@ -84,6 +91,8 @@ public:
 
 	// The rig of the actor's behavior graph; FSMP builds physics systems in its reference pose.
 	void SetAnimationSkeleton(const std::vector<RigBone>& bones);
+	// The equipped items in the actor's inventory. Set before attaching models.
+	void SetWornItems(const std::vector<WornItem>& items);
 
 	// The engine equipping a model: armor attach event, the model's skin bound
 	// to the skeleton by bone name, attach event again.

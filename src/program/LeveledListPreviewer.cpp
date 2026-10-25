@@ -123,10 +123,22 @@ LeveledListPreviewer::LeveledListPreviewer(wxEvtHandler* handler)
 	smpToggle_->SetToolTip(_("Simulate cloth, hair and body physics with FSMP, as configured by the meshes' physics XML files and defaultBBPs.xml"));
 	smpToggle_->Bind(wxEVT_CHECKBOX, &LeveledListPreviewer::OnToggleSmp, this);
 	smpSizer->Add(smpToggle_, 0, wxALIGN_CENTER_VERTICAL);
-	animToggle_ = new wxCheckBox(leftPanel, ID_ToggleAnim, _("Idle Animation"));
-	animToggle_->SetToolTip(_("Play the actor's default idle (MT_Idle) as resolved through the race's behavior project"));
+	animToggle_ = new wxCheckBox(leftPanel, ID_ToggleAnim, _("Animation"));
+	animToggle_->SetToolTip(_("Play an animation of the actor's character, resolved through the race's behavior project (default: the idle MT_Idle)"));
 	animToggle_->Bind(wxEVT_CHECKBOX, &LeveledListPreviewer::OnToggleAnim, this);
 	smpSizer->Add(animToggle_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 10);
+	clipText_ = new wxTextCtrl(leftPanel, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_READONLY);
+	clipText_->SetToolTip(_("The animation that plays"));
+	smpSizer->Add(clipText_, 1, wxALIGN_CENTER_VERTICAL | wxLEFT, 5);
+	clipButton_ = new wxButton(leftPanel, ID_AnimClip, _("..."), wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+	clipButton_->SetToolTip(_("Choose one of the animations of the actor's character"));
+	clipButton_->Bind(wxEVT_BUTTON, &LeveledListPreviewer::OnChooseClip, this);
+	clipButton_->Disable();
+	smpSizer->Add(clipButton_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 2);
+	pauseToggle_ = new wxCheckBox(leftPanel, ID_AnimPause, _("Pause"));
+	pauseToggle_->SetToolTip(_("Hold the animation; physics keeps running"));
+	pauseToggle_->Bind(wxEVT_CHECKBOX, &LeveledListPreviewer::OnTogglePause, this);
+	smpSizer->Add(pauseToggle_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 5);
 	leftSizer->Add(smpSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
 
 	// Notebook: tab 0 = Outfits (LVLI/OTFT from the loaded ESP), tab 1 = NPCs.
@@ -3365,9 +3377,16 @@ void LeveledListPreviewer::LoadOutfitPieceShapes(const lldata::OutfitEntry& outf
 	}
 
 	// The actor wears the piece while its Use Any variants are active.
+	fsmp::WornItem item;
+	item.formId = piece.formId;
+	item.name = piece.name;
+	for (int slot : piece.bodySlots) {
+		if (slot >= 30 && slot < 62)
+			item.bipedSlots |= 1u << (slot - 30);
+	}
 	actorAnim_.RegisterModel(nif, piecePath, ActorAnimation::ModelKind::Armor, modelMeshes, [this, path = piece.useAnyPath]() {
 		return path.empty() || IsUseAnyPathActive(path);
-	});
+	}, item);
 }
 
 void LeveledListPreviewer::ApplyUseAnyVisibility() {
@@ -3849,7 +3868,67 @@ bool LeveledListPreviewer::LoadAnimationActor(bool& pending) {
 	std::string configsFile = lldata::LeveledListData::ResolveCaseInsensitive(baseGamePath, "SKSE/Plugins/hdtSkinnedMeshConfigs/configs.xml");
 	ActorAnimation::InitialisePhysics(readFile, configsFile);
 
-	return actorAnim_.LoadActor(files.skeletonNif, files.behaviorProject, info, readFile);
+	bool loaded = actorAnim_.LoadActor(files.skeletonNif, files.behaviorProject, info, Config["AnimClip"], readFile);
+	RefreshClipChoice();
+	return loaded;
+}
+
+void LeveledListPreviewer::RefreshClipChoice() {
+	if (!clipText_ || !clipButton_)
+		return;
+	clipText_->ChangeValue(wxString::FromUTF8(actorAnim_.ClipName()));
+	clipButton_->Enable(!actorAnim_.ClipNames().empty());
+}
+
+void LeveledListPreviewer::OnChooseClip(wxCommandEvent& WXUNUSED(event)) {
+	const auto& names = actorAnim_.ClipNames();
+	if (names.empty())
+		return;
+
+	// A character lists hundreds of animations: a list with a search field.
+	wxDialog dialog(this, wxID_ANY, _("Animation"), wxDefaultPosition, wxSize(520, 640), wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+	auto* sizer = new wxBoxSizer(wxVERTICAL);
+	auto* search = new wxSearchCtrl(&dialog, wxID_ANY);
+	auto* list = new wxListBox(&dialog, wxID_ANY);
+	sizer->Add(search, 0, wxEXPAND | wxALL, 5);
+	sizer->Add(list, 1, wxEXPAND | wxLEFT | wxRIGHT, 5);
+	sizer->Add(dialog.CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxEXPAND | wxALL, 5);
+	dialog.SetSizer(sizer);
+
+	const wxString current = wxString::FromUTF8(actorAnim_.ClipName());
+	auto fill = [&]() {
+		const wxString filter = search->GetValue().Lower();
+		wxArrayString shown;
+		for (auto& name : names) {
+			wxString entry = wxString::FromUTF8(name);
+			if (filter.empty() || entry.Lower().Contains(filter))
+				shown.Add(entry);
+		}
+		list->Set(shown);
+		list->SetStringSelection(current);
+	};
+	search->Bind(wxEVT_TEXT, [&](wxCommandEvent&) { fill(); });
+	list->Bind(wxEVT_LISTBOX_DCLICK, [&](wxCommandEvent&) { dialog.EndModal(wxID_OK); });
+	fill();
+
+	if (dialog.ShowModal() != wxID_OK || list->GetSelection() == wxNOT_FOUND)
+		return;
+
+	std::string name(list->GetStringSelection().ToUTF8());
+	Config.SetValue("AnimClip", name);
+	if (!actorAnim_.LoadClip(name))
+		SetStatusText(_("The animation can't be played (see log)"));
+	else if (!animRunning_ && animToggle_) {
+		animToggle_->SetValue(true);
+		animRunning_ = true;
+		Config.SetValue("AnimEnabled", "true");
+		UpdateActorMotion();
+	}
+	RefreshClipChoice();
+}
+
+void LeveledListPreviewer::OnTogglePause(wxCommandEvent& event) {
+	actorAnim_.SetPaused(event.IsChecked());
 }
 
 void LeveledListPreviewer::UpdateActorMotion() {

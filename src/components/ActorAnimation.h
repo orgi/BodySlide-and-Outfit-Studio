@@ -1,10 +1,11 @@
 /*
  * ActorAnimation — puts the actor shown by the leveled list previewer into
- * motion: its default idle and FSMP's physics (cloth, hair, body).
+ * motion: an animation (by default its idle) and FSMP's physics (cloth,
+ * hair, body).
  *
- * The idle is resolved the way the game does it: race behavior project
+ * Animations are resolved the way the game does it: race behavior project
  * (e.g. Actors\Character\DefaultFemale.hkx) → character file → rig
- * (skeleton.hkx) and the character's MT_Idle clip.
+ * (skeleton.hkx) and the character's animations, MT_Idle by default.
  *
  * The actor lives in an FSMP scene (src/fsmp/FsmpScene.h): the race skeleton
  * NIF as its 3D, the worn models attached like the engine equips them and the
@@ -26,6 +27,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -56,18 +58,29 @@ public:
 	// SKSE/Plugins/hdtSkinnedMeshConfigs/configs.xml, empty if there is none.
 	static void InitialisePhysics(const FileReader& readFile, const std::string& configsFile);
 
-	// Loads the skeleton NIF and resolves the idle clip through the behavior
-	// project. Both paths are data-relative. Logs every failure. Returns false
-	// if the skeleton can't be loaded; a missing or broken clip only disables
-	// the idle. The previous actor is discarded either way.
-	bool LoadActor(const std::string& skeletonNifPath, const std::string& behaviorProjectPath, const fsmp::ActorInfo& info, const FileReader& readFile);
+	// Loads the skeleton NIF and the rig and animations of the behavior
+	// project's character. Both paths are data-relative. Plays `preferredClip`
+	// (a name from ClipNames(), matched by path, then by file name), MT_Idle
+	// otherwise. Logs every failure. Returns false if the skeleton can't be
+	// loaded; a missing or broken animation only disables the animation. The
+	// previous actor is discarded either way.
+	bool LoadActor(const std::string& skeletonNifPath, const std::string& behaviorProjectPath, const fsmp::ActorInfo& info, const std::string& preferredClip, const FileReader& readFile);
 	void ClearActor();
 	bool IsLoaded() const { return skeleton != nullptr; }
 	bool HasClip() const { return clipLoaded; }
 
+	// Animations of the actor's character (paths relative to the behavior project's folder).
+	const std::vector<std::string>& ClipNames() const { return clipNames; }
+	const std::string& ClipName() const { return clipName; }
+	// Switches to another animation of ClipNames(). Logs and returns false if it can't be played.
+	bool LoadClip(const std::string& name);
+	// Holds the animation at its current time; physics keeps running.
+	void SetPaused(bool pause) { paused = pause; }
+
 	// Hands the NIF that the meshes in `shapes` were loaded from to the actor.
 	// Skinned shapes are posed; unskinned ones stay static.
-	void RegisterModel(nifly::NifFile& nif, const std::string& nifPath, ModelKind kind, const std::vector<std::pair<nifly::NiShape*, Mesh*>>& shapes, WornCheck worn);
+	// `item` is the inventory item that equips the model (outfit pieces).
+	void RegisterModel(nifly::NifFile& nif, const std::string& nifPath, ModelKind kind, const std::vector<std::pair<nifly::NiShape*, Mesh*>>& shapes, WornCheck worn, const std::optional<fsmp::WornItem>& item = std::nullopt);
 	void ForgetModels();
 	// The rest pose of registered meshes changed (preset morphs, weight); the
 	// actor re-equips its models with it.
@@ -92,6 +105,7 @@ private:
 		std::shared_ptr<fsmp::Model> scene;
 		ModelKind kind = ModelKind::Armor;
 		WornCheck worn;
+		std::optional<fsmp::WornItem> item;
 		std::vector<std::pair<std::string, Mesh*>> meshes; // every mesh loaded from the model
 	};
 
@@ -122,7 +136,13 @@ private:
 	fsmp::ActorInfo actorInfo;
 	std::string skeletonPath;
 
+	FileReader readGameFile;
+	std::string projectDir;
+	std::string rigPath;
+	std::vector<std::string> clipNames;
+	std::string clipName;
 	bool clipLoaded = false;
+	bool paused = false;
 	std::string clipPath;
 	hkx::Skeleton rig;
 	hkx::SplineAnimation clip;

@@ -133,6 +133,10 @@ void ActorAnimation::ClearActor() {
 	skeleton.reset();
 	skeletonPath.clear();
 	actorInfo = {};
+	projectDir.clear();
+	rigPath.clear();
+	clipNames.clear();
+	clipName.clear();
 	clipLoaded = false;
 	clipPath.clear();
 	rig = {};
@@ -141,8 +145,9 @@ void ActorAnimation::ClearActor() {
 	sceneDirty = true;
 }
 
-bool ActorAnimation::LoadActor(const std::string& skeletonNifPath, const std::string& behaviorProjectPath, const fsmp::ActorInfo& info, const FileReader& readFile) {
+bool ActorAnimation::LoadActor(const std::string& skeletonNifPath, const std::string& behaviorProjectPath, const fsmp::ActorInfo& info, const std::string& preferredClip, const FileReader& readFile) {
 	ClearActor();
+	readGameFile = readFile;
 
 	const std::string nifPath = NormalizePath(skeletonNifPath);
 	std::vector<char> nifData;
@@ -163,7 +168,7 @@ bool ActorAnimation::LoadActor(const std::string& skeletonNifPath, const std::st
 	actorInfo = info;
 
 	const std::string projectPath = NormalizePath(behaviorProjectPath);
-	const std::string projectDir = DirectoryOf(projectPath);
+	projectDir = DirectoryOf(projectPath);
 	std::string error;
 
 	hkx::Packfile projectFile;
@@ -185,19 +190,7 @@ bool ActorAnimation::LoadActor(const std::string& skeletonNifPath, const std::st
 		return true;
 	}
 
-	std::string idleName;
-	for (auto& anim : character.animationNames) {
-		if (ToLower(FileNameOf(NormalizePath(anim))) == "mt_idle.hkx") {
-			idleName = anim;
-			break;
-		}
-	}
-	if (idleName.empty()) {
-		wxLogError("ActorAnimation: Character '%s' (%s) has no MT_Idle.hkx animation", character.name, characterPath);
-		return true;
-	}
-
-	const std::string rigPath = projectDir + NormalizePath(character.rigName);
+	rigPath = projectDir + NormalizePath(character.rigName);
 	hkx::Packfile rigFile;
 	if (!LoadPackfile(readFile, rigPath, rigFile, error) || !rig.Load(rigFile, error)) {
 		wxLogError("ActorAnimation: Rig '%s': %s", rigPath, error);
@@ -205,38 +198,69 @@ bool ActorAnimation::LoadActor(const std::string& skeletonNifPath, const std::st
 		return true;
 	}
 
-	const std::string idlePath = projectDir + NormalizePath(idleName);
-	hkx::Packfile clipFile;
-	if (!LoadPackfile(readFile, idlePath, clipFile, error) || !clip.Load(clipFile, error)) {
-		wxLogError("ActorAnimation: Idle animation '%s': %s", idlePath, error);
-		rig = {};
-		clip = {};
+	clipNames = character.animationNames;
+	std::sort(clipNames.begin(), clipNames.end(), [](const std::string& a, const std::string& b) { return ToLower(a) < ToLower(b); });
+
+	// The preferred clip by its path in the character file, then by file name; MT_Idle otherwise.
+	std::string chosen;
+	for (int pass = 0; pass < 3 && chosen.empty(); pass++) {
+		for (auto& name : clipNames) {
+			const std::string candidate = ToLower(NormalizePath(name));
+			if ((pass == 0 && !preferredClip.empty() && candidate == ToLower(NormalizePath(preferredClip))) ||
+				(pass == 1 && !preferredClip.empty() && FileNameOf(candidate) == ToLower(FileNameOf(NormalizePath(preferredClip)))) ||
+				(pass == 2 && FileNameOf(candidate) == "mt_idle.hkx")) {
+				chosen = name;
+				break;
+			}
+		}
+	}
+	if (!preferredClip.empty() && FileNameOf(ToLower(NormalizePath(chosen))) != FileNameOf(ToLower(NormalizePath(preferredClip))))
+		wxLogMessage("ActorAnimation: Character '%s' has no animation '%s'; playing '%s'", character.name, preferredClip, chosen);
+	if (chosen.empty()) {
+		wxLogError("ActorAnimation: Character '%s' (%s) has no MT_Idle.hkx animation", character.name, characterPath);
 		return true;
+	}
+	LoadClip(chosen);
+	return true;
+}
+
+bool ActorAnimation::LoadClip(const std::string& name) {
+	clipLoaded = false;
+	clip = {};
+	clock = 0.0f;
+	if (rig.boneNames.empty() || !readGameFile)
+		return false;
+
+	const std::string path = projectDir + NormalizePath(name);
+	std::string error;
+	hkx::Packfile clipFile;
+	if (!LoadPackfile(readGameFile, path, clipFile, error) || !clip.Load(clipFile, error)) {
+		wxLogError("ActorAnimation: Animation '%s': %s", path, error);
+		clip = {};
+		return false;
 	}
 
 	const auto& trackToBone = clip.TrackToBone();
-	bool tracksValid = !(trackToBone.empty() && clip.TrackCount() > rig.boneNames.size());
-	if (!tracksValid)
-		wxLogError("ActorAnimation: Idle animation '%s' has %zu tracks but rig '%s' only %zu bones", idlePath, clip.TrackCount(), rigPath, rig.boneNames.size());
+	if (trackToBone.empty() && clip.TrackCount() > rig.boneNames.size()) {
+		wxLogError("ActorAnimation: Animation '%s' has %zu tracks but rig '%s' only %zu bones", path, clip.TrackCount(), rigPath, rig.boneNames.size());
+		clip = {};
+		return false;
+	}
 	for (int16_t bone : trackToBone) {
 		if (bone < 0 || static_cast<size_t>(bone) >= rig.boneNames.size()) {
-			wxLogError("ActorAnimation: Idle animation '%s' binds a track to bone %d, rig '%s' has %zu bones", idlePath, bone, rigPath, rig.boneNames.size());
-			tracksValid = false;
-			break;
+			wxLogError("ActorAnimation: Animation '%s' binds a track to bone %d, rig '%s' has %zu bones", path, bone, rigPath, rig.boneNames.size());
+			clip = {};
+			return false;
 		}
 	}
-	if (!tracksValid) {
-		rig = {};
-		clip = {};
-		return true;
-	}
 	if (ToLower(clip.SkeletonName()) != ToLower(rig.name))
-		wxLogWarning("ActorAnimation: Idle animation '%s' was bound to skeleton '%s', rig is '%s'", idlePath, clip.SkeletonName(), rig.name);
+		wxLogWarning("ActorAnimation: Animation '%s' was bound to skeleton '%s', rig is '%s'", path, clip.SkeletonName(), rig.name);
 
-	clipPath = idlePath;
+	clipName = name;
+	clipPath = path;
 	clipLoaded = true;
-	wxLogMessage("ActorAnimation: Loaded idle '%s' (%.2fs, %zu tracks) on rig '%s' (%zu bones), skeleton '%s'",
-				 idlePath,
+	wxLogMessage("ActorAnimation: Loaded animation '%s' (%.2fs, %zu tracks) on rig '%s' (%zu bones), skeleton '%s'",
+				 path,
 				 clip.Duration(),
 				 clip.TrackCount(),
 				 rigPath,
@@ -249,13 +273,14 @@ bool ActorAnimation::LoadActor(const std::string& skeletonNifPath, const std::st
 // Model registration
 // ---------------------------------------------------------------------------
 
-void ActorAnimation::RegisterModel(NifFile& nif, const std::string& nifPath, ModelKind kind, const std::vector<std::pair<NiShape*, Mesh*>>& meshes, WornCheck worn) {
+void ActorAnimation::RegisterModel(NifFile& nif, const std::string& nifPath, ModelKind kind, const std::vector<std::pair<NiShape*, Mesh*>>& meshes, WornCheck worn, const std::optional<fsmp::WornItem>& item) {
 	auto model = std::make_unique<Model>();
 	model->scene = fsmp::LoadModel(nif, nifPath);
 	if (!model->scene)
 		return;
 	model->kind = kind;
 	model->worn = std::move(worn);
+	model->item = item;
 
 	for (auto& [shape, mesh] : meshes) {
 		if (!shape || !mesh)
@@ -386,7 +411,7 @@ void ActorAnimation::BuildScene(const MeshLookup& getMesh, bool simulate) {
 		}
 	}
 	actor = std::make_unique<fsmp::Actor>(*skeleton, info);
-	if (clipLoaded) {
+	if (!rig.boneNames.empty()) {
 		std::vector<fsmp::RigBone> rigBones(rig.boneNames.size());
 		for (size_t b = 0; b < rig.boneNames.size(); b++) {
 			const auto& pose = rig.referencePose[b];
@@ -409,6 +434,17 @@ void ActorAnimation::BuildScene(const MeshLookup& getMesh, bool simulate) {
 		fsmp::SetShapeVertices(*s.model->scene, s.nifName, positions);
 	}
 
+	// The equipped armors are in the actor's inventory, once per record.
+	std::vector<fsmp::WornItem> items;
+	for (size_t i = 0; i < models.size(); i++) {
+		const auto& item = models[i]->item;
+		if (!attached[i] || !item)
+			continue;
+		if (std::none_of(items.begin(), items.end(), [&](const fsmp::WornItem& known) { return known.formId == item->formId; }))
+			items.push_back(*item);
+	}
+	actor->SetWornItems(items);
+
 	// Worn items first, then the head, the order the engine sets up an actor's 3D in.
 	size_t worn = 0;
 	for (size_t i = 0; i < models.size(); i++) {
@@ -424,7 +460,7 @@ void ActorAnimation::BuildScene(const MeshLookup& getMesh, bool simulate) {
 		}
 	}
 
-	if (clipLoaded) {
+	if (!rig.boneNames.empty()) {
 		rigToNode.assign(rig.boneNames.size(), nullptr);
 		std::string unmapped;
 		for (size_t b = 0; b < rig.boneNames.size(); b++) {
@@ -544,7 +580,8 @@ void ActorAnimation::Update(float dt, bool animate, bool simulate, const MeshLoo
 	auto start = std::chrono::steady_clock::now();
 
 	if (animate) {
-		clock = std::fmod(clock + dt, clip.Duration());
+		if (!paused)
+			clock = clip.Duration() > 0.0f ? std::fmod(clock + dt, clip.Duration()) : 0.0f;
 		PoseSkeleton();
 	}
 	actor->UpdateWorld();

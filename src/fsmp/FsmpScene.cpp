@@ -545,6 +545,17 @@ struct Actor::Impl {
 	RE::hkaSkeleton rig;
 	RE::hkbCharacterSetup characterSetup;
 
+	// Inventory: one entry per equipped item, its extra data marking it as worn.
+	struct InventoryItem {
+		std::unique_ptr<RE::TESObjectARMO> armor;
+		std::unique_ptr<RE::ExtraDataList> extra;
+		RE::BSSimpleList<RE::ExtraDataList*> extraLists;
+		RE::InventoryEntryData entry;
+	};
+	std::vector<std::unique_ptr<InventoryItem>> inventory;
+	RE::BSSimpleList<RE::InventoryEntryData*> entryList;
+	RE::InventoryChanges changes;
+
 	std::vector<Attachment> attachments;
 };
 
@@ -620,6 +631,31 @@ void Actor::SetAnimationSkeleton(const std::vector<RigBone>& bones) {
 	auto manager = RE::make_smart<RE::BSAnimationGraphManager>();
 	manager->graphs.push_back(graph);
 	impl->actor.animationGraphManager = manager;
+}
+
+void Actor::SetWornItems(const std::vector<WornItem>& items) {
+	if (impl->actor.extraList.HasType<RE::ExtraContainerChanges>()) {
+		Report(LogLevel::Error, "the actor's inventory is set already");
+		return;
+	}
+	for (auto& item : items) {
+		auto entry = std::make_unique<Impl::InventoryItem>();
+		entry->armor = std::make_unique<RE::TESObjectARMO>();
+		entry->armor->formID = item.formId;
+		entry->armor->fullName = item.name;
+		entry->armor->bipedModelData.bipedObjectSlots = static_cast<RE::BIPED_MODEL::BipedObjectSlot>(item.bipedSlots);
+		entry->extra = std::make_unique<RE::ExtraDataList>();
+		entry->extra->Add(std::make_unique<RE::ExtraWorn>());
+		entry->extraLists.push_back(entry->extra.get());
+		entry->entry.object = entry->armor.get();
+		entry->entry.extraLists = &entry->extraLists;
+		impl->entryList.push_back(&entry->entry);
+		impl->inventory.push_back(std::move(entry));
+	}
+	impl->changes.entryList = &impl->entryList;
+	auto containerChanges = std::make_unique<RE::ExtraContainerChanges>();
+	containerChanges->changes = &impl->changes;
+	impl->actor.extraList.Add(std::move(containerChanges));
 }
 
 void Actor::AttachArmor(const Model& model) {

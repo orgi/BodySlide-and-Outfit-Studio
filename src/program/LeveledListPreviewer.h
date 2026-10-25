@@ -203,6 +203,9 @@ class LeveledListPreviewer : public wxFrame {
 	wxTimer actorTimer_;
 	wxCheckBox* smpToggle_ = nullptr;
 	wxCheckBox* animToggle_ = nullptr;
+	wxTextCtrl* clipText_ = nullptr;
+	wxButton* clipButton_ = nullptr;
+	wxCheckBox* pauseToggle_ = nullptr;
 	bool smpRunning_ = false;
 	bool animRunning_ = false;
 	// Actor the skeleton and clip were loaded for (currentHeadEditorId at load
@@ -281,6 +284,8 @@ public:
 	void OnToggleBody(wxCommandEvent& event);
 	void OnToggleSmp(wxCommandEvent& event);
 	void OnToggleAnim(wxCommandEvent& event);
+	void OnChooseClip(wxCommandEvent& event);
+	void OnTogglePause(wxCommandEvent& event);
 	void OnActorTimer(wxTimerEvent& event);
 
 	friend class LLPreviewCanvas;
@@ -371,6 +376,8 @@ private:
 	// Loads skeleton + idle clip for the current actor. Returns false while the
 	// plugin data isn't loaded yet (`pending`) or when the actor can't be set up.
 	bool LoadAnimationActor(bool& pending);
+	// Shows the playing animation and whether there are animations to choose from.
+	void RefreshClipChoice();
 
 	enum {
 		ID_LoadESP = wxID_HIGHEST + 500,
@@ -382,6 +389,8 @@ private:
 		ID_HighWeight,
 		ID_ToggleSmp,
 		ID_ToggleAnim,
+		ID_AnimClip,
+		ID_AnimPause,
 		ID_ActorTimer,
 		ID_NpcList,
 		ID_NpcSearch,
