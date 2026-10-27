@@ -61,6 +61,7 @@ wxBEGIN_EVENT_TABLE(LeveledListPreviewer, wxFrame)
 	EVT_MENU(LeveledListPreviewer::ID_ToggleBody, LeveledListPreviewer::OnToggleBody)
 	EVT_MENU(LeveledListPreviewer::ID_ToggleWireframe, LeveledListPreviewer::OnToggleWireframe)
 	EVT_MENU(LeveledListPreviewer::ID_ToggleShadows, LeveledListPreviewer::OnToggleShadows)
+	EVT_MENU(LeveledListPreviewer::ID_ToggleContactShadows, LeveledListPreviewer::OnToggleContactShadows)
 	EVT_TEXT_ENTER(LeveledListPreviewer::ID_HeadNPC, LeveledListPreviewer::OnHeadEntered)
 	EVT_COMBOBOX(LeveledListPreviewer::ID_Preset, LeveledListPreviewer::OnPresetChanged)
 	EVT_CHECKBOX(LeveledListPreviewer::ID_HighWeight, LeveledListPreviewer::OnHighWeightChanged)
@@ -95,6 +96,8 @@ LeveledListPreviewer::LeveledListPreviewer(wxEvtHandler* handler)
 	viewMenu->Check(ID_ToggleWireframe, false);
 	viewMenu->AppendCheckItem(ID_ToggleShadows, _("&Shadows\tH"), _("Let the sun cast shadows where the meshes' Cast_Shadows and Receive_Shadows flags allow it"));
 	viewMenu->Check(ID_ToggleShadows, Config["ShadowsEnabled"] != "false");
+	viewMenu->AppendCheckItem(ID_ToggleContactShadows, _("&Contact Shadows\tC"), _("Community Shaders' screen-space shadows of the sun, as its settings have them"));
+	viewMenu->Check(ID_ToggleContactShadows, Config["ContactShadowsEnabled"] != "false");
 	menuBar->Append(viewMenu, _("&View"));
 
 	SetMenuBar(menuBar);
@@ -403,8 +406,11 @@ void LeveledListPreviewer::OnShown() {
 
 	if (lighting_.Initialize(&gls, Config["AppDir"] + "/res/shaders")) {
 		lighting_.SetShadowsEnabled(GetMenuBar() && GetMenuBar()->IsChecked(ID_ToggleShadows));
+		lighting_.SetContactShadowsEnabled(GetMenuBar() && GetMenuBar()->IsChecked(ID_ToggleContactShadows));
 		lighting_.SetSkinRotationSource([this](Mesh* m) { return actorAnim_.SkinRotation(m); });
 	}
+	if (!lighting_.ContactShadowsAvailable() && GetMenuBar())
+		GetMenuBar()->Enable(ID_ToggleContactShadows, false);
 
 	if (Config.Exists("Rendering/ColorBackground")) {
 		int r = Config.GetIntValue("Rendering/ColorBackground.r");
@@ -3728,6 +3734,12 @@ void LeveledListPreviewer::OnToggleShadows(wxCommandEvent& event) {
 	gls.RenderOneFrame();
 }
 
+void LeveledListPreviewer::OnToggleContactShadows(wxCommandEvent& event) {
+	Config.SetValue("ContactShadowsEnabled", event.IsChecked() ? "true" : "false");
+	lighting_.SetContactShadowsEnabled(event.IsChecked());
+	gls.RenderOneFrame();
+}
+
 void LeveledListPreviewer::OnSunTimeChanged(wxCommandEvent& WXUNUSED(event)) {
 	Config.SetValue("SunTime", sunTimeSlider_->GetValue());
 	UpdateSun();
@@ -3763,9 +3775,21 @@ void LeveledListPreviewer::LoadGameSky() {
 	}
 
 	std::vector<std::string> errors;
-	skySync_ = gamesky::LoadSkySyncSettings(Config["GameDataPath"], errors);
+	skySync_ = communityshaders::LoadSkySyncSettings(Config["GameDataPath"], errors);
+	screenSpaceShadows_ = communityshaders::LoadScreenSpaceShadowsSettings(Config["GameDataPath"], errors);
 	for (auto& error : errors)
 		wxLogError("LeveledListPreviewer: %s", error);
+	lighting_.SetContactShadowSettings(screenSpaceShadows_);
+	if (screenSpaceShadows_.loaded && screenSpaceShadows_.enable)
+		wxLogMessage("LeveledListPreviewer: Community Shaders' screen-space shadows: sample count %u, surface thickness %.3f, bilinear threshold %.3f, shadow contrast %.2f",
+					 screenSpaceShadows_.sampleCount,
+					 screenSpaceShadows_.surfaceThickness,
+					 screenSpaceShadows_.bilinearThreshold,
+					 screenSpaceShadows_.shadowContrast);
+	else
+		wxLogMessage("LeveledListPreviewer: the game has no screen-space shadows (Community Shaders' Screen Space Shadows not loaded or switched off)");
+	if (GetMenuBar())
+		GetMenuBar()->Enable(ID_ToggleContactShadows, lighting_.ContactShadowsAvailable() && screenSpaceShadows_.loaded && screenSpaceShadows_.enable);
 	if (!gamesky::UsesAlternateSunPath(skySync_))
 		wxLogWarning("LeveledListPreviewer: the game doesn't use the alternate sun path of Community Shaders' Sky Sync; the engine's own sun path isn't known, the sun follows the alternate path with Sky Sync's Vanilla angle");
 	wxLogMessage("LeveledListPreviewer: sun and sky light of '%s' in the climate '%s' (sunrise %.2f-%.2f, sunset %.2f-%.2f), Sky Sync %s",
@@ -4514,7 +4538,8 @@ void LLPreviewCanvas::OnKeyUp(wxKeyEvent& event) {
 		case 'U':
 		case 'B':
 		case 'F':
-		case 'H': {
+		case 'H':
+		case 'C': {
 			int menuId = LeveledListPreviewer::ID_ToggleWireframe;
 			if (event.GetKeyCode() == 'U')
 				menuId = LeveledListPreviewer::ID_ToggleUntextured;
@@ -4522,6 +4547,8 @@ void LLPreviewCanvas::OnKeyUp(wxKeyEvent& event) {
 				menuId = LeveledListPreviewer::ID_ToggleBody;
 			else if (event.GetKeyCode() == 'H')
 				menuId = LeveledListPreviewer::ID_ToggleShadows;
+			else if (event.GetKeyCode() == 'C')
+				menuId = LeveledListPreviewer::ID_ToggleContactShadows;
 			wxMenuBar* mb = previewer->GetMenuBar();
 			if (mb) {
 				bool newState = !mb->IsChecked(menuId);

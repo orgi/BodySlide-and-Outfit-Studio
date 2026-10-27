@@ -229,6 +229,7 @@ class LeveledListPreviewer : public wxFrame {
 	gamesky::Weather weather_;
 	gamesky::ClimateTiming climateTiming_;
 	gamesky::SkySyncSettings skySync_;
+	communityshaders::ScreenSpaceShadowsSettings screenSpaceShadows_;
 	// Actor the skeleton and clip were loaded for (currentHeadEditorId at load
 	// time) and a flag forcing a reload after the plugin data changed.
 	std::string animActorEditorId_;
@@ -305,6 +306,7 @@ public:
 	void OnToggleBody(wxCommandEvent& event);
 	void OnToggleWireframe(wxCommandEvent& event);
 	void OnToggleShadows(wxCommandEvent& event);
+	void OnToggleContactShadows(wxCommandEvent& event);
 	void OnSunTimeChanged(wxCommandEvent& event);
 	void OnFacingChanged(wxCommandEvent& event);
 	void LoadGameSky();
@@ -431,6 +433,7 @@ private:
 		ID_ToggleBody,
 		ID_ToggleWireframe,
 		ID_ToggleShadows,
+		ID_ToggleContactShadows,
 		ID_HeadNPC,
 		ID_Preset,
 		ID_HighWeight,

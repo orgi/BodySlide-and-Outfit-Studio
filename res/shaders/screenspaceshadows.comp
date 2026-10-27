@@ -1,0 +1,258 @@
+#version 430
+
+/*
+ * Community Shaders' Screen Space Shadows for the leveled list previewer
+ * (src/render/ContactShadows.cpp): RaymarchCS.hlsl and bend_sss_gpu.hlsli
+ * (Data/Shaders/ScreenSpaceShadows) ported to GLSL, statement by statement.
+ * ContactShadows.cpp defines SAMPLE_COUNT after the version line.
+ *
+ * bend_sss_gpu.hlsli:
+ * Copyright 2023 Sony Interactive Entertainment.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#define WAVE_SIZE 64
+#define USE_HALF_PIXEL_OFFSET 1
+
+layout(local_size_x = WAVE_SIZE, local_size_y = 1, local_size_z = 1) in;
+
+// Point sampler, clamp to border with the far depth
+uniform sampler2D DepthTexture;
+layout(r8) writeonly uniform image2D OutputTexture;
+
+// RaymarchCS.hlsl's PerFrame
+uniform vec4 LightCoordinate;
+uniform ivec2 WaveOffset;
+uniform float FarDepthValue;
+uniform float NearDepthValue;
+uniform vec2 InvDepthTextureSize;
+uniform vec2 DynamicRes;
+uniform float SurfaceThickness;
+uniform float BilinearThreshold;
+uniform float ShadowContrast;
+
+// DispatchParameters::SetDefaults(), then RaymarchCS.hlsl's UsePrecisionOffset
+const bool IgnoreEdgePixels = false;
+const bool UsePrecisionOffset = true;
+
+void ComputeWavefrontExtents(ivec3 inGroupID, uint inGroupThreadID, out vec2 outDeltaXY, out vec2 outPixelXY, out float outPixelDistance, out bool outMajorAxisX)
+{
+	ivec2 xy = inGroupID.yz * WAVE_SIZE + WaveOffset.xy;
+
+	//integer light position / fractional component
+	vec2 light_xy = floor(LightCoordinate.xy) + 0.5;
+	vec2 light_xy_fraction = LightCoordinate.xy - light_xy;
+	bool reverse_direction = LightCoordinate.w > 0.0;
+
+	ivec2 sign_xy = sign(xy);
+	bool horizontal = abs(xy.x + sign_xy.y) < abs(xy.y - sign_xy.x);
+
+	ivec2 axis;
+	axis.x = horizontal ? (+sign_xy.y) : (0);
+	axis.y = horizontal ? (0) : (-sign_xy.x);
+
+	// Apply wave offset
+	xy = axis * inGroupID.x + xy;
+	vec2 xy_f = vec2(xy);
+
+	// For interpolation to the light center, we only really care about the larger of the two axis
+	bool x_axis_major = abs(xy_f.x) > abs(xy_f.y);
+	float major_axis = x_axis_major ? xy_f.x : xy_f.y;
+
+	float major_axis_start = abs(major_axis);
+	float major_axis_end = abs(major_axis) - float(WAVE_SIZE);
+
+	float ma_light_frac = x_axis_major ? light_xy_fraction.x : light_xy_fraction.y;
+	ma_light_frac = major_axis > 0.0 ? -ma_light_frac : ma_light_frac;
+
+	// back in to screen direction
+	vec2 start_xy = xy_f + light_xy;
+
+	// For the very inner most ring, we need to interpolate to a pixel centered UV, so the UV->pixel rounding doesn't skip output pixels
+	vec2 end_xy = mix(LightCoordinate.xy, start_xy, (major_axis_end + ma_light_frac) / (major_axis_start + ma_light_frac));
+
+	// The major axis should be a round number
+	vec2 xy_delta = (start_xy - end_xy);
+
+	// Inverse the read order when reverse direction is true
+	float thread_step = float(inGroupThreadID ^ (reverse_direction ? 0u : uint(WAVE_SIZE - 1)));
+
+	vec2 pixel_xy = mix(start_xy, end_xy, thread_step / float(WAVE_SIZE));
+	float pixel_distance = major_axis_start - thread_step + ma_light_frac;
+
+	outPixelXY = pixel_xy;
+	outPixelDistance = pixel_distance;
+	outDeltaXY = xy_delta;
+	outMajorAxisX = x_axis_major;
+}
+
+// Number of bilinear sample reads performed per-thread
+#define READ_COUNT (SAMPLE_COUNT / WAVE_SIZE + 2)
+
+// Common shared data
+shared float DepthData[READ_COUNT * WAVE_SIZE];
+
+void main(void)
+{
+	ivec3 inGroupID = ivec3(gl_WorkGroupID);
+	uint inGroupThreadID = gl_LocalInvocationID.x;
+
+	vec2 xy_delta;
+	vec2 pixel_xy;
+	float pixel_distance;
+	bool x_axis_major; // major axis is x axis? abs(xy_delta.x) > abs(xy_delta.y).
+
+	ComputeWavefrontExtents(inGroupID, inGroupThreadID, xy_delta, pixel_xy, pixel_distance, x_axis_major);
+
+	// Read in the depth values
+	float sampling_depth[READ_COUNT];
+	float shadowing_depth[READ_COUNT];
+	float depth_thickness_scale[READ_COUNT];
+	float sample_distance[READ_COUNT];
+
+	float direction = -LightCoordinate.w;
+	float z_sign = NearDepthValue > FarDepthValue ? -1.0 : +1.0;
+
+	int i;
+	bool is_edge = false;
+	bool skip_pixel = false;
+
+	vec2 write_xy = floor(pixel_xy);
+
+	for (i = 0; i < READ_COUNT; i++)
+	{
+		// We sample depth twice per pixel per sample, and interpolate with an edge detect filter
+		// Interpolation should only occur on the minor axis of the ray - major axis coordinates should be at pixel centers
+		vec2 read_xy = floor(pixel_xy);
+
+		float minor_axis = x_axis_major ? pixel_xy.y : pixel_xy.x;
+
+		// If a pixel has been detected as an edge, then optionally (IgnoreEdgePixels) don't include it in the shadow
+		const float edge_skip = 1e20; // if edge skipping is enabled, apply an extreme value/blend on edge samples to push the value out of range
+
+		vec2 depths;
+		float bilinear = fract(minor_axis) - 0.5;
+
+#if USE_HALF_PIXEL_OFFSET
+		read_xy += 0.5;
+#endif
+
+		float bias = bilinear > 0.0 ? 1.0 : -1.0;
+		vec2 offset_xy = vec2(x_axis_major ? 0.0 : bias, x_axis_major ? bias : 0.0);
+
+		// Apply DynamicRes after offset_xy addition so the bilinear neighbour samples exactly 1 texel away.
+		vec2 coord = read_xy * InvDepthTextureSize * DynamicRes;
+		vec2 coord_with_offset = (read_xy + offset_xy) * InvDepthTextureSize * DynamicRes;
+
+		depths.x = textureLod(DepthTexture, coord, 0.0).r;
+		depths.y = textureLod(DepthTexture, coord_with_offset, 0.0).r;
+
+		// Depth thresholds (bilinear/shadow thickness) are based on a fractional ratio of the difference between sampled depth and the far clip depth
+		const float kDepthThicknessFloor = 1e-4; // Prevents division by zero in depth_scale when depth is at the far clip plane
+		depth_thickness_scale[i] = max(abs(FarDepthValue - depths.x), kDepthThicknessFloor);
+
+		// If depth variance is more than a specific threshold, then just use point filtering
+		bool use_point_filter = abs(depths.x - depths.y) > depth_thickness_scale[i] * BilinearThreshold;
+
+		// Store for debug output when DebugOutputEdgeMask is true
+		if (i == 0)
+			is_edge = use_point_filter;
+
+		// The pixel starts sampling at this depth
+		sampling_depth[i] = depths.x;
+
+		float edge_depth = IgnoreEdgePixels ? edge_skip : depths.x;
+		// Any sample in this wavefront is possibly interpolated towards the bilinear sample
+		// So use should use a shadowing depth that is further away, based on the difference between the two samples
+		float shadow_depth = depths.x + abs(depths.x - depths.y) * z_sign;
+
+		// Shadows cast from this depth
+		shadowing_depth[i] = use_point_filter ? edge_depth : shadow_depth;
+
+		// Store for later
+		sample_distance[i] = pixel_distance + float(WAVE_SIZE * i) * direction;
+
+		// Iterate to the next pixel along the ray. This will be WAVE_SIZE pixels along the ray...
+		pixel_xy += xy_delta * direction;
+	}
+
+	// Write the shadow depths to LDS
+	for (i = 0; i < READ_COUNT; i++)
+	{
+		// Perspective correct the shadowing depth, in this space, all light rays are parallel
+		float stored_depth = (shadowing_depth[i] - LightCoordinate.z) / sample_distance[i];
+
+		if (i != 0)
+		{
+			// For pixels within sampling distance of the light, it is possible that sampling will
+			// overshoot the light coordinate for extended reads. We want to ignore these samples
+			stored_depth = sample_distance[i] > 0.0 ? stored_depth : 1e10;
+		}
+
+		// Store the depth values in groupshared
+		int idx = (i * WAVE_SIZE) + int(inGroupThreadID);
+		DepthData[idx] = stored_depth;
+	}
+
+	// Sync wavefronts now groupshared DepthData is written
+	memoryBarrierShared();
+	barrier();
+
+	float start_depth = sampling_depth[0];
+
+	if (start_depth == 0.0 || start_depth == 1.0)
+		return;
+
+	// lerp away from far depth by a tiny fraction?
+	if (UsePrecisionOffset)
+		start_depth = mix(start_depth, FarDepthValue, -1.0 / 65535.0);
+
+	// perspective correct the depth
+	start_depth = (start_depth - LightCoordinate.z) / sample_distance[0];
+
+	// Start by reading the next value
+	int sample_index = int(inGroupThreadID) + 1;
+
+	vec4 shadow_value = vec4(1.0);
+
+	// This is the inverse of how large the shadowing window is for the projected sample data.
+	// All values in the LDS sample list are scaled by 1.0 / sample_distance, such that all light directions become parallel.
+	// The multiply by sample_distance[0] here is to compensate for the projection divide in the data.
+	// The 1.0 / SurfaceThickness is to adjust user selected thickness. So a 0.5% thickness will scale depth values from [0,1] to [0,200]. The shadow window is always 1 wide.
+	// 1.0 / depth_thickness_scale[0] is because SurfaceThickness is percentage of remaining depth between the sample and the far clip - not a percentage of the full depth range.
+	// The min() function is to make sure the window is a minimum width when very close to the light. The +direction term will bias the result so the pixel at the very center of the light is either fully lit or shadowed
+	float depth_scale = min(sample_distance[0] + direction, 1.0 / SurfaceThickness) * sample_distance[0] / depth_thickness_scale[0];
+
+	start_depth = start_depth * depth_scale - z_sign;
+
+	for (i = 0; i < SAMPLE_COUNT; i++)
+	{
+		float depth_delta = abs(start_depth - DepthData[sample_index + i] * depth_scale);
+
+		// By using 4 values, the average shadow can be taken, which can help soften single-pixel shadows.
+		shadow_value[i & 3] = min(shadow_value[i & 3], depth_delta);
+	}
+
+	// Apply the contrast value.
+	// A value of 0 indicates a sample was exactly matched to the reference depth (and the result is fully shadowed)
+	// We want some boost to this range, so samples don't have to exactly match to produce a full shadow.
+	shadow_value = clamp(shadow_value * (ShadowContrast) + (1.0 - ShadowContrast), 0.0, 1.0);
+
+	float result = 0.0;
+
+	// Take the average of 4 samples, this is useful to reduces aliasing noise in the source depth, especially with long shadows.
+	result = dot(shadow_value, vec4(0.25));
+
+	imageStore(OutputTexture, ivec2(write_xy), vec4(result));
+}

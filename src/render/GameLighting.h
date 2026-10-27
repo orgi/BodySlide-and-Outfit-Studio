@@ -7,8 +7,11 @@
  * Before the surface draws its meshes, the sun renders the depth of the
  * shadow-casting meshes into its shadow map (res/shaders/shadowmap.*),
  * fitted to their bounds, like the engine's focus shadow map of an actor.
- * While the surface draws a mesh, its shader gets the sun, the ambient light
- * and, if the mesh receives shadows, the shadow map.
+ * Then the camera renders the depth of the opaque meshes, over which
+ * Community Shaders' screen-space shadows march towards the sun
+ * (ContactShadows). While the surface draws a mesh, its shader gets the sun,
+ * the ambient light, the shadow map if the mesh receives shadows and the
+ * screen-space shadows if it is opaque.
  *
  * Which meshes cast and receive shadows comes from their NIF shapes: a
  * BSLightingShaderProperty's Cast_Shadows and Receive_Shadows flags. Shapes
@@ -17,6 +20,8 @@
 
 #pragma once
 
+#include "../components/CommunityShaders.h"
+#include "ContactShadows.h"
 #include "GLSurface.h"
 
 #include <array>
@@ -56,6 +61,13 @@ public:
 	void SetShadowsEnabled(bool enable);
 	bool ShadowsEnabled() const { return shadowsEnabled; }
 
+	// Community Shaders' screen-space shadows, as its settings have them.
+	// They run when the settings and SetContactShadowsEnabled() allow it and
+	// OpenGL 4.3 is there (ContactShadowsAvailable()).
+	void SetContactShadowSettings(const communityshaders::ScreenSpaceShadowsSettings& settings) { contactSettings = settings; }
+	void SetContactShadowsEnabled(bool enable) { contactShadowsEnabled = enable; }
+	bool ContactShadowsAvailable() const { return contactShadowsAvailable; }
+
 	// The flags of the surface's mesh named `meshName`. Meshes without flags
 	// neither cast nor receive shadows.
 	void SetShapeFlags(const std::string& meshName, const ShapeFlags& flags);
@@ -63,6 +75,7 @@ public:
 private:
 	static constexpr int MapSize = 2048;
 	static constexpr int ShadowTextureUnit = 13; // the materials use units 0 to 7 and 20
+	static constexpr int ContactShadowTextureUnit = 14;
 	static constexpr GLuint SkinRotationXAttribute = 9; // GLSurface uses the attributes 0 to 8
 	static constexpr GLuint SkinRotationYAttribute = 10;
 
@@ -77,6 +90,16 @@ private:
 	bool shadowRendered = false;
 	std::unordered_map<std::string, ShapeFlags> shapeFlags;
 
+	ContactShadows contactShadows;
+	communityshaders::ScreenSpaceShadowsSettings contactSettings;
+	bool contactShadowsAvailable = false;
+	bool contactShadowsEnabled = false;
+	bool contactShadowsRendered = false;
+	GLuint cameraFramebuffer = 0;
+	GLuint cameraDepthTexture = 0;
+	int cameraWidth = 0;
+	int cameraHeight = 0;
+
 	nifly::Vector3 sunDirection = nifly::Vector3(0.0f, 1.0f, 0.0f);
 	nifly::Vector3 sunColor;
 	glm::mat4x4 ambientMatrix = glm::mat4x4(0.0f); // column c: color channel c
@@ -89,5 +112,8 @@ private:
 	nifly::Vector3 boundsMax;
 
 	void RenderShadowMap();
+	void RenderContactShadows(const glm::mat4x4& projection, const glm::mat4x4& view);
+	// Draws the depth of a mesh with the depth shader in use.
+	void DrawDepth(Mesh* m, const glm::mat4x4& view, GLint vertexAlphaLoc);
 	void SetupMeshShader(Mesh* m, GLShader& shader);
 };

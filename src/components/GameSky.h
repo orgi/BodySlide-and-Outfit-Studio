@@ -18,6 +18,8 @@
 
 #pragma once
 
+#include "CommunityShaders.h"
+
 #include <Object3d.hpp>
 
 #include <array>
@@ -59,25 +61,7 @@ struct ClimateTiming {
 // Reads a CLMT record's TNAM subrecord. Returns false if it is too short.
 bool ReadClimateTiming(const std::vector<uint8_t>& timing, ClimateTiming& climateTiming);
 
-// Sky Sync's settings as its feature has them after Community Shaders loaded
-// its settings (SkySync.h defaults for missing values, then its clamps).
-struct SkySyncSettings {
-	bool loaded = false; // Community Shaders loads the feature
-	bool enabled = true;
-	bool useAlternateSunPath = false;
-	int sunPath = 0; // Southern, Northern, Vanilla, Custom
-	float customAngle = -35.0f;
-	float minShadowElevation = 10.0f;
-	bool dimSunlightUnderHorizon = true;
-	float horizonFadeHours = 0.7f;
-};
-
-// Reads Sky Sync's settings like Community Shaders does from
-// Data/SKSE/Plugins/CommunityShaders: SettingsDefault.json, then the sections
-// of SettingsUser.json over it. The feature is loaded when its
-// Shaders/Features/SkySync.ini exists and "Disable at Boot" doesn't disable
-// it. Errors go to `errors`.
-SkySyncSettings LoadSkySyncSettings(const std::string& dataFolder, std::vector<std::string>& errors);
+using communityshaders::SkySyncSettings;
 
 // Whether the sun follows Sky Sync's alternate path in game.
 bool UsesAlternateSunPath(const SkySyncSettings& settings);

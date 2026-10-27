@@ -77,6 +77,9 @@
     <ClInclude Include="src\components\ActorAnimation.h">
       <Filter>Components</Filter>
     </ClInclude>
+    <ClInclude Include="src\components\CommunityShaders.h">
+      <Filter>Components</Filter>
+    </ClInclude>
     <ClInclude Include="src\components\GameSky.h">
       <Filter>Components</Filter>
     </ClInclude>
@@ -120,6 +123,9 @@
       <Filter>Rendering</Filter>
     </ClInclude>
     <ClInclude Include="src\render\GLSurface.h">
+      <Filter>Rendering</Filter>
+    </ClInclude>
+    <ClInclude Include="src\render\ContactShadows.h">
       <Filter>Rendering</Filter>
     </ClInclude>
     <ClInclude Include="src\render\GameLighting.h">
@@ -211,6 +217,9 @@
     <ClCompile Include="src\components\ActorAnimation.cpp">
       <Filter>Components</Filter>
     </ClCompile>
+    <ClCompile Include="src\components\CommunityShaders.cpp">
+      <Filter>Components</Filter>
+    </ClCompile>
     <ClCompile Include="src\components\GameSky.cpp">
       <Filter>Components</Filter>
     </ClCompile>
@@ -254,6 +263,9 @@
       <Filter>Rendering</Filter>
     </ClCompile>
     <ClCompile Include="src\render\GLSurface.cpp">
+      <Filter>Rendering</Filter>
+    </ClCompile>
+    <ClCompile Include="src\render\ContactShadows.cpp">
       <Filter>Rendering</Filter>
     </ClCompile>
     <ClCompile Include="src\render\GameLighting.cpp">

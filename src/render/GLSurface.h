@@ -88,8 +88,8 @@ public:
 	nifly::Vector3 camRot; // Turntable camera emulation.
 	nifly::Vector3 camRotOffset;
 
-	// Optional: called by RenderOneFrame before it draws the meshes, and by RenderMesh once the mesh's shader is in use and set up.
-	std::function<void()> preRenderMeshes;
+	// Optional: called by RenderOneFrame before it draws the meshes (with the frame's projection and view), and by RenderMesh once the mesh's shader is in use and set up.
+	std::function<void(const glm::mat4x4&, const glm::mat4x4&)> preRenderMeshes;
 	std::function<void(Mesh*, GLShader&)> setupMeshShader;
 
 	nifly::Vector3 GetBackgroundColor() const { return colorBackground; }

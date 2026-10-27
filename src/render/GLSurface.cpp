@@ -834,7 +834,7 @@ void GLSurface::RenderOneFrame() {
 	UpdateProjection();
 
 	if (preRenderMeshes)
-		preRenderMeshes();
+		preRenderMeshes(matProjection, matView);
 
 	// Render regular meshes
 	for (auto& m : meshes) {

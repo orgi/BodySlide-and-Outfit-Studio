@@ -12,7 +12,9 @@
  * the game's Lighting.hlsl does (mul(DirectionalAmbient, float4(normal, 1))).
  * The sun's shadow is filtered like the game's shadow mask (Utility.hlsl,
  * SHADOWFILTER 4: eight spiral samples, rotated per pixel and frame); the
- * frames are averaged, as the game's temporal anti-aliasing does.
+ * frames are averaged, as the game's temporal anti-aliasing does. Opaque
+ * meshes also get Community Shaders' screen-space shadow of the sun
+ * (src/render/ContactShadows.cpp).
  */
 
 uniform sampler2D texDiffuse;
@@ -73,6 +75,9 @@ uniform mat4 matShadow;
 uniform sampler2DShadow texShadow;
 uniform float shadowBias;
 uniform float shadowRadius;
+
+uniform bool bContactShadow;
+uniform sampler2D texContactShadow;
 
 in vec3 lightSun;
 in vec3 modelPos;
@@ -159,6 +164,13 @@ float sunShadow()
 		}
 	}
 	return visibility / 128.0;
+}
+
+// Community Shaders' screen-space shadow of the pixel: ScreenSpaceShadows::GetScreenSpaceShadow (ScreenSpaceShadows.hlsli)
+float contactShadow()
+{
+	ivec2 size = textureSize(texContactShadow, 0);
+	return texelFetch(texContactShadow, clamp(ivec2(gl_FragCoord.xy + 0.5), ivec2(0), size - 1), 0).r;
 }
 
 void sunLight(in vec3 lightColor, in vec3 lightDir, inout vec3 outDiffuse, inout vec3 outSpec)
@@ -291,10 +303,13 @@ void main(void)
 				normal = normalize(normal);
 			}
 
-			// The sun, darkened by its shadow, and the directional ambient light
+			// The sun, darkened by its shadows, and the directional ambient light
 			vec3 sun = sunColor;
 			if (bSunShadow)
 				sun *= sunShadow();
+			// Lighting.hlsl: the screen-space shadow on surfaces facing the sun
+			if (bContactShadow && dot(normal, lightSun) >= 0.0)
+				sun *= contactShadow();
 			sunLight(sun, lightSun, outDiffuse, outSpecular);
 
 			vec3 modelNormal = normalize(transpose(mat3(matView)) * normal);

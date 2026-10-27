@@ -233,6 +233,7 @@
     <ClInclude Include="lib\FSEngine\FSManager.h" />
     <ClInclude Include="lib\TinyXML-2\tinyxml2.h" />
     <ClInclude Include="src\components\ActorAnimation.h" />
+    <ClInclude Include="src\components\CommunityShaders.h" />
     <ClInclude Include="src\components\GameSky.h" />
     <ClInclude Include="src\components\LeveledListData.h" />
     <ClInclude Include="src\files\ESPReader.h" />
@@ -248,6 +249,7 @@
     <ClInclude Include="src\render\GLOffscreenBuffer.h" />
     <ClInclude Include="src\render\GLShader.h" />
     <ClInclude Include="src\render\GLSurface.h" />
+    <ClInclude Include="src\render\ContactShadows.h" />
     <ClInclude Include="src\render\GameLighting.h" />
     <ClInclude Include="src\utils\ConfigurationManager.h" />
     <ClInclude Include="src\utils\Log.h" />
@@ -283,6 +285,7 @@
     <ClCompile Include="lib\SOIL2\wfETC.c" />
     <ClCompile Include="lib\TinyXML-2\tinyxml2.cpp" />
     <ClCompile Include="src\components\ActorAnimation.cpp" />
+    <ClCompile Include="src\components\CommunityShaders.cpp" />
     <ClCompile Include="src\components\GameSky.cpp" />
     <ClCompile Include="src\components\LeveledListData.cpp" />
     <ClCompile Include="src\files\ESPReader.cpp" />
@@ -298,6 +301,7 @@
     <ClCompile Include="src\render\GLOffscreenBuffer.cpp" />
     <ClCompile Include="src\render\GLShader.cpp" />
     <ClCompile Include="src\render\GLSurface.cpp" />
+    <ClCompile Include="src\render\ContactShadows.cpp" />
     <ClCompile Include="src\render\GameLighting.cpp" />
     <ClCompile Include="src\utils\ConfigurationManager.cpp" />
     <ClCompile Include="src\utils\Log.cpp" />

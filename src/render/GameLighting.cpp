@@ -78,8 +78,13 @@ bool GameLighting::Initialize(GLSurface* surface, const std::string& shaderDir) 
 		return false;
 	}
 
+	contactShadowsAvailable = contactShadows.Initialize(shaderDir);
+
 	gls = surface;
-	gls->preRenderMeshes = [this]() { RenderShadowMap(); };
+	gls->preRenderMeshes = [this](const glm::mat4x4& projection, const glm::mat4x4& view) {
+		RenderShadowMap();
+		RenderContactShadows(projection, view);
+	};
 	gls->setupMeshShader = [this](Mesh* m, GLShader& shader) { SetupMeshShader(m, shader); };
 	return true;
 }
@@ -105,6 +110,20 @@ void GameLighting::Release() {
 		glDeleteBuffers(1, &skinRotationBuffer);
 		skinRotationBuffer = 0;
 	}
+
+	contactShadows.Release();
+	contactShadowsAvailable = false;
+	contactShadowsRendered = false;
+	if (cameraFramebuffer) {
+		glDeleteFramebuffers(1, &cameraFramebuffer);
+		cameraFramebuffer = 0;
+	}
+	if (cameraDepthTexture) {
+		glDeleteTextures(1, &cameraDepthTexture);
+		cameraDepthTexture = 0;
+	}
+	cameraWidth = 0;
+	cameraHeight = 0;
 
 	shadowRendered = false;
 	hasBounds = false;
@@ -223,50 +242,8 @@ void GameLighting::RenderShadowMap() {
 	GLint vertexAlphaLoc = glGetUniformLocation(program, "bVertexAlpha");
 	depthShader.SetMatrixProjection(projection);
 
-	for (auto& m : casters) {
-		m->UpdateBuffers();
-
-		GLuint diffuse = m->material ? m->material->GetTexID(0) : 0;
-		bool alphaTest = (m->alphaFlags & (1 << 9)) != 0 && diffuse && m->textured && m->texcoord;
-		bool vertexAlpha = alphaTest && m->vertexColors && m->vertexAlpha && m->valpha;
-
-		depthShader.SetMatrixModelView(view, m->matModel);
-		depthShader.SetAlphaThreshold(alphaTest ? m->alphaThreshold / 255.0f : -1.0f);
-		depthShader.SetProperties(m->prop);
-		if (vertexAlphaLoc >= 0)
-			glUniform1i(vertexAlphaLoc, vertexAlpha ? GL_TRUE : GL_FALSE);
-		if (alphaTest)
-			depthShader.BindTexture(0, diffuse, "texDiffuse");
-
-		glBindVertexArray(m->vao);
-		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m->ibo);
-
-		// The skin rotation another mesh's draw left in the buffer isn't this mesh's.
-		glDisableVertexAttribArray(SkinRotationXAttribute);
-		glDisableVertexAttribArray(SkinRotationYAttribute);
-
-		glBindBuffer(GL_ARRAY_BUFFER, m->vbo[0]);
-		glEnableVertexAttribArray(0);
-		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, (GLvoid*)0);
-
-		if (vertexAlpha) {
-			glBindBuffer(GL_ARRAY_BUFFER, m->vbo[5]);
-			glEnableVertexAttribArray(5);
-			glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, 0, (GLvoid*)0);
-		}
-
-		if (alphaTest) {
-			glBindBuffer(GL_ARRAY_BUFFER, m->vbo[6]);
-			glEnableVertexAttribArray(6);
-			glVertexAttribPointer(6, 2, GL_FLOAT, GL_FALSE, 0, (GLvoid*)0);
-		}
-
-		glDrawElements(GL_TRIANGLES, m->nTris * 3, GL_UNSIGNED_SHORT, (GLvoid*)0);
-
-		glDisableVertexAttribArray(6);
-		glDisableVertexAttribArray(5);
-		glDisableVertexAttribArray(0);
-	}
+	for (auto& m : casters)
+		DrawDepth(m, view, vertexAlphaLoc);
 
 	depthShader.End();
 	glBindBuffer(GL_ARRAY_BUFFER, 0);
@@ -280,6 +257,127 @@ void GameLighting::RenderShadowMap() {
 
 	shadowMatrix = projection * view;
 	shadowRendered = true;
+}
+
+void GameLighting::DrawDepth(Mesh* m, const glm::mat4x4& view, GLint vertexAlphaLoc) {
+	m->UpdateBuffers();
+
+	GLuint diffuse = m->material ? m->material->GetTexID(0) : 0;
+	bool alphaTest = (m->alphaFlags & (1 << 9)) != 0 && diffuse && m->textured && m->texcoord;
+	bool vertexAlpha = alphaTest && m->vertexColors && m->vertexAlpha && m->valpha;
+
+	depthShader.SetMatrixModelView(view, m->matModel);
+	depthShader.SetAlphaThreshold(alphaTest ? m->alphaThreshold / 255.0f : -1.0f);
+	depthShader.SetProperties(m->prop);
+	if (vertexAlphaLoc >= 0)
+		glUniform1i(vertexAlphaLoc, vertexAlpha ? GL_TRUE : GL_FALSE);
+	if (alphaTest)
+		depthShader.BindTexture(0, diffuse, "texDiffuse");
+
+	glBindVertexArray(m->vao);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m->ibo);
+
+	// The skin rotation another mesh's draw left in the buffer isn't this mesh's.
+	glDisableVertexAttribArray(SkinRotationXAttribute);
+	glDisableVertexAttribArray(SkinRotationYAttribute);
+
+	glBindBuffer(GL_ARRAY_BUFFER, m->vbo[0]);
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, (GLvoid*)0);
+
+	if (vertexAlpha) {
+		glBindBuffer(GL_ARRAY_BUFFER, m->vbo[5]);
+		glEnableVertexAttribArray(5);
+		glVertexAttribPointer(5, 1, GL_FLOAT, GL_FALSE, 0, (GLvoid*)0);
+	}
+
+	if (alphaTest) {
+		glBindBuffer(GL_ARRAY_BUFFER, m->vbo[6]);
+		glEnableVertexAttribArray(6);
+		glVertexAttribPointer(6, 2, GL_FLOAT, GL_FALSE, 0, (GLvoid*)0);
+	}
+
+	glDrawElements(GL_TRIANGLES, m->nTris * 3, GL_UNSIGNED_SHORT, (GLvoid*)0);
+
+	glDisableVertexAttribArray(6);
+	glDisableVertexAttribArray(5);
+	glDisableVertexAttribArray(0);
+}
+
+void GameLighting::RenderContactShadows(const glm::mat4x4& projection, const glm::mat4x4& view) {
+	contactShadowsRendered = false;
+	if (!contactShadowsAvailable || !contactShadowsEnabled || !contactSettings.loaded || !contactSettings.enable || !gls)
+		return;
+
+	// The game's depth: the opaque meshes (alpha-blended ones are drawn after it).
+	std::vector<Mesh*> opaque;
+	for (auto& m : gls->GetMeshes()) {
+		if (m->bVisible && m->nTris != 0 && m->genBuffers && m->rendermode == Mesh::RenderMode::Normal && !m->HasAlphaBlend())
+			opaque.push_back(m);
+	}
+
+	GLint viewport[4] = {};
+	glGetIntegerv(GL_VIEWPORT, viewport);
+	const int width = viewport[2];
+	const int height = viewport[3];
+	if (width <= 0 || height <= 0)
+		return;
+
+	if (width != cameraWidth || height != cameraHeight) {
+		if (!cameraDepthTexture)
+			glGenTextures(1, &cameraDepthTexture);
+		glBindTexture(GL_TEXTURE_2D, cameraDepthTexture);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		if (!cameraFramebuffer)
+			glGenFramebuffers(1, &cameraFramebuffer);
+		GLint previous = 0;
+		glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous);
+		glBindFramebuffer(GL_FRAMEBUFFER, cameraFramebuffer);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, cameraDepthTexture, 0);
+		glDrawBuffer(GL_NONE);
+		glReadBuffer(GL_NONE);
+		glBindFramebuffer(GL_FRAMEBUFFER, previous);
+		cameraWidth = width;
+		cameraHeight = height;
+	}
+
+	GLint previousFramebuffer = 0;
+	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previousFramebuffer);
+	glBindFramebuffer(GL_FRAMEBUFFER, cameraFramebuffer);
+	glViewport(0, 0, width, height);
+	glEnable(GL_DEPTH_TEST);
+	glDepthFunc(GL_LEQUAL);
+	glDepthMask(GL_TRUE);
+	glDisable(GL_BLEND);
+	glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+	glClear(GL_DEPTH_BUFFER_BIT);
+
+	depthShader.Begin();
+	GLint program = 0;
+	glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+	GLint vertexAlphaLoc = glGetUniformLocation(program, "bVertexAlpha");
+	depthShader.SetMatrixProjection(projection);
+	for (auto& m : opaque) {
+		// The faces RenderMesh draws
+		if (!m->doublesided) {
+			glEnable(GL_CULL_FACE);
+			glCullFace(m->cullMode);
+		}
+		else
+			glDisable(GL_CULL_FACE);
+		DrawDepth(m, view, vertexAlphaLoc);
+	}
+	depthShader.End();
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+	glBindVertexArray(0);
+	glActiveTexture(GL_TEXTURE0);
+	glBindFramebuffer(GL_FRAMEBUFFER, previousFramebuffer);
+	glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+
+	const glm::vec4 lightProjection = projection * view * glm::vec4(sunDirection.x, sunDirection.y, sunDirection.z, 0.0f);
+	contactShadowsRendered = contactShadows.Render(cameraDepthTexture, width, height, lightProjection, contactSettings);
 }
 
 void GameLighting::SetupMeshShader(Mesh* m, GLShader& WXUNUSED(shader)) {
@@ -326,6 +424,19 @@ void GameLighting::SetupMeshShader(Mesh* m, GLShader& WXUNUSED(shader)) {
 		glUniform1i(loc, ShadowTextureUnit);
 		glActiveTexture(GL_TEXTURE0 + ShadowTextureUnit);
 		glBindTexture(GL_TEXTURE_2D, shadowTexture);
+		glActiveTexture(GL_TEXTURE0);
+	}
+
+	// Lighting.hlsl applies the screen-space shadows to the meshes of the deferred pass, the opaque ones.
+	const bool contact = contactShadowsRendered && !m->HasAlphaBlend();
+	loc = glGetUniformLocation(program, "bContactShadow");
+	if (loc >= 0)
+		glUniform1i(loc, contact ? GL_TRUE : GL_FALSE);
+	loc = glGetUniformLocation(program, "texContactShadow");
+	if (loc >= 0) {
+		glUniform1i(loc, ContactShadowTextureUnit);
+		glActiveTexture(GL_TEXTURE0 + ContactShadowTextureUnit);
+		glBindTexture(GL_TEXTURE_2D, contact ? contactShadows.Texture() : 0);
 		glActiveTexture(GL_TEXTURE0);
 	}
 
