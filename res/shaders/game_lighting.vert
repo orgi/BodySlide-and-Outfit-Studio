@@ -26,6 +26,7 @@ uniform bool bShowVertexAlpha;
 
 uniform bool bWireframe;
 uniform bool bModelSpace;
+uniform bool bSkinRotation;
 
 layout(location = 0) in vec3 vertexPosition;
 layout(location = 1) in vec3 vertexNormal;
@@ -36,12 +37,16 @@ layout(location = 5) in float vertexAlpha;
 layout(location = 6) in vec2 vertexUV;
 layout(location = 7) in float vertexMask;
 layout(location = 8) in float vertexWeight;
+// The x and y axis of the vertex' skinning, for model space normal maps (GameLighting)
+layout(location = 9) in vec3 skinRotationX;
+layout(location = 10) in vec3 skinRotationY;
 
 // Direction towards the sun, model space
 uniform vec3 sunDirection;
 
 out vec3 lightSun;
 out vec3 modelPos;
+out mat3 skinRotation;
 
 out vec3 viewDir;
 out vec3 n;
@@ -128,6 +133,15 @@ void main(void)
 	viewDir = normalize(-vPos);
 	lightSun = normalize(mat3(matView) * sunDirection);
 	modelPos = vec3(matModel * vec4(vertexPosition, 1.0));
+
+	// A posed vertex turns the normals of a model space normal map like its own normal
+	skinRotation = mat3(1.0);
+	if (bModelSpace && bSkinRotation)
+	{
+		vec3 x = normalize(skinRotationX);
+		vec3 z = normalize(cross(x, skinRotationY));
+		skinRotation = mat3(x, cross(z, x), z);
+	}
 
 	if (!bShowTexture || bWireframe)
 	{

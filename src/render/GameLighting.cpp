@@ -49,6 +49,8 @@ bool GameLighting::Initialize(GLSurface* surface, const std::string& shaderDir) 
 	while (glGetError() != GL_NO_ERROR)
 		;
 
+	glGenBuffers(1, &skinRotationBuffer);
+
 	glGenTextures(1, &shadowTexture);
 	glBindTexture(GL_TEXTURE_2D, shadowTexture);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, MapSize, MapSize, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
@@ -97,6 +99,11 @@ void GameLighting::Release() {
 	if (shadowTexture) {
 		glDeleteTextures(1, &shadowTexture);
 		shadowTexture = 0;
+	}
+
+	if (skinRotationBuffer) {
+		glDeleteBuffers(1, &skinRotationBuffer);
+		skinRotationBuffer = 0;
 	}
 
 	shadowRendered = false;
@@ -234,6 +241,10 @@ void GameLighting::RenderShadowMap() {
 		glBindVertexArray(m->vao);
 		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m->ibo);
 
+		// The skin rotation another mesh's draw left in the buffer isn't this mesh's.
+		glDisableVertexAttribArray(SkinRotationXAttribute);
+		glDisableVertexAttribArray(SkinRotationYAttribute);
+
 		glBindBuffer(GL_ARRAY_BUFFER, m->vbo[0]);
 		glEnableVertexAttribArray(0);
 		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, (GLvoid*)0);
@@ -287,6 +298,27 @@ void GameLighting::SetupMeshShader(Mesh* m, GLShader& WXUNUSED(shader)) {
 	loc = glGetUniformLocation(program, "ambientMatrix");
 	if (loc >= 0)
 		glUniformMatrix4fv(loc, 1, GL_FALSE, (GLfloat*)&ambientMatrix);
+
+	// The skin rotation goes with the mesh's vertex arrays, which RenderMesh binds for the draw.
+	const std::vector<float>* rotation = skinRotationSource ? skinRotationSource(m) : nullptr;
+	loc = glGetUniformLocation(program, "bSkinRotation");
+	if (loc >= 0)
+		glUniform1i(loc, rotation ? GL_TRUE : GL_FALSE);
+	glBindVertexArray(m->vao);
+	if (rotation) {
+		glBindBuffer(GL_ARRAY_BUFFER, skinRotationBuffer);
+		glBufferData(GL_ARRAY_BUFFER, rotation->size() * sizeof(float), rotation->data(), GL_STREAM_DRAW);
+		glEnableVertexAttribArray(SkinRotationXAttribute);
+		glVertexAttribPointer(SkinRotationXAttribute, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (GLvoid*)0);
+		glEnableVertexAttribArray(SkinRotationYAttribute);
+		glVertexAttribPointer(SkinRotationYAttribute, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (GLvoid*)(3 * sizeof(float)));
+		glBindBuffer(GL_ARRAY_BUFFER, 0);
+	}
+	else {
+		glDisableVertexAttribArray(SkinRotationXAttribute);
+		glDisableVertexAttribArray(SkinRotationYAttribute);
+	}
+	glBindVertexArray(0);
 
 	// The shadow sampler always gets its own unit: it may not share one with the materials' samplers.
 	loc = glGetUniformLocation(program, "texShadow");

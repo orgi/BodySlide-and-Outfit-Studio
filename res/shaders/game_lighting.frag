@@ -76,6 +76,7 @@ uniform float shadowRadius;
 
 in vec3 lightSun;
 in vec3 modelPos;
+in mat3 skinRotation;
 
 in vec3 viewDir;
 in vec3 n;
@@ -264,7 +265,7 @@ void main(void)
 					// Model Space Normal Map
 					normal = normalize(normalMap.rgb * 2.0 - 1.0);
 					normal.r = -normal.r;
-					normal = mat3(matView) * normal;
+					normal = mat3(matView) * (skinRotation * normal);
 					normal = normalize(normal);
 
 					if (bSpecular)

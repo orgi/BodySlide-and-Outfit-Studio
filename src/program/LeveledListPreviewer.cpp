@@ -401,8 +401,10 @@ void LeveledListPreviewer::OnShown() {
 					 Vector3(d1x / 100.0f, d1y / 100.0f, d1z / 100.0f),
 					 Vector3(d2x / 100.0f, d2y / 100.0f, d2z / 100.0f));
 
-	if (lighting_.Initialize(&gls, Config["AppDir"] + "/res/shaders"))
+	if (lighting_.Initialize(&gls, Config["AppDir"] + "/res/shaders")) {
 		lighting_.SetShadowsEnabled(GetMenuBar() && GetMenuBar()->IsChecked(ID_ToggleShadows));
+		lighting_.SetSkinRotationSource([this](Mesh* m) { return actorAnim_.SkinRotation(m); });
+	}
 
 	if (Config.Exists("Rendering/ColorBackground")) {
 		int r = Config.GetIntValue("Rendering/ColorBackground.r");

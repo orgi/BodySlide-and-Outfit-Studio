@@ -77,6 +77,7 @@ The **Animation** checkbox (config key `AnimEnabled`) plays an animation of the 
 ### Skinning
 
 * **Skinning** happens on the CPU for every visible skinned shape of a worn model: `Σ w · boneWorld · skinToBone · v`, using the shape's own skin data and the world transforms of the bones its attached clone is bound to (after FSMP wrote its bones). At most four influences per vertex (the strongest are kept, the rest are dropped with a warning), no weight renormalization. Unweighted vertices collapse to the origin, as in game. Unskinned shapes stay static.
+* **Model space normal maps** (shapes whose shader has Model_Space_Normals, e.g. the body skin): their normals are in the rest pose, so the previewer's shader turns them with each vertex' skinning rotation, as the game's shader does for skinned meshes; `ActorAnimation::SkinRotation()` holds the rotation while the uploaded vertices are posed, `GameLighting` hands it to the shader. Tangent space normal maps follow the skinned tangents.
 * **Rest-pose invariant**: posed vertices exist in a mesh only between `ActorAnimation::Update()` and `RestoreRestPose()` inside one actor frame (`ActorFrame()`; the GPU keeps the posed copy). All other code — preset morphs, morph-base capture — always reads and writes the rest pose. New mesh-loading paths must register their models with `actorAnim_.RegisterModel()` after `GLSurface::AddMeshFromNif()`.
 
 ## Lighting and shadows

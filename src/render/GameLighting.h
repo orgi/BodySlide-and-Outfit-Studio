@@ -20,6 +20,7 @@
 #include "GLSurface.h"
 
 #include <array>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -47,6 +48,11 @@ public:
 	// normal.z and 1), all in the meshes' model space.
 	void SetSun(const nifly::Vector3& direction, const nifly::Vector3& color, const std::array<std::array<float, 4>, 3>& ambient);
 
+	// Where a mesh with a model space normal map gets the rotation of each
+	// vertex' skinning while it is posed (x and y axis, six floats per
+	// vertex, mesh space); nullptr: not posed.
+	void SetSkinRotationSource(std::function<const std::vector<float>*(Mesh*)> source) { skinRotationSource = std::move(source); }
+
 	void SetShadowsEnabled(bool enable);
 	bool ShadowsEnabled() const { return shadowsEnabled; }
 
@@ -57,11 +63,15 @@ public:
 private:
 	static constexpr int MapSize = 2048;
 	static constexpr int ShadowTextureUnit = 13; // the materials use units 0 to 7 and 20
+	static constexpr GLuint SkinRotationXAttribute = 9; // GLSurface uses the attributes 0 to 8
+	static constexpr GLuint SkinRotationYAttribute = 10;
 
 	GLSurface* gls = nullptr;
 	GLShader depthShader;
 	GLuint framebuffer = 0;
 	GLuint shadowTexture = 0;
+	GLuint skinRotationBuffer = 0; // the skin rotation of the mesh being drawn
+	std::function<const std::vector<float>*(Mesh*)> skinRotationSource;
 	glm::mat4x4 shadowMatrix = glm::identity<glm::mat4x4>(); // model space to shadow map clip space
 	bool shadowsEnabled = false;
 	bool shadowRendered = false;

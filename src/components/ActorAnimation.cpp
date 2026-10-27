@@ -739,6 +739,7 @@ void ActorAnimation::PrepareSkin(Shape& s, const std::vector<MatTransform>& worl
 		s.restTangents.assign(m->tangents.get(), m->tangents.get() + n);
 	if (m->bitangents)
 		s.restBitangents.assign(m->bitangents.get(), m->bitangents.get() + n);
+	s.skinRotation.resize(m->modelSpace ? n * 6 : 0);
 
 	// Mesh-space skinning matrix per bone: back to NIF units, skin → bone →
 	// actor world, then into the mesh's model space.
@@ -777,6 +778,28 @@ void ActorAnimation::SkinRange(Shape& s, int begin, int end) {
 			m->tangents[v] = NormalizedOr(tn, s.restTangents[v]);
 		if (m->bitangents)
 			m->bitangents[v] = NormalizedOr(bn, s.restBitangents[v]);
+
+		if (!s.skinRotation.empty()) {
+			const Vector3 xAxis(1.0f, 0.0f, 0.0f);
+			const Vector3 yAxis(0.0f, 1.0f, 0.0f);
+			float xa[3] = {0.0f, 0.0f, 0.0f};
+			float ya[3] = {0.0f, 0.0f, 0.0f};
+			for (int k = 0; k < 4; k++) {
+				if (inf.weight[k] <= 0.0f)
+					continue;
+				AccumulateDir(bones[inf.bone[k]], xAxis, inf.weight[k], xa);
+				AccumulateDir(bones[inf.bone[k]], yAxis, inf.weight[k], ya);
+			}
+			const Vector3 x = NormalizedOr(xa, xAxis);
+			const Vector3 y = NormalizedOr(ya, yAxis);
+			float* r = &s.skinRotation[static_cast<size_t>(v) * 6];
+			r[0] = x.x;
+			r[1] = x.y;
+			r[2] = x.z;
+			r[3] = y.x;
+			r[4] = y.y;
+			r[5] = y.z;
+		}
 	}
 }
 
@@ -790,6 +813,7 @@ void ActorAnimation::FinishSkin(Shape& s) {
 	if (m->bitangents)
 		m->QueueUpdate(Mesh::UpdateType::Bitangents);
 	s.posed = true;
+	s.rotationPosed = !s.skinRotation.empty();
 }
 
 void ActorAnimation::SetCbpcActor(const std::optional<cbpc::ActorInfo>& info) {
@@ -919,5 +943,15 @@ void ActorAnimation::QueueRestPoseUpload(const MeshLookup& getMesh) {
 			m->QueueUpdate(Mesh::UpdateType::Tangents);
 		if (m->bitangents)
 			m->QueueUpdate(Mesh::UpdateType::Bitangents);
+		s.rotationPosed = false;
 	}
+}
+
+const std::vector<float>* ActorAnimation::SkinRotation(const Mesh* m) const {
+	if (!m)
+		return nullptr;
+	auto it = shapes.find(m->shapeName);
+	if (it == shapes.end() || it->second.mesh != m || !it->second.rotationPosed || it->second.skinRotation.size() != static_cast<size_t>(m->nVerts) * 6)
+		return nullptr;
+	return &it->second.skinRotation;
 }

@@ -125,6 +125,11 @@ public:
 	void RestoreRestPose();
 	// Queues the rest pose of every registered mesh for upload to the GPU.
 	void QueueRestPoseUpload(const MeshLookup& getMesh);
+	// For a mesh with a model space normal map whose uploaded vertices are
+	// posed: the rotation of each vertex' skinning, which the normal map's
+	// normals take like the vertex normals (x and y axis, six floats per
+	// vertex, mesh space). nullptr otherwise.
+	const std::vector<float>* SkinRotation(const Mesh* m) const;
 
 private:
 	struct Influence {
@@ -152,6 +157,11 @@ private:
 		bool posed = false;
 		std::vector<nifly::Vector3> restVerts, restNorms, restTangents, restBitangents;
 		std::vector<nifly::MatTransform> skinning; // per bone: rest vertex → posed vertex, mesh space
+		// Meshes with a model space normal map: the x and y axis of each
+		// vertex' skinning (six floats per vertex, mesh space), valid while
+		// the uploaded vertices are posed.
+		std::vector<float> skinRotation;
+		bool rotationPosed = false;
 	};
 
 	// Reads one of the character's animations and checks it against the rig. Logs every failure.
