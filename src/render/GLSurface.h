@@ -10,6 +10,8 @@ See the included LICENSE file
 
 #include <wx/glcanvas.h>
 
+#include <functional>
+
 class GLSurface {
 public:
 	enum CursorType {
@@ -85,6 +87,10 @@ public:
 	nifly::Vector3 camOffset;
 	nifly::Vector3 camRot; // Turntable camera emulation.
 	nifly::Vector3 camRotOffset;
+
+	// Optional: called by RenderOneFrame before it draws the meshes, and by RenderMesh once the mesh's shader is in use and set up.
+	std::function<void()> preRenderMeshes;
+	std::function<void(Mesh*, GLShader&)> setupMeshShader;
 
 	nifly::Vector3 GetBackgroundColor() const { return colorBackground; }
 	void SetBackgroundColor(const nifly::Vector3& color) { colorBackground = color; }

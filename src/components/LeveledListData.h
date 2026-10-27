@@ -183,6 +183,12 @@ struct EngineRecord {
 	uint32_t npcClass = 0;							   // NPC_ CNAM
 	float weight = 0.0f;							   // NPC_ NAM7
 	std::vector<std::pair<uint32_t, int8_t>> factions; // NPC_ SNAM: faction, rank
+	std::vector<uint8_t> colors;					   // WTHR NAM0: color types x times of day, RGBA
+	std::vector<std::vector<uint8_t>> directionalAmbient; // WTHR DALC, one per time of day
+	std::vector<uint32_t> imageSpaces;				   // WTHR IMSP: IMGS per time of day
+	std::vector<uint8_t> hdr;						   // IMGS HNAM
+	std::vector<uint8_t> timing;					   // CLMT TNAM: sunrise begin/end, sunset begin/end (10 minutes), ...
+	uint32_t climate = 0;							   // WRLD CNAM
 };
 
 class LeveledListData {

@@ -98,12 +98,14 @@ set(BSsources
 	src/files/wxDDSImage.cpp
 	src/components/ActorAnimation.cpp
 	src/components/BuildSelection.cpp
+	src/components/GameSky.cpp
 	src/components/LeveledListData.cpp
 	src/files/HkxFile.cpp
 	src/program/BodySlideApp.cpp
 	src/program/NormalsGenDialog.cpp
 	src/program/PreviewWindow.cpp
 	src/program/LeveledListPreviewer.cpp
+	src/render/GameLighting.cpp
 	src/ui/wxNormalsGenDlg.cpp
 	)
 
@@ -112,9 +114,11 @@ set(LLsources
 	src/files/wxDDSImage.cpp
 	src/files/HkxFile.cpp
 	src/components/ActorAnimation.cpp
+	src/components/GameSky.cpp
 	src/components/LeveledListData.cpp
 	src/program/LeveledListApp.cpp
 	src/program/LeveledListPreviewer.cpp
+	src/render/GameLighting.cpp
 	)
 
 add_executable(OutfitStudio ${OSsources})

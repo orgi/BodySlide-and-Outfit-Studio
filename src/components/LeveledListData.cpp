@@ -1388,7 +1388,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 
 	// Load the main ESP first
 	esp::ESPReader mainReader;
-	if (!mainReader.Load(filepath, {"ARMO", "ARMA", "TXST", "LVLI", "OTFT", "HDPT", "KYWD", "FACT", "CLAS", "CSTY", "VTYP", "RACE", "NPC_"}))
+	if (!mainReader.Load(filepath, {"ARMO", "ARMA", "TXST", "LVLI", "OTFT", "HDPT", "KYWD", "FACT", "CLAS", "CSTY", "VTYP", "RACE", "NPC_", "WTHR", "CLMT", "WRLD", "IMGS"}))
 		return false;
 
 	espFilename = mainReader.GetFilename();
@@ -1494,7 +1494,7 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 			continue;
 		}
 
-		LoadRecordsFromESP(masterPath, {"ARMO", "ARMA", "TXST", "NPC_", "RACE", "HDPT", "OTFT", "LVLI", "KYWD", "FACT", "CLAS", "CSTY", "VTYP"}, masterIdx, masters);
+		LoadRecordsFromESP(masterPath, {"ARMO", "ARMA", "TXST", "NPC_", "RACE", "HDPT", "OTFT", "LVLI", "KYWD", "FACT", "CLAS", "CSTY", "VTYP", "WTHR", "CLMT", "WRLD", "IMGS"}, masterIdx, masters);
 		++mastersLoaded;
 	}
 
@@ -2528,7 +2528,7 @@ uint16_t LeveledListData::EnsureDynamicMaster(const std::string& pluginPath, int
 	}
 	wxLogMessage("EnsureDynamicMaster: loading '%s' at globalPluginIdx=%u%s", pluginPath, static_cast<unsigned>(globalIdx), noClobber ? " (no-clobber)" : "");
 	dynamicMasters.push_back(pluginPath);
-	LoadRecordsFromESP(pluginPath, {"RACE", "ARMO", "ARMA", "TXST", "OTFT", "LVLI", "NPC_", "HDPT", "KYWD", "FACT", "CLAS", "CSTY", "VTYP"}, globalIdx, espMasters, masterLoadDepth, noClobber);
+	LoadRecordsFromESP(pluginPath, {"RACE", "ARMO", "ARMA", "TXST", "OTFT", "LVLI", "NPC_", "HDPT", "KYWD", "FACT", "CLAS", "CSTY", "VTYP", "WTHR", "CLMT", "WRLD", "IMGS"}, globalIdx, espMasters, masterLoadDepth, noClobber);
 	return globalIdx;
 }
 
@@ -3057,7 +3057,7 @@ std::array<std::string, 8> LeveledListData::ResolveSkinTexturesForNPC(const std:
 namespace {
 
 // The record types CacheEngineRecords keeps; the loaders read them in addition to their own.
-const std::set<std::string> kEngineRecordTypes = {"KYWD", "FACT", "CLAS", "CSTY", "VTYP", "RACE", "NPC_", "ARMO"};
+const std::set<std::string> kEngineRecordTypes = {"KYWD", "FACT", "CLAS", "CSTY", "VTYP", "RACE", "NPC_", "ARMO", "WTHR", "CLMT", "WRLD", "IMGS"};
 
 // TES4 record flags of a plugin file; false if it isn't one.
 bool ReadPluginFlags(const std::string& path, uint32_t& flags) {
@@ -3295,6 +3295,30 @@ void LeveledListData::CacheEngineRecords(const esp::ESPReader& reader) {
 		else if (rec.type == "ARMO") {
 			auto* bod2 = rec.GetSubrecord("BOD2");
 			record.bipedSlots = ReadU32(bod2 ? bod2 : rec.GetSubrecord("BODT"));
+		}
+		else if (rec.type == "WTHR") {
+			if (auto* nam0 = rec.GetSubrecord("NAM0"))
+				record.colors = nam0->data;
+			for (auto* dalc : rec.GetSubrecords("DALC"))
+				record.directionalAmbient.push_back(dalc->data);
+			if (auto* imsp = rec.GetSubrecord("IMSP")) {
+				for (size_t offset = 0; offset + 4 <= imsp->data.size(); offset += 4) {
+					const uint32_t fid = ReadU32(imsp, offset);
+					record.imageSpaces.push_back(fid ? toEngine(fid) : 0);
+				}
+			}
+		}
+		else if (rec.type == "IMGS") {
+			if (auto* hnam = rec.GetSubrecord("HNAM"))
+				record.hdr = hnam->data;
+		}
+		else if (rec.type == "CLMT") {
+			if (auto* tnam = rec.GetSubrecord("TNAM"))
+				record.timing = tnam->data;
+		}
+		else if (rec.type == "WRLD") {
+			const uint32_t fid = ReadU32(rec.GetSubrecord("CNAM"));
+			record.climate = fid ? toEngine(fid) : 0;
 		}
 
 		if (rec.type == "KYWD" && !record.editorId.empty()) {

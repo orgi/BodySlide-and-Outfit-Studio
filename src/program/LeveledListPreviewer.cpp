@@ -60,6 +60,7 @@ wxBEGIN_EVENT_TABLE(LeveledListPreviewer, wxFrame)
 	EVT_MENU(LeveledListPreviewer::ID_ToggleUntextured, LeveledListPreviewer::OnToggleUntextured)
 	EVT_MENU(LeveledListPreviewer::ID_ToggleBody, LeveledListPreviewer::OnToggleBody)
 	EVT_MENU(LeveledListPreviewer::ID_ToggleWireframe, LeveledListPreviewer::OnToggleWireframe)
+	EVT_MENU(LeveledListPreviewer::ID_ToggleShadows, LeveledListPreviewer::OnToggleShadows)
 	EVT_TEXT_ENTER(LeveledListPreviewer::ID_HeadNPC, LeveledListPreviewer::OnHeadEntered)
 	EVT_COMBOBOX(LeveledListPreviewer::ID_Preset, LeveledListPreviewer::OnPresetChanged)
 	EVT_CHECKBOX(LeveledListPreviewer::ID_HighWeight, LeveledListPreviewer::OnHighWeightChanged)
@@ -92,6 +93,8 @@ LeveledListPreviewer::LeveledListPreviewer(wxEvtHandler* handler)
 	viewMenu->Check(ID_ToggleBody, true);
 	viewMenu->AppendCheckItem(ID_ToggleWireframe, _("&Wireframe\tF"), _("Draw the meshes as wireframes"));
 	viewMenu->Check(ID_ToggleWireframe, false);
+	viewMenu->AppendCheckItem(ID_ToggleShadows, _("&Shadows\tH"), _("Let the sun cast shadows where the meshes' Cast_Shadows and Receive_Shadows flags allow it"));
+	viewMenu->Check(ID_ToggleShadows, Config["ShadowsEnabled"] != "false");
 	menuBar->Append(viewMenu, _("&View"));
 
 	SetMenuBar(menuBar);
@@ -156,6 +159,26 @@ LeveledListPreviewer::LeveledListPreviewer(wxEvtHandler* handler)
 	pauseToggle_->Bind(wxEVT_CHECKBOX, &LeveledListPreviewer::OnTogglePause, this);
 	smpSizer->Add(pauseToggle_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 5);
 	leftSizer->Add(smpSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
+
+	// The outdoor light: time of day and the actor's facing
+	wxBoxSizer* sunSizer = new wxBoxSizer(wxHORIZONTAL);
+	sunSizer->Add(new wxStaticText(leftPanel, wxID_ANY, _("Sun:")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+	sunTimeSlider_ = new wxSlider(leftPanel, wxID_ANY, 720, 0, 1439);
+	sunTimeSlider_->SetToolTip(_("Time of day, from sunrise to sunset: the sun and the sky light of the weather SkyrimClear, as the game computes them with Community Shaders' Sky Sync"));
+	sunTimeSlider_->Bind(wxEVT_SLIDER, &LeveledListPreviewer::OnSunTimeChanged, this);
+	sunTimeSlider_->Disable();
+	sunSizer->Add(sunTimeSlider_, 1, wxALIGN_CENTER_VERTICAL);
+	sunTimeText_ = new wxStaticText(leftPanel, wxID_ANY, "00:00");
+	sunSizer->Add(sunTimeText_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 5);
+	sunSizer->Add(new wxStaticText(leftPanel, wxID_ANY, _("Facing:")), 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 10);
+	facingChoice_ = new wxChoice(leftPanel, wxID_ANY);
+	for (const wxString& direction : {_("North"), _("North-east"), _("East"), _("South-east"), _("South"), _("South-west"), _("West"), _("North-west")})
+		facingChoice_->Append(direction);
+	facingChoice_->SetSelection(std::clamp(Config.Exists("ActorFacing") ? Config.GetIntValue("ActorFacing") : 4, 0, 7));
+	facingChoice_->SetToolTip(_("The direction the actor faces in the world"));
+	facingChoice_->Bind(wxEVT_CHOICE, &LeveledListPreviewer::OnFacingChanged, this);
+	sunSizer->Add(facingChoice_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 5);
+	leftSizer->Add(sunSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
 
 	// Notebook: tab 0 = Outfits (LVLI/OTFT from the loaded ESP), tab 1 = NPCs.
 	// Each tab owns its own list, search box and filters.
@@ -378,6 +401,9 @@ void LeveledListPreviewer::OnShown() {
 					 Vector3(d1x / 100.0f, d1y / 100.0f, d1z / 100.0f),
 					 Vector3(d2x / 100.0f, d2y / 100.0f, d2z / 100.0f));
 
+	if (lighting_.Initialize(&gls, Config["AppDir"] + "/res/shaders"))
+		lighting_.SetShadowsEnabled(GetMenuBar() && GetMenuBar()->IsChecked(ID_ToggleShadows));
+
 	if (Config.Exists("Rendering/ColorBackground")) {
 		int r = Config.GetIntValue("Rendering/ColorBackground.r");
 		int g = Config.GetIntValue("Rendering/ColorBackground.g");
@@ -498,6 +524,7 @@ void LeveledListPreviewer::LoadESPFile(const std::string& filepath) {
 
 	LoadPresetList();
 	animActorDirty_ = true;
+	LoadGameSky();
 
 	SetStatusText(wxString::Format(_("Loaded %s — %s"), data.GetFilename(), data.GetLoadInfo()));
 	RefreshOutfitList();
@@ -929,6 +956,7 @@ bool LeveledListPreviewer::LoadNifFromPath(const std::string& relativePath, cons
 		Mesh* m = gls.AddMeshFromNif(&nif, shapeName, displayName, nullptr, false);
 		if (!m)
 			continue;
+		lighting_.SetShapeFlags(m->shapeName, GameLighting::ReadShapeFlags(nif, nif.FindBlockByName<NiShape>(shapeName)));
 
 		const std::vector<Color4>* vcolors = nif.GetColorsForShape(shapeName);
 		if (vcolors) {
@@ -1165,8 +1193,8 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 		std::vector<std::string> handsTex = hasNpcSkinTextures ? resolveTexFiles(npcBodyPartTextures.hands) : std::vector<std::string>{};
 		std::vector<std::string> feetTex = hasNpcSkinTextures ? resolveTexFiles(npcBodyPartTextures.feet) : std::vector<std::string>{};
 
-		std::string vShader = Config["AppDir"] + "/res/shaders/default.vert";
-		std::string fShader = Config["AppDir"] + "/res/shaders/default.frag";
+		std::string vShader = Config["AppDir"] + "/res/shaders/game_lighting.vert";
+		std::string fShader = Config["AppDir"] + "/res/shaders/game_lighting.frag";
 		TargetGame targetGame = (TargetGame)Config.GetIntValue("TargetGame");
 		if (targetGame == FO4 || targetGame == FO4VR || targetGame == FO76) {
 			vShader = Config["AppDir"] + "/res/shaders/fo4_default.vert";
@@ -1337,8 +1365,8 @@ void LeveledListPreviewer::ReconcileBodyAndOutfitShapes() {
 	std::vector<std::string> handsTex = hasNpcSkinTextures ? resolveTexFiles(npcBodyPartTextures.hands) : std::vector<std::string>{};
 	std::vector<std::string> feetTex = hasNpcSkinTextures ? resolveTexFiles(npcBodyPartTextures.feet) : std::vector<std::string>{};
 
-	std::string vShader = Config["AppDir"] + "/res/shaders/default.vert";
-	std::string fShader = Config["AppDir"] + "/res/shaders/default.frag";
+	std::string vShader = Config["AppDir"] + "/res/shaders/game_lighting.vert";
+	std::string fShader = Config["AppDir"] + "/res/shaders/game_lighting.frag";
 	TargetGame targetGame = (TargetGame)Config.GetIntValue("TargetGame");
 	if (targetGame == FO4 || targetGame == FO4VR || targetGame == FO76) {
 		vShader = Config["AppDir"] + "/res/shaders/fo4_default.vert";
@@ -1608,6 +1636,7 @@ void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
 		Mesh* m = gls.AddMeshFromNif(&nif, shapeName, meshName, nullptr, false);
 		if (!m)
 			continue;
+		lighting_.SetShapeFlags(m->shapeName, GameLighting::ReadShapeFlags(nif, nif.FindBlockByName<NiShape>(shapeName)));
 
 		applyHeadCorrection(m, nif, shapeName);
 
@@ -2743,8 +2772,8 @@ bool LeveledListPreviewer::AddNifShapeTextures(NifFile* fromNif, const std::stri
 		}
 	}
 
-	std::string vShader = Config["AppDir"] + "/res/shaders/default.vert";
-	std::string fShader = Config["AppDir"] + "/res/shaders/default.frag";
+	std::string vShader = Config["AppDir"] + "/res/shaders/game_lighting.vert";
+	std::string fShader = Config["AppDir"] + "/res/shaders/game_lighting.frag";
 
 	TargetGame targetGame = (TargetGame)Config.GetIntValue("TargetGame");
 	if (targetGame == FO4 || targetGame == FO4VR || targetGame == FO76) {
@@ -3246,6 +3275,7 @@ void LeveledListPreviewer::LoadOutfitPieceShapes(const lldata::OutfitEntry& outf
 		Mesh* m = gls.AddMeshFromNif(&nif, shapeName, displayName, nullptr, false);
 		if (!m)
 			continue;
+		lighting_.SetShapeFlags(m->shapeName, GameLighting::ReadShapeFlags(nif, nif.FindBlockByName<NiShape>(shapeName)));
 
 		outfitShapeNifName_[m->shapeName] = shapeName;
 
@@ -3690,6 +3720,85 @@ void LeveledListPreviewer::OnToggleWireframe(wxCommandEvent& WXUNUSED(event)) {
 	ToggleWireframe();
 }
 
+void LeveledListPreviewer::OnToggleShadows(wxCommandEvent& event) {
+	Config.SetValue("ShadowsEnabled", event.IsChecked() ? "true" : "false");
+	lighting_.SetShadowsEnabled(event.IsChecked());
+	gls.RenderOneFrame();
+}
+
+void LeveledListPreviewer::OnSunTimeChanged(wxCommandEvent& WXUNUSED(event)) {
+	Config.SetValue("SunTime", sunTimeSlider_->GetValue());
+	UpdateSun();
+}
+
+void LeveledListPreviewer::OnFacingChanged(wxCommandEvent& WXUNUSED(event)) {
+	Config.SetValue("ActorFacing", facingChoice_->GetSelection());
+	UpdateSun();
+}
+
+void LeveledListPreviewer::LoadGameSky() {
+	skyLoaded_ = false;
+
+	// The weather SkyrimClear and the climate of the worldspace Tamriel, as
+	// the load order has them.
+	const lldata::EngineRecord* weather = data.FindEngineRecord(data.EngineFormId("Skyrim.esm", 0x00081A));
+	const lldata::EngineRecord* world = data.FindEngineRecord(data.EngineFormId("Skyrim.esm", 0x00003C));
+	const lldata::EngineRecord* climate = world && world->climate ? data.FindEngineRecord(world->climate) : nullptr;
+	std::array<const std::vector<uint8_t>*, 4> imageSpaceHdr{};
+	for (size_t time = 0; weather && time < 4 && time < weather->imageSpaces.size(); time++) {
+		if (const lldata::EngineRecord* imageSpace = data.FindEngineRecord(weather->imageSpaces[time]))
+			imageSpaceHdr[time] = &imageSpace->hdr;
+	}
+	if (!weather || !gamesky::ReadWeather(weather->colors, weather->directionalAmbient, imageSpaceHdr, weather_)) {
+		wxLogError("LeveledListPreviewer: the weather SkyrimClear (Skyrim.esm 0x00081A) is missing in the load order or has no complete colors (NAM0, DALC, the image spaces' HNAM); the meshes get neither sun nor sky light");
+		lighting_.SetSun(Vector3(), Vector3(), {});
+		return;
+	}
+	if (!climate || !gamesky::ReadClimateTiming(climate->timing, climateTiming_)) {
+		wxLogError("LeveledListPreviewer: the climate of the worldspace Tamriel (Skyrim.esm 0x00003C) is missing in the load order or has no timing (TNAM); the meshes get neither sun nor sky light");
+		lighting_.SetSun(Vector3(), Vector3(), {});
+		return;
+	}
+
+	std::vector<std::string> errors;
+	skySync_ = gamesky::LoadSkySyncSettings(Config["GameDataPath"], errors);
+	for (auto& error : errors)
+		wxLogError("LeveledListPreviewer: %s", error);
+	if (!gamesky::UsesAlternateSunPath(skySync_))
+		wxLogWarning("LeveledListPreviewer: the game doesn't use the alternate sun path of Community Shaders' Sky Sync; the engine's own sun path isn't known, the sun follows the alternate path with Sky Sync's Vanilla angle");
+	wxLogMessage("LeveledListPreviewer: sun and sky light of '%s' in the climate '%s' (sunrise %.2f-%.2f, sunset %.2f-%.2f), Sky Sync %s",
+				 weather->editorId,
+				 climate->editorId,
+				 climateTiming_.sunriseBegin,
+				 climateTiming_.sunriseEnd,
+				 climateTiming_.sunsetBegin,
+				 climateTiming_.sunsetEnd,
+				 gamesky::UsesAlternateSunPath(skySync_) ? "alternate sun path" : (skySync_.loaded && skySync_.enabled ? "on" : "off"));
+	skyLoaded_ = true;
+
+	float sunrise = 0.0f;
+	float sunset = 0.0f;
+	gamesky::SunHours(climateTiming_, sunrise, sunset);
+	const int first = static_cast<int>(std::ceil(sunrise * 60.0f));
+	const int last = static_cast<int>(std::floor(sunset * 60.0f));
+	sunTimeSlider_->SetRange(first, last);
+	sunTimeSlider_->SetValue(std::clamp(Config.Exists("SunTime") ? Config.GetIntValue("SunTime") : 12 * 60, first, last));
+	sunTimeSlider_->Enable();
+	UpdateSun();
+}
+
+void LeveledListPreviewer::UpdateSun() {
+	const int minutes = sunTimeSlider_->GetValue();
+	sunTimeText_->SetLabel(wxString::Format("%02d:%02d", minutes / 60, minutes % 60));
+	if (!skyLoaded_)
+		return;
+
+	const float heading = 45.0f * facingChoice_->GetSelection();
+	const gamesky::Sky sky = gamesky::Evaluate(weather_, climateTiming_, skySync_, minutes / 60.0f);
+	lighting_.SetSun(gamesky::WorldToModel(sky.toSun, heading), Vector3(sky.sunlight.r, sky.sunlight.g, sky.sunlight.b), gamesky::AmbientFactors(sky.ambient, heading));
+	gls.RenderOneFrame();
+}
+
 void LeveledListPreviewer::OnToggleBody(wxCommandEvent& event) {
 	showBody = event.IsChecked();
 	for (auto& name : bodyShapeNames)
@@ -3742,6 +3851,7 @@ void LeveledListPreviewer::OnClose(wxCloseEvent& WXUNUSED(event)) {
 	if (canvas && context)
 		canvas->SetCurrent(*context);
 
+	lighting_.Release();
 	gls.Cleanup();
 	shapeMaterials.clear();
 
@@ -4401,12 +4511,15 @@ void LLPreviewCanvas::OnKeyUp(wxKeyEvent& event) {
 		case 'T': previewer->ToggleTextures(); break;
 		case 'U':
 		case 'B':
-		case 'F': {
+		case 'F':
+		case 'H': {
 			int menuId = LeveledListPreviewer::ID_ToggleWireframe;
 			if (event.GetKeyCode() == 'U')
 				menuId = LeveledListPreviewer::ID_ToggleUntextured;
 			else if (event.GetKeyCode() == 'B')
 				menuId = LeveledListPreviewer::ID_ToggleBody;
+			else if (event.GetKeyCode() == 'H')
+				menuId = LeveledListPreviewer::ID_ToggleShadows;
 			wxMenuBar* mb = previewer->GetMenuBar();
 			if (mb) {
 				bool newState = !mb->IsChecked(menuId);

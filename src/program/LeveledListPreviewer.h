@@ -8,10 +8,12 @@
 #pragma once
 
 #include "../components/ActorAnimation.h"
+#include "../components/GameSky.h"
 #include "../components/LeveledListData.h"
 #include "../components/SliderPresets.h"
 #include "../files/TriFile.h"
 #include "../render/GLSurface.h"
+#include "../render/GameLighting.h"
 #include "../utils/ConfigurationManager.h"
 
 #include <array>
@@ -44,6 +46,7 @@ class LeveledListPreviewer : public wxFrame {
 	std::unique_ptr<wxGLContext> context;
 
 	GLSurface gls;
+	GameLighting lighting_; // the sun, its shadow and the sky light on the shown meshes
 	std::unordered_map<std::string, GLMaterial*> shapeMaterials;
 	std::vector<std::string> untexturedShapes; // shapes with no diffuse texture
 	std::vector<std::string> bodyShapeNames;   // shapes loaded as body base layer
@@ -217,6 +220,15 @@ class LeveledListPreviewer : public wxFrame {
 	bool cbpcRunning_ = false;
 	bool animRunning_ = false;
 	uint32_t cbpcNpcFormId_ = 0; // the shown NPC's FormID in the game's load order, 0 without one
+	// The outdoor light the actor is shown in (UpdateSun): the weather, the
+	// climate and Sky Sync's settings, read with the plugins (LoadGameSky).
+	wxSlider* sunTimeSlider_ = nullptr; // minutes after midnight
+	wxStaticText* sunTimeText_ = nullptr;
+	wxChoice* facingChoice_ = nullptr; // the actor's facing, in steps of 45 degrees from north
+	bool skyLoaded_ = false;
+	gamesky::Weather weather_;
+	gamesky::ClimateTiming climateTiming_;
+	gamesky::SkySyncSettings skySync_;
 	// Actor the skeleton and clip were loaded for (currentHeadEditorId at load
 	// time) and a flag forcing a reload after the plugin data changed.
 	std::string animActorEditorId_;
@@ -292,6 +304,11 @@ public:
 	void OnToggleUntextured(wxCommandEvent& event);
 	void OnToggleBody(wxCommandEvent& event);
 	void OnToggleWireframe(wxCommandEvent& event);
+	void OnToggleShadows(wxCommandEvent& event);
+	void OnSunTimeChanged(wxCommandEvent& event);
+	void OnFacingChanged(wxCommandEvent& event);
+	void LoadGameSky();
+	void UpdateSun();
 	void OnToggleSmp(wxCommandEvent& event);
 	void OnToggleCbpc(wxCommandEvent& event);
 	void OnToggleAnim(wxCommandEvent& event);
@@ -413,6 +430,7 @@ private:
 		ID_ToggleUntextured,
 		ID_ToggleBody,
 		ID_ToggleWireframe,
+		ID_ToggleShadows,
 		ID_HeadNPC,
 		ID_Preset,
 		ID_HighWeight,

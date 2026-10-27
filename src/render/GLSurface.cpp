@@ -833,6 +833,9 @@ void GLSurface::RenderOneFrame() {
 
 	UpdateProjection();
 
+	if (preRenderMeshes)
+		preRenderMeshes();
+
 	// Render regular meshes
 	for (auto& m : meshes) {
 		if (!m->HasAlphaBlend() && m->bVisible && (m->nTris != 0 || m->nEdges != 0))
@@ -918,6 +921,9 @@ void GLSurface::RenderMesh(Mesh* m) {
 	shader.SetCubemapEnabled(m->cubemap);
 	shader.SetEnvMaskEnabled(false);
 	shader.SetProperties(m->prop);
+
+	if (setupMeshShader)
+		setupMeshShader(m, shader);
 
 	glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 	glEnable(GL_DEPTH_TEST);
