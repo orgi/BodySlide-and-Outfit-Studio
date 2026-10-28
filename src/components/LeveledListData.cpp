@@ -981,6 +981,14 @@ OutfitEntry LeveledListData::BuildOutfitFromOtft(FormId otftId, int& groupCounte
 
 	int totalPieces = 0;
 	int unresolvedCount = 0;
+	auto logUnresolved = [&](lldata::FormId fid) {
+		std::string plugin = LookupGlobalPluginName(FormIdPlugin(fid));
+		wxLogWarning("  Outfit '%s' (%s): reference %06X of %s is neither an ARMO nor an LVLI in the cache",
+					 wxString(otft.editorId),
+					 wxString(otft.sourcePlugin),
+					 static_cast<unsigned>(FormIdLocal(fid)),
+					 plugin.empty() ? std::string("an unmapped master") : "'" + plugin + "'");
+	};
 
 	for (lldata::FormId itemId : otft.items) {
 		// Direct ARMO reference?
@@ -1032,6 +1040,7 @@ OutfitEntry LeveledListData::BuildOutfitFromOtft(FormId otftId, int& groupCounte
 
 			// Create stub pieces for unresolved references
 			for (auto& [fid, level] : unresolvedRefs) {
+				logUnresolved(fid);
 				entry.pieces.push_back(MakeStubPiece(fid));
 				++unresolvedCount;
 
@@ -1042,6 +1051,7 @@ OutfitEntry LeveledListData::BuildOutfitFromOtft(FormId otftId, int& groupCounte
 		}
 
 		// Neither ARMO nor LVLI — create stub
+		logUnresolved(itemId);
 		entry.pieces.push_back(MakeStubPiece(itemId));
 		++unresolvedCount;
 	}
@@ -1411,54 +1421,68 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 
 	// Resolve each master's full path on disk (same probing as the load below).
 	auto resolveMasterPath = [&](const std::string& masterName) -> std::string {
-		std::string p = espDirectory + masterName;
-		if (wxFileName::FileExists(p))
-			return p;
-		if (!baseDataPath.empty()) {
-			p = baseDataPath + masterName;
-			if (wxFileName::FileExists(p))
-				return p;
-		}
-		return {};
+		std::string p = ResolveCaseInsensitive(espDirectory, masterName);
+		if (p.empty() && !baseDataPath.empty())
+			p = ResolveCaseInsensitive(baseDataPath, masterName);
+		return p;
 	};
 
-	std::vector<std::string> masterPaths(masters.size());
+	// The master chain: the main ESP's masters (chain indices 0 .. N-1, same
+	// as their declared index) followed by the masters' own masters that the
+	// main ESP doesn't list, recursively (indirect masters). The masters'
+	// records reference their own masters by FormID, so an indirect master
+	// must be loaded — into a dynamic-master slot — before the master that
+	// references it; otherwise LoadRecordsFromESP can't remap those
+	// references and the pieces they point to stay unresolved.
+	std::vector<std::string> chainNames = masters;
+	std::vector<std::string> chainPaths(masters.size());
 	for (size_t mi = 0; mi < masters.size(); ++mi)
-		masterPaths[mi] = resolveMasterPath(masters[mi]);
+		chainPaths[mi] = resolveMasterPath(masters[mi]);
 
-	// Index masters by lowercase name for dependency lookup.
+	// Index the chain by lowercase name for dependency lookup.
 	std::unordered_map<std::string, size_t> indexByName;
 	indexByName.reserve(masters.size());
 	for (size_t mi = 0; mi < masters.size(); ++mi)
 		indexByName.emplace(ToLower(masters[mi]), mi);
 
-	// For each master, read its own TES4 master list and record edges
-	// (depIdx → mi) where depIdx is also part of this main ESP's master list.
-	std::vector<std::vector<size_t>> outEdges(masters.size()); // outEdges[a] = b means a must load before b
-	std::vector<int> inDegree(masters.size(), 0);
-	for (size_t mi = 0; mi < masters.size(); ++mi) {
-		if (masterPaths[mi].empty())
+	// For each chain plugin, read its own TES4 master list; masters not yet in
+	// the chain are appended to it (and read in turn).
+	const std::string espFilenameLower = ToLower(espFilename);
+	std::vector<std::vector<size_t>> chainDeps; // chainDeps[c] = chain indices of c's own masters
+	for (size_t ci = 0; ci < chainNames.size(); ++ci) {
+		chainDeps.emplace_back();
+		if (chainPaths[ci].empty())
 			continue;
-		auto deps = esp::ESPReader::ReadPluginMasters(masterPaths[mi]);
-		for (auto& depName : deps) {
-			auto it = indexByName.find(ToLower(depName));
-			if (it == indexByName.end())
-				continue; // dep is not part of this main ESP's master list
-			size_t depIdx = it->second;
-			if (depIdx == mi)
-				continue; // self-reference, ignore
-			outEdges[depIdx].push_back(mi);
-			++inDegree[mi];
+		for (auto& depName : esp::ESPReader::ReadPluginMasters(chainPaths[ci])) {
+			if (ToLower(depName) == espFilenameLower)
+				continue; // a master depending on the main ESP is a cycle, ignore
+			auto [it, added] = indexByName.emplace(ToLower(depName), chainNames.size());
+			if (added) {
+				chainNames.push_back(depName);
+				chainPaths.push_back(resolveMasterPath(depName));
+			}
+			if (it->second != ci) // self-reference, ignore
+				chainDeps[ci].push_back(it->second);
+		}
+	}
+
+	// Record edges (depIdx → ci): a plugin's masters load before it.
+	std::vector<std::vector<size_t>> outEdges(chainNames.size()); // outEdges[a] = b means a must load before b
+	std::vector<int> inDegree(chainNames.size(), 0);
+	for (size_t ci = 0; ci < chainNames.size(); ++ci) {
+		for (size_t depIdx : chainDeps[ci]) {
+			outEdges[depIdx].push_back(ci);
+			++inDegree[ci];
 		}
 	}
 
 	// Kahn's algorithm: pick zero-in-degree masters in declared order to make the
 	// fallback deterministic and aligned with the original list.
 	std::vector<size_t> loadOrder;
-	loadOrder.reserve(masters.size());
-	std::vector<bool> queued(masters.size(), false);
+	loadOrder.reserve(chainNames.size());
+	std::vector<bool> queued(chainNames.size(), false);
 	auto enqueueReady = [&](size_t startFrom) {
-		for (size_t i = startFrom; i < masters.size(); ++i) {
+		for (size_t i = startFrom; i < chainNames.size(); ++i) {
 			if (!queued[i] && inDegree[i] == 0) {
 				loadOrder.push_back(i);
 				queued[i] = true;
@@ -1476,29 +1500,47 @@ bool LeveledListData::LoadESP(const std::string& filepath) {
 		}
 	}
 	// Cycle / unreachable safety net: append anything we missed in declared order.
-	if (loadOrder.size() < masters.size()) {
+	if (loadOrder.size() < chainNames.size()) {
 		wxLogWarning("LeveledListData: master dependency graph has cycles or unreachable nodes; appending remainder in declared order");
-		for (size_t i = 0; i < masters.size(); ++i)
+		for (size_t i = 0; i < chainNames.size(); ++i)
 			if (!queued[i])
 				loadOrder.push_back(i);
 	}
 
 	int mastersLoaded = 0;
+	size_t indirectMasters = chainNames.size() - masters.size();
+	size_t indirectLoaded = 0;
 	for (size_t mi : loadOrder) {
-		auto& masterName = masters[mi];
-		uint8_t masterIdx = static_cast<uint8_t>(mi);
-		const std::string& masterPath = masterPaths[mi];
+		auto& masterName = chainNames[mi];
+		const std::string& masterPath = chainPaths[mi];
+
+		if (mi >= masters.size()) {
+			if (masterPath.empty()) {
+				wxLogWarning("LeveledListData: Indirect master not found: %s (a master of the main ESP's masters)", wxString(masterName));
+				continue;
+			}
+			if (EnsureDynamicMaster(masterPath) != 0)
+				++indirectLoaded;
+			continue;
+		}
 
 		if (masterPath.empty()) {
 			wxLogWarning("LeveledListData: Master not found: %s (index %zu)", wxString(masterName), mi);
 			continue;
 		}
 
+		uint8_t masterIdx = static_cast<uint8_t>(mi);
 		LoadRecordsFromESP(masterPath, {"ARMO", "ARMA", "TXST", "NPC_", "RACE", "HDPT", "OTFT", "LVLI", "KYWD", "FACT", "CLAS", "CSTY", "VTYP", "WTHR", "CLMT", "WRLD", "IMGS"}, masterIdx, masters);
 		++mastersLoaded;
 	}
 
-	wxLogMessage("LeveledListData: After loading %d/%zu masters: %zu ARMOs, %zu ARMAs in cache", mastersLoaded, masters.size(), armoCache.size(), armaCache.size());
+	wxLogMessage("LeveledListData: After loading %d/%zu masters and %zu/%zu indirect masters: %zu ARMOs, %zu ARMAs in cache",
+				 mastersLoaded,
+				 masters.size(),
+				 indirectLoaded,
+				 indirectMasters,
+				 armoCache.size(),
+				 armaCache.size());
 
 	// Now load the main ESP records (these take priority over masters)
 	// We load after masters so the main ESP's records overwrite master records
@@ -2504,17 +2546,19 @@ uint16_t LeveledListData::EnsureDynamicMaster(const std::string& pluginPath, int
 	// against a freshly-allocated dynamic slot whose cache is empty, and the
 	// lookup would miss even though the record IS cached (just under a
 	// different key).
-	{
-		auto sep = pluginPath.find_last_of("/\\");
-		std::string base = (sep == std::string::npos) ? pluginPath : pluginPath.substr(sep + 1);
-		std::string baseLower = ToLower(base);
-		for (size_t i = 0; i < espMasters.size(); ++i) {
-			if (ToLower(espMasters[i]) == baseLower)
-				return static_cast<uint16_t>(i);
-		}
+	auto baseLowerOf = [](const std::string& path) {
+		auto sep = path.find_last_of("/\\");
+		return ToLower((sep == std::string::npos) ? path : path.substr(sep + 1));
+	};
+	const std::string baseLower = baseLowerOf(pluginPath);
+	for (size_t i = 0; i < espMasters.size(); ++i) {
+		if (ToLower(espMasters[i]) == baseLower)
+			return static_cast<uint16_t>(i);
 	}
+	// Matched by file name: callers resolve the same plugin to differently
+	// spelled paths (directory listing vs. case-insensitive lookup).
 	for (size_t i = 0; i < dynamicMasters.size(); ++i) {
-		if (dynamicMasters[i] == pluginPath)
+		if (baseLowerOf(dynamicMasters[i]) == baseLower)
 			return DynamicGlobalIdx(i);
 	}
 	// Allocate a new globalPluginIdx slot. The 16-bit ordinal space (65535
