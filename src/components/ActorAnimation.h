@@ -230,6 +230,10 @@ private:
 
 	std::unique_ptr<fsmp::Actor> actor;
 	std::vector<fsmp::Node*> rigToNode; // rig bone index → actor node (null: none)
+	// The skeleton's own scale of each rig bone's node, and the world scale of
+	// its parent node (PoseSkeleton).
+	std::vector<float> rigNodeScale, rigParentWorldScale;
+	std::vector<float> rigModelScale; // per frame: the animated scale of each rig bone, its parents' included
 	std::vector<bool> attached;			// models attached to `actor`
 	bool sceneDirty = true;
 	bool sceneAnimated = false;

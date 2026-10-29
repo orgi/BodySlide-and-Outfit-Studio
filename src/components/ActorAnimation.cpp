@@ -660,6 +660,19 @@ void ActorAnimation::BuildScene(const MeshLookup& getMesh, bool simulate, bool c
 
 	actor->UpdateWorld();
 
+	// The scales the skeleton gives the rig bones' nodes, which animations don't change.
+	rigNodeScale.assign(rig.boneNames.size(), 1.0f);
+	rigParentWorldScale.assign(rig.boneNames.size(), 1.0f);
+	for (size_t b = 0; b < rigToNode.size(); b++) {
+		if (!rigToNode[b])
+			continue;
+		MatTransform local, world;
+		fsmp::Actor::GetTransforms(rigToNode[b], local, world);
+		rigNodeScale[b] = local.scale;
+		if (local.scale != 0.0f)
+			rigParentWorldScale[b] = world.scale / local.scale;
+	}
+
 	// CBPC keeps its reference while the actor equips other models; the
 	// models' 3D was attached again, so CBPC's mirror of the 3D follows.
 	if (cbpc && !cbpcInfo) {
@@ -718,9 +731,21 @@ void ActorAnimation::PoseSkeleton() {
 	else
 		pose = targetPose;
 
+	// Skyrim doesn't scale a bone with the scale its animation keys; the
+	// bone's children move as if it were scaled (Havok's model space). The
+	// rig lists parents before their children.
+	rigModelScale.assign(pose.size(), 1.0f);
 	for (size_t b = 0; b < rig.boneNames.size() && b < pose.size(); b++) {
-		if (rigToNode[b])
-			fsmp::Actor::SetLocal(rigToNode[b], ToMatTransform(pose[b]));
+		const int parent = b < rig.parentIndices.size() ? rig.parentIndices[b] : -1;
+		const float parentScale = parent >= 0 && static_cast<size_t>(parent) < b ? rigModelScale[parent] : 1.0f;
+		rigModelScale[b] = parentScale * pose[b].scale[0];
+		if (!rigToNode[b])
+			continue;
+		MatTransform local = ToMatTransform(pose[b]);
+		if (rigParentWorldScale[b] != 0.0f)
+			local.translation *= parentScale / rigParentWorldScale[b];
+		local.scale = rigNodeScale[b];
+		fsmp::Actor::SetLocal(rigToNode[b], local);
 	}
 }
 
