@@ -357,6 +357,17 @@ void ForEachGeometry(RE::NiAVObject* a_object, const std::function<void(RE::BSGe
 	}
 }
 
+// The first geometry named `a_name` below `a_object`. Unlike GetObjectByName,
+// it passes over nodes of that name.
+RE::BSGeometry* FindGeometry(RE::NiAVObject* a_object, const RE::BSFixedString& a_name) {
+	RE::BSGeometry* found = nullptr;
+	ForEachGeometry(a_object, [&](RE::BSGeometry* geometry) {
+		if (!found && geometry->name == a_name)
+			found = geometry;
+	});
+	return found;
+}
+
 // ---------------------------------------------------------------------------
 // Engine functions ActorManager.cpp calls
 // ---------------------------------------------------------------------------
@@ -490,8 +501,8 @@ const std::string& ModelPath(const Model& model) {
 }
 
 bool SetShapeVertices(Model& model, const std::string& shapeName, const std::vector<nifly::Vector3>& positions) {
-	auto* object = model.root->GetObjectByName(RE::BSFixedString(shapeName));
-	auto* shape = object ? object->AsTriShape() : nullptr;
+	auto* geometry = FindGeometry(model.root.get(), RE::BSFixedString(shapeName));
+	auto* shape = geometry ? geometry->AsTriShape() : nullptr;
 	if (!shape) {
 		Report(LogLevel::Error, "'" + model.path + "' has no shape '" + shapeName + "'");
 		return false;
@@ -819,8 +830,7 @@ bool Actor::GetSkinBoneWorlds(const Model& model, const std::string& shapeName, 
 	for (auto& attachment : impl->attachments) {
 		if (attachment.model != &model)
 			continue;
-		auto* object = attachment.shapes->GetObjectByName(RE::BSFixedString(shapeName));
-		auto* geometry = object ? object->AsGeometry() : nullptr;
+		auto* geometry = FindGeometry(attachment.shapes.get(), RE::BSFixedString(shapeName));
 		if (!geometry || !geometry->GetGeometryRuntimeData().skinInstance)
 			return false;
 		auto& skin = geometry->GetGeometryRuntimeData().skinInstance;
