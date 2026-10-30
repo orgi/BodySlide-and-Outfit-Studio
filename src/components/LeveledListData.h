@@ -33,6 +33,14 @@ namespace lldata {
 // 24 bits are reserved (currently zero).
 using FormId = uint64_t;
 
+/// An NPC as the game identifies it: the file name of the plugin that defines
+/// the NPC_ record (lower case) and the record's id without the file index.
+using NpcKey = std::pair<std::string, uint32_t>;
+/// "0x<id>~<plugin>", the text Config stores for an NPC; empty for no NPC.
+std::string NpcKeyText(const NpcKey& key);
+/// The NPC of a NpcKeyText(); an empty plugin if `text` isn't one.
+NpcKey ParseNpcKey(const std::string& text);
+
 /// One NPC from a vanilla ESM, for the head preview selector.
 struct NPCEntry {
 	std::string displayName; // "Full Name (EditorID)" or "EditorID"
@@ -66,6 +74,8 @@ struct NPCEntry {
 	// DOFT remapped into global plugin space if the source plugin is loaded.
 	// 0 = unresolved (caller may then call LoadDynamicNpcOutfitChain()).
 	FormId defaultOutfitFormId = 0;
+
+	NpcKey Key() const;
 };
 
 /// Per-shape texture override from ARMA MO3S alternate textures.
@@ -212,6 +222,9 @@ public:
 	/// Get the loaded NPC list.
 	const std::vector<NPCEntry>& GetNPCs() const { return npcs; }
 
+	/// The loaded NPC with this key; null if there is none.
+	const NPCEntry* FindNpc(const NpcKey& key) const;
+
 	/// Get outfits filtered by player level range.
 	std::vector<const OutfitEntry*> FilterByLevel(uint16_t minLevel, uint16_t maxLevel) const;
 
@@ -255,7 +268,7 @@ public:
 	/// Resolve body/hands/feet NIF paths for an NPC with full fallback chain:
 	/// NPC's WNAM (per-slot) → race's WNAM (per-slot) → empty (caller fills defaults).
 	/// Returns paths in main-ESP FormID space (i.e. looked up in raceCache / armoCache).
-	BodyNifPaths ResolveNpcBodyNifPaths(const std::string& npcEditorId, bool highWeight);
+	BodyNifPaths ResolveNpcBodyNifPaths(const NpcKey& npc, bool highWeight);
 
 	/// Per-slot skin textures for an NPC (body / hands / feet).
 	/// Each sub-array is TX00-TX07 (diffuse, normal, glow, parallax, env, envMask, multilayer, specular).
@@ -266,10 +279,10 @@ public:
 		std::array<std::string, 8> hands{};
 		std::array<std::string, 8> feet{};
 	};
-	BodyPartTextures ResolveNpcBodyPartTextures(const std::string& npcEditorId);
+	BodyPartTextures ResolveNpcBodyPartTextures(const NpcKey& npc);
 
-	/// Get NPC skin cache (editorId -> remapped WNAM FormID from ESP masters).
-	const std::unordered_map<std::string, FormId>& GetNpcSkinCache() const { return npcSkinCache; }
+	/// Get NPC skin cache (NPC -> remapped WNAM FormID from ESP masters).
+	const std::map<NpcKey, FormId>& GetNpcSkinCache() const { return npcSkinCache; }
 
 	/// Resolve a race's default skin ARMO FormID (global plugin-space) from its editor id.
 	/// Returns 0 if the race is unknown or has no WNAM.
@@ -284,7 +297,7 @@ public:
 		std::string editorId;	   // race editor id (raceByEditorId key)
 		FormId skinArmoFormId = 0; // race's WNAM (remapped); 0 if unknown
 	};
-	EffectiveRace GetEffectiveNpcRace(const std::string& npcEditorId);
+	EffectiveRace GetEffectiveNpcRace(const NpcKey& npc);
 
 	/// Skeleton NIF (RACE ANAM) and behavior project (RACE MODL after NAM3) of a
 	/// race for one sex, as data-relative paths ("meshes/..."). Empty if the race
@@ -331,18 +344,18 @@ public:
 	/// Called once from LoadESP(); idempotent on repeat calls.
 	void LoadAllActivePlugins();
 
-	/// Resolve skin textures for a specific NPC by editorId.
+	/// Resolve skin textures for a specific NPC.
 	/// Uses the pre-scanned plugin data for on-demand ESP loading when needed.
-	std::array<std::string, 8> ResolveSkinTexturesForNPC(const std::string& npcEditorId);
+	std::array<std::string, 8> ResolveSkinTexturesForNPC(const NpcKey& npc);
 
-	/// Get NPC skin overrides map (editorId -> skin info from all plugins).
-	const std::unordered_map<std::string, NpcSkinInfo>& GetNpcSkinOverrides() const { return npcSkinOverrides; }
+	/// Get NPC skin overrides map (NPC -> skin info from all plugins).
+	const std::map<NpcKey, NpcSkinInfo>& GetNpcSkinOverrides() const { return npcSkinOverrides; }
 
 	/// Resolve an NPC's default outfit (DOFT) into an OutfitEntry suitable for
 	/// the previewer's existing render pipeline. Returns nullptr if the NPC has
 	/// no DOFT, the OTFT could not be remapped into our caches, or the OTFT is
 	/// unknown. The returned pointer is owned by an internal cache keyed by
-	/// NPC editorId and is valid until the next LoadESP() or LoadNPCs() call.
+	/// NPC and is valid until the next LoadESP() or LoadNPCs() call.
 	const OutfitEntry* ResolveNpcDefaultOutfit(const NPCEntry& npc);
 
 	/// Scan every ESP/ESM in baseDataPath for natively-defined NPC_ records
@@ -445,14 +458,11 @@ private:
 	std::unordered_map<FormId, struct CachedRACE> raceCache;		 // remapped RACE FormID → race info
 	std::unordered_map<FormId, struct CachedHeadPart> headPartCache; // remapped HDPT FormID → head part info
 	std::unordered_map<std::string, FormId> raceByEditorId;			 // editorId → remapped RACE FormID
-	std::unordered_map<std::string, FormId> npcSkinCache;			 // editorId → remapped WNAM FormID
-	std::unordered_map<std::string, NpcSkinInfo> npcSkinOverrides;	 // editorId → skin info from all plugins
-
-	// (lowercased master plugin filename, baseFormId & 0x00FFFFFF) → editorId.
-	// Built from `npcs` at the end of LoadNPCs so that NPC override records
-	// from non-vanilla plugins — which Bethesda's CK serializes WITHOUT an
-	// EDID subrecord — can still be matched back to their canonical editor id.
-	std::map<std::pair<std::string, uint32_t>, std::string> npcEditorIdByMasterFormId;
+	std::map<NpcKey, FormId> npcSkinCache;							 // NPC → remapped WNAM FormID
+	std::map<NpcKey, NpcSkinInfo> npcSkinOverrides;					 // NPC → skin info from all plugins
+	std::map<NpcKey, size_t> npcIndexByKey;							 // NPC → index in `npcs`
+	/// Rebuilds npcIndexByKey after `npcs` changed.
+	void IndexNpcs();
 	// Plugin pool used to encode FormIDs. The conceptual layout is:
 	//   globalPluginIdx 0 .. espMasters.size()-1          = main ESP's masters
 	//   globalPluginIdx espMasters.size()                 = the main ESP itself
@@ -488,9 +498,9 @@ private:
 	bool npcSkinsScanned = false;
 
 	// Per-NPC default-outfit cache populated lazily by ResolveNpcDefaultOutfit.
-	// Keyed by NPC editorId. Cleared in LoadESP / LoadNPCs because OTFT FormIDs
+	// Keyed by NPC. Cleared in LoadESP / LoadNPCs because OTFT FormIDs
 	// remapped into otftCache become stale on reload.
-	mutable std::unordered_map<std::string, OutfitEntry> npcOutfitCache;
+	mutable std::map<NpcKey, OutfitEntry> npcOutfitCache;
 
 	// Engine load order and records. They don't depend on the main ESP and stay across LoadESP.
 	std::vector<EnginePlugin> engineLoadOrder;

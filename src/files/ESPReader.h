@@ -180,6 +180,13 @@ public:
 
 	const std::unordered_map<uint32_t, Record>& GetRecords() const { return records; }
 
+	// A FormID of this plugin as the game reads it: a file index above the
+	// master count is the plugin's own index. The parsed records hold FormIDs
+	// read this way.
+	uint32_t GameFormId(uint32_t formId) const;
+	// The FormIDs with a file index above the master count that GameFormId read, as stored.
+	const std::set<uint32_t>& GetInvalidFormIds() const { return invalidFormIds; }
+
 	const Record* GetRecordByFormId(uint32_t formId) const;
 	std::pair<std::string, uint32_t> ResolveFormId(uint32_t localFormId) const;
 
@@ -214,6 +221,7 @@ private:
 	std::unordered_map<uint32_t, Record> records;
 	std::unordered_map<std::string, std::vector<uint32_t>> recordsByType; // type -> formId list
 	std::vector<std::string> masters;
+	mutable std::set<uint32_t> invalidFormIds;
 	std::string filename;
 	uint32_t nextObjectId = 0x800;
 

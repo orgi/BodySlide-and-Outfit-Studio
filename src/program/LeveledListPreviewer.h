@@ -162,7 +162,7 @@ class LeveledListPreviewer : public wxFrame {
 
 	// NPC head
 	std::unordered_map<std::string, size_t> npcByDisplay; // displayName → index in data.GetNPCs()
-	std::string currentHeadEditorId;
+	lldata::NpcKey currentHeadNpc; // empty plugin = no NPC
 
 	bool useHighWeight = true; // true = _1 (high), false = _0 (low)
 
@@ -230,9 +230,9 @@ class LeveledListPreviewer : public wxFrame {
 	gamesky::ClimateTiming climateTiming_;
 	gamesky::SkySyncSettings skySync_;
 	communityshaders::ScreenSpaceShadowsSettings screenSpaceShadows_;
-	// Actor the skeleton and clip were loaded for (currentHeadEditorId at load
+	// Actor the skeleton and clip were loaded for (currentHeadNpc at load
 	// time) and a flag forcing a reload after the plugin data changed.
-	std::string animActorEditorId_;
+	lldata::NpcKey animActorNpc_;
 	bool animActorDirty_ = true;
 	std::chrono::steady_clock::time_point animLastTick_;
 	// Race skin shape → whether a shown outfit shape covers its slot

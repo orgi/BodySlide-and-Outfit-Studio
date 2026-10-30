@@ -331,9 +331,9 @@ static ReadOutput ReadRecord(std::ifstream& f) {
 // Parse helpers
 // ---------------------------------------------------------------------------
 
-static ArmorRecord ParseArmor(const Record& rec) {
+static ArmorRecord ParseArmor(const Record& rec, const ESPReader& reader) {
 	ArmorRecord ar;
-	ar.formId = rec.formId;
+	ar.formId = reader.GameFormId(rec.formId);
 	ar.editorId = rec.EditorId();
 	ar.fullName = rec.FullName();
 
@@ -373,7 +373,7 @@ static ArmorRecord ParseArmor(const Record& rec) {
 	// EITM: enchantment FormID
 	if (auto* eitm = rec.GetSubrecord("EITM")) {
 		if (eitm->data.size() >= 4)
-			ar.enchantmentId = ReadLE<uint32_t>(eitm->data.data());
+			ar.enchantmentId = reader.GameFormId(ReadLE<uint32_t>(eitm->data.data()));
 	}
 
 	// EAMT: enchantment amount
@@ -385,7 +385,7 @@ static ArmorRecord ParseArmor(const Record& rec) {
 	// TNAM: template armor FormID
 	if (auto* tnam = rec.GetSubrecord("TNAM")) {
 		if (tnam->data.size() >= 4)
-			ar.templateId = ReadLE<uint32_t>(tnam->data.data());
+			ar.templateId = reader.GameFormId(ReadLE<uint32_t>(tnam->data.data()));
 	}
 
 	// KWDA: keywords
@@ -393,7 +393,7 @@ static ArmorRecord ParseArmor(const Record& rec) {
 		size_t count = kwda->data.size() / 4;
 		ar.keywords.reserve(count);
 		for (size_t i = 0; i < count; ++i)
-			ar.keywords.push_back(ReadLE<uint32_t>(kwda->data.data() + i * 4));
+			ar.keywords.push_back(reader.GameFormId(ReadLE<uint32_t>(kwda->data.data() + i * 4)));
 	}
 
 	// DATA: value (4 bytes uint) + weight (4 bytes float)
@@ -415,13 +415,13 @@ static ArmorRecord ParseArmor(const Record& rec) {
 	// MODL: armature (ARMA) FormID references
 	for (auto* modl : rec.GetSubrecords("MODL")) {
 		if (modl->data.size() == 4)
-			ar.armatureIds.push_back(ReadLE<uint32_t>(modl->data.data()));
+			ar.armatureIds.push_back(reader.GameFormId(ReadLE<uint32_t>(modl->data.data())));
 	}
 
 	// RNAM: race FormID
 	if (auto* rnam = rec.GetSubrecord("RNAM")) {
 		if (rnam->data.size() >= 4)
-			ar.raceId = ReadLE<uint32_t>(rnam->data.data());
+			ar.raceId = reader.GameFormId(ReadLE<uint32_t>(rnam->data.data()));
 	}
 
 	return ar;
@@ -430,7 +430,7 @@ static ArmorRecord ParseArmor(const Record& rec) {
 /// Parse an alternate texture array (MO2S, MO3S, MO4S, MO5S).
 /// Format: count (uint32), then count entries of:
 ///   name_len (uint32), name (char[name_len]), txst_formid (uint32), 3d_index (uint32)
-static std::vector<AlternateTexture> ParseAlternateTextures(const Subrecord& sr) {
+static std::vector<AlternateTexture> ParseAlternateTextures(const Subrecord& sr, const ESPReader& reader) {
 	std::vector<AlternateTexture> result;
 	if (sr.data.size() < 4)
 		return result;
@@ -453,7 +453,7 @@ static std::vector<AlternateTexture> ParseAlternateTextures(const Subrecord& sr)
 		while (!at.shapeName.empty() && at.shapeName.back() == '\0')
 			at.shapeName.pop_back();
 		off += nameLen;
-		at.texSetFormId = ReadLE<uint32_t>(sr.data.data() + off);
+		at.texSetFormId = reader.GameFormId(ReadLE<uint32_t>(sr.data.data() + off));
 		at.index3D = ReadLE<uint32_t>(sr.data.data() + off + 4);
 		off += 8;
 
@@ -462,9 +462,9 @@ static std::vector<AlternateTexture> ParseAlternateTextures(const Subrecord& sr)
 	return result;
 }
 
-static ArmorAddonRecord ParseArmorAddon(const Record& rec) {
+static ArmorAddonRecord ParseArmorAddon(const Record& rec, const ESPReader& reader) {
 	ArmorAddonRecord aa;
-	aa.formId = rec.formId;
+	aa.formId = reader.GameFormId(rec.formId);
 	aa.editorId = rec.EditorId();
 
 	// Body slot flags: prefer BOD2 (Skyrim SE/AE), fall back to BODT (legacy).
@@ -488,28 +488,28 @@ static ArmorAddonRecord ParseArmorAddon(const Record& rec) {
 
 	// MO2S: male model alternate textures
 	if (auto* mo2s = rec.GetSubrecord("MO2S"))
-		aa.altTexMale = ParseAlternateTextures(*mo2s);
+		aa.altTexMale = ParseAlternateTextures(*mo2s, reader);
 
 	// MO3S: female model alternate textures
 	if (auto* mo3s = rec.GetSubrecord("MO3S"))
-		aa.altTexFemale = ParseAlternateTextures(*mo3s);
+		aa.altTexFemale = ParseAlternateTextures(*mo3s, reader);
 
 	// NAM0 / NAM1: per-gender skin texture set. A single TXST FormID applied
 	// across the whole worn model — the simpler alternative to per-shape MO3S
 	// overrides, commonly used to retexture an NPC's body via the skin ARMA.
 	if (auto* nam0 = rec.GetSubrecord("NAM0")) {
 		if (nam0->data.size() >= 4)
-			aa.skinTextureMale = ReadLE<uint32_t>(nam0->data.data());
+			aa.skinTextureMale = reader.GameFormId(ReadLE<uint32_t>(nam0->data.data()));
 	}
 	if (auto* nam1 = rec.GetSubrecord("NAM1")) {
 		if (nam1->data.size() >= 4)
-			aa.skinTextureFemale = ReadLE<uint32_t>(nam1->data.data());
+			aa.skinTextureFemale = reader.GameFormId(ReadLE<uint32_t>(nam1->data.data()));
 	}
 
 	// RNAM: primary race
 	if (auto* rnam = rec.GetSubrecord("RNAM")) {
 		if (rnam->data.size() >= 4)
-			aa.raceId = ReadLE<uint32_t>(rnam->data.data());
+			aa.raceId = reader.GameFormId(ReadLE<uint32_t>(rnam->data.data()));
 	}
 
 	// MODL: additional races (each subrecord is one RACE FormID).
@@ -518,15 +518,15 @@ static ArmorAddonRecord ParseArmorAddon(const Record& rec) {
 	// match an ARMA against any of the listed races, in addition to RNAM.
 	for (auto* modl : rec.GetSubrecords("MODL")) {
 		if (modl->data.size() >= 4)
-			aa.additionalRaces.push_back(ReadLE<uint32_t>(modl->data.data()));
+			aa.additionalRaces.push_back(reader.GameFormId(ReadLE<uint32_t>(modl->data.data())));
 	}
 
 	return aa;
 }
 
-static TextureSetRecord ParseTextureSet(const Record& rec) {
+static TextureSetRecord ParseTextureSet(const Record& rec, const ESPReader& reader) {
 	TextureSetRecord ts;
-	ts.formId = rec.formId;
+	ts.formId = reader.GameFormId(rec.formId);
 	ts.editorId = rec.EditorId();
 
 	const char* txNames[] = {"TX00", "TX01", "TX02", "TX03", "TX04", "TX05", "TX06", "TX07"};
@@ -537,9 +537,9 @@ static TextureSetRecord ParseTextureSet(const Record& rec) {
 	return ts;
 }
 
-static LeveledItemRecord ParseLeveledItem(const Record& rec) {
+static LeveledItemRecord ParseLeveledItem(const Record& rec, const ESPReader& reader) {
 	LeveledItemRecord li;
-	li.formId = rec.formId;
+	li.formId = reader.GameFormId(rec.formId);
 	li.editorId = rec.EditorId();
 
 	// LVLF: flags
@@ -557,7 +557,7 @@ static LeveledItemRecord ParseLeveledItem(const Record& rec) {
 	// LVLG: global
 	if (auto* lvlg = rec.GetSubrecord("LVLG")) {
 		if (lvlg->data.size() >= 4)
-			li.globalId = ReadLE<uint32_t>(lvlg->data.data());
+			li.globalId = reader.GameFormId(ReadLE<uint32_t>(lvlg->data.data()));
 	}
 
 	// LVLO entries: level:2, padding:2, ref:4, count:2, padding:2
@@ -565,7 +565,7 @@ static LeveledItemRecord ParseLeveledItem(const Record& rec) {
 		if (lvlo->data.size() >= 12) {
 			LeveledItemEntry entry;
 			entry.level = ReadLE<uint16_t>(lvlo->data.data());
-			entry.reference = ReadLE<uint32_t>(lvlo->data.data() + 4);
+			entry.reference = reader.GameFormId(ReadLE<uint32_t>(lvlo->data.data() + 4));
 			entry.count = ReadLE<uint16_t>(lvlo->data.data() + 8);
 			li.entries.push_back(entry);
 		}
@@ -574,9 +574,9 @@ static LeveledItemRecord ParseLeveledItem(const Record& rec) {
 	return li;
 }
 
-static OutfitRecord ParseOutfit(const Record& rec) {
+static OutfitRecord ParseOutfit(const Record& rec, const ESPReader& reader) {
 	OutfitRecord outfit;
-	outfit.formId = rec.formId;
+	outfit.formId = reader.GameFormId(rec.formId);
 	outfit.editorId = rec.EditorId();
 
 	// INAM: list of FormIDs (4 bytes each)
@@ -584,15 +584,15 @@ static OutfitRecord ParseOutfit(const Record& rec) {
 		size_t count = inam->data.size() / 4;
 		outfit.items.reserve(count);
 		for (size_t i = 0; i < count; ++i)
-			outfit.items.push_back(ReadLE<uint32_t>(inam->data.data() + i * 4));
+			outfit.items.push_back(reader.GameFormId(ReadLE<uint32_t>(inam->data.data() + i * 4)));
 	}
 
 	return outfit;
 }
 
-static NPCRecord ParseNPC(const Record& rec) {
+static NPCRecord ParseNPC(const Record& rec, const ESPReader& reader) {
 	NPCRecord npc;
-	npc.formId = rec.formId;
+	npc.formId = reader.GameFormId(rec.formId);
 	npc.editorId = rec.EditorId();
 	npc.fullName = rec.FullName();
 
@@ -607,19 +607,19 @@ static NPCRecord ParseNPC(const Record& rec) {
 	// WNAM: skin/worn armor FormID
 	if (auto* wnam = rec.GetSubrecord("WNAM")) {
 		if (wnam->data.size() >= 4)
-			npc.wnamFormId = ReadLE<uint32_t>(wnam->data.data());
+			npc.wnamFormId = reader.GameFormId(ReadLE<uint32_t>(wnam->data.data()));
 	}
 
 	// RNAM: race FormID
 	if (auto* rnam = rec.GetSubrecord("RNAM")) {
 		if (rnam->data.size() >= 4)
-			npc.raceFormId = ReadLE<uint32_t>(rnam->data.data());
+			npc.raceFormId = reader.GameFormId(ReadLE<uint32_t>(rnam->data.data()));
 	}
 
 	// DOFT: default outfit FormID (OTFT)
 	if (auto* doft = rec.GetSubrecord("DOFT")) {
 		if (doft->data.size() >= 4)
-			npc.defaultOutfitFormId = ReadLE<uint32_t>(doft->data.data());
+			npc.defaultOutfitFormId = reader.GameFormId(ReadLE<uint32_t>(doft->data.data()));
 	}
 
 	// QNAM: 3 floats (R, G, B) — texture lighting / face tint color
@@ -635,15 +635,15 @@ static NPCRecord ParseNPC(const Record& rec) {
 	// PNAM: head parts
 	for (auto* pnam : rec.GetSubrecords("PNAM")) {
 		if (pnam->data.size() >= 4)
-			npc.headParts.push_back(ReadLE<uint32_t>(pnam->data.data()));
+			npc.headParts.push_back(reader.GameFormId(ReadLE<uint32_t>(pnam->data.data())));
 	}
 
 	return npc;
 }
 
-static HeadPartRecord ParseHeadPart(const Record& rec) {
+static HeadPartRecord ParseHeadPart(const Record& rec, const ESPReader& reader) {
 	HeadPartRecord h;
-	h.formId = rec.formId;
+	h.formId = reader.GameFormId(rec.formId);
 	h.editorId = rec.EditorId();
 
 	// NAM1: model path
@@ -659,15 +659,15 @@ static HeadPartRecord ParseHeadPart(const Record& rec) {
 	return h;
 }
 
-static RaceRecord ParseRace(const Record& rec) {
+static RaceRecord ParseRace(const Record& rec, const ESPReader& reader) {
 	RaceRecord r;
-	r.formId = rec.formId;
+	r.formId = reader.GameFormId(rec.formId);
 	r.editorId = rec.EditorId();
 
 	// WNAM: default skin ARMO for this race
 	if (auto* wnam = rec.GetSubrecord("WNAM")) {
 		if (wnam->data.size() >= 4)
-			r.skinFormId = ReadLE<uint32_t>(wnam->data.data());
+			r.skinFormId = reader.GameFormId(ReadLE<uint32_t>(wnam->data.data()));
 	}
 
 	// RACE subrecords are positional: empty MNAM / FNAM markers select the sex
@@ -888,6 +888,7 @@ bool ESPReader::Load(const std::string& filepath, const std::set<std::string>& r
 	records.clear();
 	recordsByType.clear();
 	masters.clear();
+	invalidFormIds.clear();
 	stringTable.clear();
 	localized = false;
 
@@ -959,7 +960,7 @@ std::vector<ArmorRecord> ESPReader::GetArmors() const {
 	for (uint32_t fid : it->second) {
 		auto rit = records.find(fid);
 		if (rit != records.end()) {
-			auto ar = ParseArmor(rit->second);
+			auto ar = ParseArmor(rit->second, *this);
 			// Override with lstring-resolved name when this ESP is localized;
 			// ParseArmor only sees the raw FULL subrecord and emits an
 			// "[LSTRING:########]" placeholder for 4-byte localized indices.
@@ -979,7 +980,7 @@ std::vector<ArmorAddonRecord> ESPReader::GetArmorAddons() const {
 	for (uint32_t fid : it->second) {
 		auto rit = records.find(fid);
 		if (rit != records.end())
-			result.push_back(ParseArmorAddon(rit->second));
+			result.push_back(ParseArmorAddon(rit->second, *this));
 	}
 	return result;
 }
@@ -993,7 +994,7 @@ std::vector<TextureSetRecord> ESPReader::GetTextureSets() const {
 	for (uint32_t fid : it->second) {
 		auto rit = records.find(fid);
 		if (rit != records.end())
-			result.push_back(ParseTextureSet(rit->second));
+			result.push_back(ParseTextureSet(rit->second, *this));
 	}
 	return result;
 }
@@ -1007,7 +1008,7 @@ std::vector<LeveledItemRecord> ESPReader::GetLeveledItems() const {
 	for (uint32_t fid : it->second) {
 		auto rit = records.find(fid);
 		if (rit != records.end())
-			result.push_back(ParseLeveledItem(rit->second));
+			result.push_back(ParseLeveledItem(rit->second, *this));
 	}
 	return result;
 }
@@ -1021,7 +1022,7 @@ std::vector<OutfitRecord> ESPReader::GetOutfits() const {
 	for (uint32_t fid : it->second) {
 		auto rit = records.find(fid);
 		if (rit != records.end())
-			result.push_back(ParseOutfit(rit->second));
+			result.push_back(ParseOutfit(rit->second, *this));
 	}
 	return result;
 }
@@ -1034,7 +1035,7 @@ std::vector<NPCRecord> ESPReader::GetNPCs() const {
 	for (uint32_t fid : it->second) {
 		auto rit = records.find(fid);
 		if (rit != records.end()) {
-			auto npc = ParseNPC(rit->second);
+			auto npc = ParseNPC(rit->second, *this);
 			// Override with lstring-resolved name when this ESP is localized.
 			npc.fullName = ResolveFullName(rit->second);
 			result.push_back(std::move(npc));
@@ -1051,7 +1052,7 @@ std::vector<RaceRecord> ESPReader::GetRaces() const {
 	for (uint32_t fid : it->second) {
 		auto rit = records.find(fid);
 		if (rit != records.end()) {
-			auto npc = ParseRace(rit->second);
+			auto npc = ParseRace(rit->second, *this);
 			result.push_back(std::move(npc));
 		}
 	}
@@ -1066,9 +1067,16 @@ std::vector<HeadPartRecord> ESPReader::GetHeadParts() const {
 	for (uint32_t fid : it->second) {
 		auto rit = records.find(fid);
 		if (rit != records.end())
-			result.push_back(ParseHeadPart(rit->second));
+			result.push_back(ParseHeadPart(rit->second, *this));
 	}
 	return result;
+}
+
+uint32_t ESPReader::GameFormId(uint32_t formId) const {
+	if ((formId >> 24) <= masters.size())
+		return formId;
+	invalidFormIds.insert(formId);
+	return (static_cast<uint32_t>(masters.size()) << 24) | (formId & 0x00FFFFFF);
 }
 
 const Record* ESPReader::GetRecordByFormId(uint32_t formId) const {

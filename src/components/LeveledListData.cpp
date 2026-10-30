@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <climits>
 #include <cstdio>
 #include <cstring>
@@ -83,6 +84,50 @@ static std::string DirectoryOf(const std::string& filepath) {
 	if (pos != std::string::npos)
 		return filepath.substr(0, pos + 1);
 	return "";
+}
+
+/// The NPC of an NPC_ record of the plugin at `pluginPath` with these masters:
+/// the record's file index names the plugin that defines the NPC.
+static NpcKey NpcKeyOf(uint32_t formId, const std::vector<std::string>& masters, const std::string& pluginPath) {
+	size_t fileIndex = formId >> 24;
+	if (fileIndex < masters.size())
+		return {ToLower(masters[fileIndex]), formId & 0x00FFFFFFu};
+	return {ToLower(pluginPath.substr(pluginPath.find_last_of("/\\") + 1)), formId & 0x00FFFFFFu};
+}
+
+std::string NpcKeyText(const NpcKey& key) {
+	if (key.first.empty())
+		return {};
+	char id[16];
+	std::snprintf(id, sizeof(id), "0x%06X~", key.second);
+	return id + key.first;
+}
+
+NpcKey ParseNpcKey(const std::string& text) {
+	size_t sep = text.find('~');
+	if (sep == std::string::npos || sep + 1 == text.size())
+		return {};
+	size_t begin = text.compare(0, 2, "0x") == 0 ? 2 : 0;
+	uint32_t id = 0;
+	auto [end, ec] = std::from_chars(text.data() + begin, text.data() + sep, id, 16);
+	if (ec != std::errc() || end != text.data() + sep || id > 0x00FFFFFFu)
+		return {};
+	return {ToLower(text.substr(sep + 1)), id};
+}
+
+NpcKey NPCEntry::Key() const {
+	return {ToLower(plugin), static_cast<uint32_t>(formId & 0x00FFFFFFu)};
+}
+
+const NPCEntry* LeveledListData::FindNpc(const NpcKey& key) const {
+	auto it = npcIndexByKey.find(key);
+	return it != npcIndexByKey.end() ? &npcs[it->second] : nullptr;
+}
+
+void LeveledListData::IndexNpcs() {
+	npcIndexByKey.clear();
+	for (size_t i = 0; i < npcs.size(); ++i)
+		npcIndexByKey.emplace(npcs[i].Key(), i);
 }
 
 /// Recursive helper: resolve components[idx..] starting from currentDir.
@@ -202,6 +247,7 @@ static std::unordered_map<uint32_t, std::string> LoadStringsFromBSA(const std::s
 
 void LeveledListData::LoadNPCs() {
 	npcs.clear();
+	npcIndexByKey.clear();
 	npcOutfitCache.clear();
 	if (baseDataPath.empty())
 		return;
@@ -527,18 +573,9 @@ void LeveledListData::LoadNPCs() {
 	}
 
 	std::sort(npcs.begin(), npcs.end(), [](const NPCEntry& a, const NPCEntry& b) { return a.displayName < b.displayName; });
+	IndexNpcs();
 
-	// Build (masterPluginLower, baseFormId) → editorId so the scan loop can
-	// resolve override records whose EDID subrecord is omitted (CK default
-	// behaviour for NPC_ overrides).
-	npcEditorIdByMasterFormId.clear();
-	for (auto& n : npcs) {
-		if (n.editorId.empty() || n.plugin.empty())
-			continue;
-		npcEditorIdByMasterFormId[{ToLower(n.plugin), n.formId & 0x00FFFFFFu}] = n.editorId;
-	}
-
-	wxLogMessage("LeveledListData::LoadNPCs: %zu NPCs total, %zu master/formId→editorId entries", npcs.size(), npcEditorIdByMasterFormId.size());
+	wxLogMessage("LeveledListData::LoadNPCs: %zu NPCs total", npcs.size());
 }
 
 // ---------------------------------------------------------------------------
@@ -660,6 +697,7 @@ void LeveledListData::LoadAllPluginNativeNPCs() {
 	}
 
 	std::sort(npcs.begin(), npcs.end(), [](const NPCEntry& a, const NPCEntry& b) { return a.displayName < b.displayName; });
+	IndexNpcs();
 
 	wxLogMessage("LeveledListData::LoadAllPluginNativeNPCs: scanned %zu plugins, added %zu mod-native NPCs (total %zu)", scanned, added, npcs.size());
 }
@@ -834,14 +872,15 @@ void LeveledListData::LoadRecordsFromESP(
 		txstCache[remappedId] = std::move(ct);
 	}
 
-	// Cache NPC_ WNAM references (editorId → remapped WNAM FormID).
+	// Cache NPC_ WNAM references (NPC → remapped WNAM FormID).
 	// Always overwrite: later masters/plugins take priority.
 	for (auto& npc : reader.GetNPCs()) {
-		if (npc.editorId.empty() || npc.wnamFormId == 0)
+		if (npc.wnamFormId == 0)
 			continue;
-		if (noClobber && npcSkinCache.count(npc.editorId))
+		NpcKey key = NpcKeyOf(npc.formId, fileMasters, filepath);
+		if (noClobber && npcSkinCache.count(key))
 			continue;
-		npcSkinCache[npc.editorId] = remapFid(npc.wnamFormId);
+		npcSkinCache[key] = remapFid(npc.wnamFormId);
 	}
 
 	// Cache RACE records (remapped FormID → race info). Overwrite (later master wins).
@@ -936,6 +975,13 @@ void LeveledListData::LoadRecordsFromESP(
 		}
 		lvliCache[remappedId] = std::move(cl);
 	}
+
+	if (const auto& invalid = reader.GetInvalidFormIds(); !invalid.empty())
+		wxLogWarning("LeveledListData: %s has %zu FormIDs with a file index above its %zu masters (e.g. %08X); as in game, they are read as its own records",
+					 wxString(filepath),
+					 invalid.size(),
+					 fileMasters.size(),
+					 *invalid.begin());
 }
 
 // ---------------------------------------------------------------------------
@@ -1120,7 +1166,7 @@ OutfitEntry LeveledListData::BuildOutfitFromOtft(FormId otftId, int& groupCounte
 // ---------------------------------------------------------------------------
 
 const OutfitEntry* LeveledListData::ResolveNpcDefaultOutfit(const NPCEntry& npc) {
-	auto cached = npcOutfitCache.find(npc.editorId);
+	auto cached = npcOutfitCache.find(npc.Key());
 	if (cached != npcOutfitCache.end())
 		return &cached->second;
 
@@ -1228,7 +1274,7 @@ const OutfitEntry* LeveledListData::ResolveNpcDefaultOutfit(const NPCEntry& npc)
 	const std::string& shown = !npc.fullName.empty() ? npc.fullName : npc.editorId;
 	entry.name = shown + " — " + entry.editorId;
 
-	auto [it, inserted] = npcOutfitCache.emplace(npc.editorId, std::move(entry));
+	auto [it, inserted] = npcOutfitCache.emplace(npc.Key(), std::move(entry));
 	(void)inserted;
 	return &it->second;
 }
@@ -2203,9 +2249,9 @@ lldata::FormId LeveledListData::GetRaceSkinArmo(const std::string& raceEditorId)
 	return rit->second.skinFormId;
 }
 
-LeveledListData::EffectiveRace LeveledListData::GetEffectiveNpcRace(const std::string& npcEditorId) {
+LeveledListData::EffectiveRace LeveledListData::GetEffectiveNpcRace(const NpcKey& npc) {
 	EffectiveRace er;
-	if (npcEditorId.empty())
+	if (npc.first.empty())
 		return er;
 
 	if (!npcSkinsScanned)
@@ -2214,7 +2260,7 @@ LeveledListData::EffectiveRace LeveledListData::GetEffectiveNpcRace(const std::s
 	// Step 1: prefer the latest plugin's RNAM override (all active plugins
 	// were loaded eagerly during LoadESP so remappedRace is resolvable at
 	// scan time).
-	auto ovIt = npcSkinOverrides.find(npcEditorId);
+	auto ovIt = npcSkinOverrides.find(npc);
 	if (ovIt != npcSkinOverrides.end() && ovIt->second.remappedRace != 0) {
 		// remappedRace is FormId (uint64_t) — globalPluginIdx lives in the
 		// high 16 bits above the local 24-bit id. Anything wider than uint32_t
@@ -2228,24 +2274,20 @@ LeveledListData::EffectiveRace LeveledListData::GetEffectiveNpcRace(const std::s
 			er.editorId = cacheIt->second.editorId;
 			er.skinArmoFormId = cacheIt->second.skinFormId;
 			wxLogMessage("GetEffectiveNpcRace: NPC '%s' override race %016llX ('%s') skinArmo=%016llX",
-						 npcEditorId,
+						 NpcKeyText(npc),
 						 static_cast<unsigned long long>(fid),
 						 er.editorId,
 						 static_cast<unsigned long long>(er.skinArmoFormId));
 			return er;
 		}
 		wxLogMessage("GetEffectiveNpcRace: NPC '%s' override race %016llX not in raceCache, falling back to vanilla",
-					 npcEditorId,
+					 NpcKeyText(npc),
 					 static_cast<unsigned long long>(fid));
 	}
 
 	// Step 2: vanilla race recorded during LoadNPCs.
-	for (auto& n : npcs) {
-		if (n.editorId == npcEditorId) {
-			er.editorId = n.raceEditorId;
-			break;
-		}
-	}
+	if (const NPCEntry* entry = FindNpc(npc))
+		er.editorId = entry->raceEditorId;
 	if (!er.editorId.empty()) {
 		auto raceIt = raceByEditorId.find(er.editorId);
 		if (raceIt != raceByEditorId.end()) {
@@ -2327,13 +2369,13 @@ bool LeveledListData::IsHeadPartEditorId(const std::string& editorId) const {
 	return false;
 }
 
-LeveledListData::BodyNifPaths LeveledListData::ResolveNpcBodyNifPaths(const std::string& npcEditorId, bool highWeight) {
+LeveledListData::BodyNifPaths LeveledListData::ResolveNpcBodyNifPaths(const NpcKey& npc, bool highWeight) {
 	BodyNifPaths result;
-	if (npcEditorId.empty())
+	if (npc.first.empty())
 		return result;
 
 	// Effective race honors RNAM overrides from any plugin, not just vanilla data.
-	EffectiveRace effRace = GetEffectiveNpcRace(npcEditorId);
+	EffectiveRace effRace = GetEffectiveNpcRace(npc);
 	const std::string& raceEdid = effRace.editorId;
 	FormId npcRaceFid = effRace.formId;
 
@@ -2343,13 +2385,13 @@ LeveledListData::BodyNifPaths LeveledListData::ResolveNpcBodyNifPaths(const std:
 	// npcSkinCache (main-ESP master chain) when no override entry exists.
 	FormId npcWnam = 0;
 	bool haveOverrideEntry = false;
-	auto ovIt = npcSkinOverrides.find(npcEditorId);
+	auto ovIt = npcSkinOverrides.find(npc);
 	if (ovIt != npcSkinOverrides.end()) {
 		haveOverrideEntry = true;
 		npcWnam = ovIt->second.remappedWnam;
 	}
 	if (npcWnam == 0 && !haveOverrideEntry) {
-		auto scIt = npcSkinCache.find(npcEditorId);
+		auto scIt = npcSkinCache.find(npc);
 		if (scIt != npcSkinCache.end())
 			npcWnam = scIt->second;
 	}
@@ -2358,7 +2400,7 @@ LeveledListData::BodyNifPaths LeveledListData::ResolveNpcBodyNifPaths(const std:
 
 	FormId raceWnam = 0;
 	if (result.body.empty() || result.hands.empty() || result.feet.empty()) {
-		raceWnam = GetRaceSkinArmo(raceEdid);
+		raceWnam = effRace.skinArmoFormId;
 		if (raceWnam != 0) {
 			BodyNifPaths rp = ResolveBodyNifPaths(raceWnam, highWeight, npcRaceFid);
 			if (result.body.empty())
@@ -2371,7 +2413,7 @@ LeveledListData::BodyNifPaths LeveledListData::ResolveNpcBodyNifPaths(const std:
 	}
 
 	wxLogMessage("ResolveNpcBodyNifPaths: NPC '%s' race='%s' raceFID=%016llX npcWNAM=%016llX raceWNAM=%016llX -> body='%s' hands='%s' feet='%s'",
-				 npcEditorId,
+				 NpcKeyText(npc),
 				 raceEdid,
 				 static_cast<unsigned long long>(npcRaceFid),
 				 static_cast<unsigned long long>(npcWnam),
@@ -2482,14 +2524,14 @@ void FillPartTexturesFromArmo(lldata::FormId armoFid,
 }
 } // namespace
 
-LeveledListData::BodyPartTextures LeveledListData::ResolveNpcBodyPartTextures(const std::string& npcEditorId) {
+LeveledListData::BodyPartTextures LeveledListData::ResolveNpcBodyPartTextures(const NpcKey& npc) {
 	BodyPartTextures out;
-	if (npcEditorId.empty())
+	if (npc.first.empty())
 		return out;
 
 	// Use the effective race (RNAM override-aware) so a plugin that re-races
 	// an NPC also redirects which ARMAs the texture chain walks.
-	EffectiveRace effRace = GetEffectiveNpcRace(npcEditorId);
+	EffectiveRace effRace = GetEffectiveNpcRace(npc);
 	const std::string& raceEdid = effRace.editorId;
 	FormId npcRaceFid = effRace.formId;
 
@@ -2502,13 +2544,13 @@ LeveledListData::BodyPartTextures LeveledListData::ResolveNpcBodyPartTextures(co
 	// hold a non-zero value from an earlier master override).
 	FormId npcWnam = 0;
 	bool haveOverrideEntry = false;
-	auto ovIt = npcSkinOverrides.find(npcEditorId);
+	auto ovIt = npcSkinOverrides.find(npc);
 	if (ovIt != npcSkinOverrides.end()) {
 		haveOverrideEntry = true;
 		npcWnam = ovIt->second.remappedWnam;
 	}
 	if (npcWnam == 0 && !haveOverrideEntry) {
-		auto scIt = npcSkinCache.find(npcEditorId);
+		auto scIt = npcSkinCache.find(npc);
 		if (scIt != npcSkinCache.end())
 			npcWnam = scIt->second;
 	}
@@ -2517,13 +2559,13 @@ LeveledListData::BodyPartTextures LeveledListData::ResolveNpcBodyPartTextures(co
 
 	// Pass 2: race's default skin ARMO for any slots still empty.
 	if (out.body[0].empty() || out.hands[0].empty() || out.feet[0].empty()) {
-		FormId raceWnam = GetRaceSkinArmo(raceEdid);
+		FormId raceWnam = effRace.skinArmoFormId;
 		if (raceWnam != 0)
 			FillPartTexturesFromArmo(raceWnam, npcRaceFid, armoCache, armaCache, txstCache, out);
 	}
 
 	wxLogMessage("ResolveNpcBodyPartTextures: NPC '%s' race='%s' raceFID=%016llX npcWNAM=%016llX -> body='%s' hands='%s' feet='%s'",
-				 npcEditorId,
+				 NpcKeyText(npc),
 				 raceEdid,
 				 static_cast<unsigned long long>(npcRaceFid),
 				 static_cast<unsigned long long>(npcWnam),
@@ -2970,30 +3012,9 @@ void LeveledListData::ScanAllPluginsForNpcSkins() {
 		};
 
 		for (auto& npc : npcs) {
-			// The override's identity is its FormID, not the EDID subrecord.
-			// Bethesda's CK lets an override carry a renamed EDID (some mods
-			// do this for organisation). The npcSkinOverrides map MUST be
-			// keyed by the canonical editor id from the master record,
-			// otherwise renamed overrides land under a different bucket and
-			// the consumer (which looks up by canonical id) silently misses
-			// them.
-			//
-			// Native records (top byte == selfIdx) are plugin-defined NPCs;
-			// for those the override's own EDID IS canonical.
-			uint8_t tb = (npc.formId >> 24) & 0xFF;
-			std::string resolvedEditorId;
-			if (tb < srcMasters.size()) {
-				auto it = npcEditorIdByMasterFormId.find({ToLower(srcMasters[tb]), npc.formId & 0x00FFFFFFu});
-				if (it != npcEditorIdByMasterFormId.end())
-					resolvedEditorId = it->second;
-				else if (!npc.editorId.empty())
-					resolvedEditorId = npc.editorId;
-			}
-			else {
-				resolvedEditorId = npc.editorId;
-			}
-			if (resolvedEditorId.empty())
-				continue;
+			// The override's identity is its FormID, not the EDID subrecord:
+			// the record's file index names the plugin that defines the NPC.
+			NpcKey key = NpcKeyOf(npc.formId, srcMasters, pluginName);
 			// Do NOT short-circuit on wnam==0 && race==0. Skyrim NPC overrides
 			// serialize the whole record, so an override that just edits AI or
 			// inventory still re-emits WNAM=0 when the override author didn't
@@ -3014,11 +3035,11 @@ void LeveledListData::ScanAllPluginsForNpcSkins() {
 			// override would be reset to vanilla just because the ESM happens
 			// to sort later in the directory listing.
 			bool currentIsVanilla = isVanillaEsm(pluginPath);
-			auto existing = npcSkinOverrides.find(resolvedEditorId);
+			auto existing = npcSkinOverrides.find(key);
 			if (existing != npcSkinOverrides.end() && currentIsVanilla && !isVanillaEsm(existing->second.sourcePlugin)) {
 				continue;
 			}
-			npcSkinOverrides[resolvedEditorId] = info;
+			npcSkinOverrides[key] = info;
 		}
 	}
 
@@ -3033,7 +3054,7 @@ void LeveledListData::ScanAllPluginsForNpcSkins() {
 // ResolveSkinTexturesForNPC — on-demand skin texture resolution per NPC
 // ---------------------------------------------------------------------------
 
-std::array<std::string, 8> LeveledListData::ResolveSkinTexturesForNPC(const std::string& npcEditorId) {
+std::array<std::string, 8> LeveledListData::ResolveSkinTexturesForNPC(const NpcKey& npc) {
 	std::array<std::string, 8> textures{};
 
 	// Lazy scan: first call triggers the all-plugins scan
@@ -3042,12 +3063,8 @@ std::array<std::string, 8> LeveledListData::ResolveSkinTexturesForNPC(const std:
 
 	// Look up NPC's race so we can prefer race-matching ARMAs (SkinNaked has one ARMA per race).
 	std::string raceEdid;
-	for (auto& n : npcs) {
-		if (n.editorId == npcEditorId) {
-			raceEdid = n.raceEditorId;
-			break;
-		}
-	}
+	if (const NPCEntry* entry = FindNpc(npc))
+		raceEdid = entry->raceEditorId;
 	FormId npcRaceFid = 0;
 	if (!raceEdid.empty()) {
 		auto it = raceByEditorId.find(raceEdid);
@@ -3064,14 +3081,14 @@ std::array<std::string, 8> LeveledListData::ResolveSkinTexturesForNPC(const std:
 			tex = ResolveSkinTextures(raceWnam, npcRaceFid);
 			if (!tex[0].empty())
 				wxLogMessage("ResolveSkinTexturesForNPC: NPC '%s' race '%s' skin ARMO %016llX provided textures: %s",
-							 npcEditorId,
+							 NpcKeyText(npc),
 							 raceEdid,
 							 static_cast<unsigned long long>(raceWnam),
 							 tex[0]);
 		}
 	};
 
-	auto ovIt = npcSkinOverrides.find(npcEditorId);
+	auto ovIt = npcSkinOverrides.find(npc);
 	if (ovIt == npcSkinOverrides.end()) {
 		// No WNAM override known for this NPC → go straight to race fallback.
 		tryRaceFallback(textures);
@@ -3082,7 +3099,7 @@ std::array<std::string, 8> LeveledListData::ResolveSkinTexturesForNPC(const std:
 	textures = ResolveSkinTextures(info.remappedWnam, npcRaceFid);
 	if (!textures[0].empty()) {
 		wxLogMessage("ResolveSkinTexturesForNPC: NPC '%s' resolved (WNAM %016llX, race %016llX): %s",
-					 npcEditorId,
+					 NpcKeyText(npc),
 					 static_cast<unsigned long long>(info.remappedWnam),
 					 static_cast<unsigned long long>(npcRaceFid),
 					 textures[0]);
@@ -3090,7 +3107,7 @@ std::array<std::string, 8> LeveledListData::ResolveSkinTexturesForNPC(const std:
 	}
 	tryRaceFallback(textures);
 	if (textures[0].empty())
-		wxLogMessage("ResolveSkinTexturesForNPC: no body textures found for '%s'", npcEditorId);
+		wxLogMessage("ResolveSkinTexturesForNPC: no body textures found for '%s'", NpcKeyText(npc));
 	return textures;
 }
 

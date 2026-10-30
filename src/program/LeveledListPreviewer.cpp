@@ -331,19 +331,17 @@ LeveledListPreviewer::LeveledListPreviewer(wxEvtHandler* handler)
 	}
 
 	// Restore persisted head / preset / weight / outfit selections
-	currentHeadEditorId = Config["LLPreviewer/HeadEditorId"];
+	currentHeadNpc = lldata::ParseNpcKey(Config["LLPreviewer/HeadNpc"]);
+	if (currentHeadNpc.first.empty() && !Config["LLPreviewer/HeadNpc"].empty())
+		wxLogError("LeveledListPreviewer: LLPreviewer/HeadNpc '%s' is not an NPC", Config["LLPreviewer/HeadNpc"]);
 	currentPresetName = Config["LLPreviewer/PresetName"];
 	useHighWeight = (Config["LLPreviewer/HighWeight"] != "false");
-	if (headCtrl && !currentHeadEditorId.empty()) {
-		// Prefer the in-game display name over the editor ID.
-		std::string display = currentHeadEditorId;
-		for (auto& n : data.GetNPCs()) {
-			if (n.editorId == currentHeadEditorId) {
-				if (!n.displayName.empty())
-					display = n.displayName;
-				break;
-			}
-		}
+	if (headCtrl && !currentHeadNpc.first.empty()) {
+		// Prefer the in-game display name over the FormID.
+		std::string display = lldata::NpcKeyText(currentHeadNpc);
+		const lldata::NPCEntry* npc = data.FindNpc(currentHeadNpc);
+		if (npc && !npc->displayName.empty())
+			display = npc->displayName;
 		headCtrl->SetValue(wxString::FromUTF8(display));
 	}
 	if (highWeightCheck)
@@ -519,15 +517,11 @@ void LeveledListPreviewer::LoadESPFile(const std::string& filepath) {
 	}
 
 	// Re-sync headCtrl's text: on startup OnShown runs before LoadNPCs, so a
-	// persisted editor id could not yet be mapped to a display name.
-	if (headCtrl && !currentHeadEditorId.empty()) {
-		for (auto& n : data.GetNPCs()) {
-			if (n.editorId == currentHeadEditorId) {
-				if (!n.displayName.empty())
-					headCtrl->ChangeValue(wxString::FromUTF8(n.displayName));
-				break;
-			}
-		}
+	// persisted NPC could not yet be mapped to a display name.
+	if (headCtrl && !currentHeadNpc.first.empty()) {
+		const lldata::NPCEntry* npc = data.FindNpc(currentHeadNpc);
+		if (npc && !npc->displayName.empty())
+			headCtrl->ChangeValue(wxString::FromUTF8(npc->displayName));
 	}
 
 	LoadPresetList();
@@ -743,7 +737,7 @@ void LeveledListPreviewer::RefreshNpcList() {
 				continue;
 		}
 		if (humanoidOnly) {
-			auto effRace = data.GetEffectiveNpcRace(n.editorId);
+			auto effRace = data.GetEffectiveNpcRace(n.Key());
 			if (!checkHumanoid(effRace.formId))
 				continue;
 		}
@@ -758,7 +752,7 @@ void LeveledListPreviewer::RefreshNpcList() {
 		d->kind = LLTreeItemData::Kind::Npc;
 		d->topIndex = static_cast<int>(filteredNpcIndices.size() - 1);
 		wxTreeItemId item = npcList->AppendItem(root, wxString::FromUTF8(label), -1, -1, d);
-		if (!currentHeadEditorId.empty() && n.editorId == currentHeadEditorId)
+		if (!currentHeadNpc.first.empty() && n.Key() == currentHeadNpc)
 			selectedNode = item;
 	}
 
@@ -1097,9 +1091,10 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 	};
 	std::vector<SlotNif> bodyNifs;
 
-	if (!currentHeadEditorId.empty()) {
-		auto paths = data.ResolveNpcBodyNifPaths(currentHeadEditorId, useHighWeight);
-		wxLogMessage("LeveledListPreviewer: ResolveNpcBodyNifPaths('%s') -> body='%s' hands='%s' feet='%s'", currentHeadEditorId, paths.body, paths.hands, paths.feet);
+	if (!currentHeadNpc.first.empty()) {
+		const std::string npcText = lldata::NpcKeyText(currentHeadNpc);
+		auto paths = data.ResolveNpcBodyNifPaths(currentHeadNpc, useHighWeight);
+		wxLogMessage("LeveledListPreviewer: ResolveNpcBodyNifPaths('%s') -> body='%s' hands='%s' feet='%s'", npcText, paths.body, paths.hands, paths.feet);
 
 		if (!paths.body.empty())
 			bodyNifs.push_back({32, paths.body});
@@ -1125,12 +1120,12 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 					slotList += ", ";
 				slotList += missing[i];
 			}
-			std::string err = "NPC '" + currentHeadEditorId + "': no skin NIF defined for " + slotList + " (neither NPC's WNAM nor race's WNAM resolves)";
+			std::string err = "NPC '" + npcText + "': no skin NIF defined for " + slotList + " (neither NPC's WNAM nor race's WNAM resolves)";
 			wxLogError("LeveledListPreviewer: %s", err.c_str());
 			SetStatusText(wxString::FromUTF8(err));
 		}
 		else if (!bodyNifs.empty()) {
-			wxLogMessage("LeveledListPreviewer: Using NPC '%s' body meshes (NPC->race chain)", currentHeadEditorId);
+			wxLogMessage("LeveledListPreviewer: Using NPC '%s' body meshes (NPC->race chain)", npcText);
 		}
 	}
 	else {
@@ -1163,8 +1158,8 @@ void LeveledListPreviewer::LoadBodyMeshes() {
 	// BSShaderTextureSet (the model author's chosen textures) remain in effect.
 	// That IS the in-game behavior and the user-requested fallback — log it so
 	// the chain is traceable.
-	if (!currentHeadEditorId.empty() && !hasNpcSkinTextures) {
-		wxLogMessage("LeveledListPreviewer: NPC '%s' has no WNAM/race TXST override - using NIF embedded textures", currentHeadEditorId);
+	if (!currentHeadNpc.first.empty() && !hasNpcSkinTextures) {
+		wxLogMessage("LeveledListPreviewer: NPC '%s' has no WNAM/race TXST override - using NIF embedded textures", lldata::NpcKeyText(currentHeadNpc));
 	}
 
 	// Apply per-slot NPC skin textures (body / hands / feet independently) and
@@ -1752,7 +1747,7 @@ void LeveledListPreviewer::OnHeadEntered(wxCommandEvent& WXUNUSED(event)) {
 	std::string text = headCtrl->GetValue().ToStdString();
 	if (text.empty()) {
 		ClearHeadMeshes();
-		currentHeadEditorId.clear();
+		currentHeadNpc = {};
 		hasNpcSkinTextures = false;
 		npcBodyPartTextures = {};
 		hasNpcTint = false;
@@ -1799,8 +1794,8 @@ void LeveledListPreviewer::OnHeadEntered(wxCommandEvent& WXUNUSED(event)) {
 // ---------------------------------------------------------------------------
 
 void LeveledListPreviewer::SelectNpc(const lldata::NPCEntry& npc, bool loadDefaultOutfit) {
-	currentHeadEditorId = npc.editorId;
-	Config.SetValue("LLPreviewer/HeadEditorId", npc.editorId);
+	currentHeadNpc = npc.Key();
+	Config.SetValue("LLPreviewer/HeadNpc", lldata::NpcKeyText(currentHeadNpc));
 	LoadHeadMesh(npc);
 
 	// Show the display name (full in-game name) in the text box, not the editor ID.
@@ -1810,7 +1805,7 @@ void LeveledListPreviewer::SelectNpc(const lldata::NPCEntry& npc, bool loadDefau
 	const std::string& logName = !npc.fullName.empty() ? npc.fullName : npc.editorId;
 
 	// Resolve per-slot NPC skin textures (body / hands / feet independently).
-	npcBodyPartTextures = data.ResolveNpcBodyPartTextures(npc.editorId);
+	npcBodyPartTextures = data.ResolveNpcBodyPartTextures(currentHeadNpc);
 	hasNpcSkinTextures = !npcBodyPartTextures.body[0].empty() || !npcBodyPartTextures.hands[0].empty() || !npcBodyPartTextures.feet[0].empty();
 
 	if (hasNpcSkinTextures) {
@@ -2457,8 +2452,8 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	// race variant on top of each other.
 	uint32_t npcRaceFid = 0;
 	std::set<lldata::FormId> effectiveArmorRaces;
-	if (!currentHeadEditorId.empty()) {
-		auto effRace = data.GetEffectiveNpcRace(currentHeadEditorId);
+	if (!currentHeadNpc.first.empty()) {
+		auto effRace = data.GetEffectiveNpcRace(currentHeadNpc);
 		npcRaceFid = effRace.formId;
 		// "Effective" set covers custom child / variant races that inherit
 		// armor compatibility from a parent via the skin ARMO's ARMAs.
@@ -2597,15 +2592,15 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	actorAnim_.RestPoseChanged();
 
 	// Head mesh is preserved across outfit changes — only reload if not yet loaded
-	if (headShapeNames.empty() && !currentHeadEditorId.empty()) {
+	if (headShapeNames.empty() && !currentHeadNpc.first.empty()) {
 		auto& npcs = data.GetNPCs();
 		for (auto& npc : npcs) {
-			if (npc.editorId == currentHeadEditorId) {
+			if (npc.Key() == currentHeadNpc) {
 				LoadHeadMesh(npc);
 
 				// Resolve per-slot NPC skin + QNAM tint if not yet done
 				if (!hasNpcSkinTextures && !hasNpcTint) {
-					npcBodyPartTextures = data.ResolveNpcBodyPartTextures(npc.editorId);
+					npcBodyPartTextures = data.ResolveNpcBodyPartTextures(currentHeadNpc);
 					hasNpcSkinTextures = !npcBodyPartTextures.body[0].empty() || !npcBodyPartTextures.hands[0].empty() || !npcBodyPartTextures.feet[0].empty();
 					hasNpcTint = npc.hasTint;
 					if (hasNpcTint) {
@@ -3906,7 +3901,7 @@ void LeveledListPreviewer::OnClose(wxCloseEvent& WXUNUSED(event)) {
 	}
 
 	// Persist head NPC, preset, and weight
-	Config.SetValue("LLPreviewer/HeadEditorId", currentHeadEditorId);
+	Config.SetValue("LLPreviewer/HeadNpc", lldata::NpcKeyText(currentHeadNpc));
 	Config.SetValue("LLPreviewer/PresetName", currentPresetName);
 	Config.SetBoolValue("LLPreviewer/HighWeight", useHighWeight);
 
@@ -4157,38 +4152,33 @@ bool LeveledListPreviewer::LoadAnimationActor(bool& pending) {
 	lldata::LeveledListData::RaceAnimationFiles files;
 	fsmp::ActorInfo info;
 
-	if (!currentHeadEditorId.empty()) {
-		const lldata::NPCEntry* npc = nullptr;
-		for (auto& n : data.GetNPCs()) {
-			if (n.editorId == currentHeadEditorId) {
-				npc = &n;
-				break;
-			}
-		}
+	if (!currentHeadNpc.first.empty()) {
+		const std::string npcText = lldata::NpcKeyText(currentHeadNpc);
+		const lldata::NPCEntry* npc = data.FindNpc(currentHeadNpc);
 		if (!npc) {
 			// NPC records are loaded together with the first ESP.
 			pending = data.GetNPCs().empty();
 			if (!pending)
-				wxLogError("LeveledListPreviewer: Actor: NPC '%s' not found", currentHeadEditorId);
+				wxLogError("LeveledListPreviewer: Actor: NPC '%s' not found", npcText);
 			actorAnim_.ClearActor();
 			return false;
 		}
 
-		auto race = data.GetEffectiveNpcRace(currentHeadEditorId);
+		auto race = data.GetEffectiveNpcRace(currentHeadNpc);
 		files = data.GetRaceAnimationFiles(race.formId, npc->isFemale);
 		if (files.skeletonNif.empty()) {
-			wxLogError("LeveledListPreviewer: Actor: race '%s' of NPC '%s' defines no %s skeleton (ANAM)", race.editorId, currentHeadEditorId, npc->isFemale ? "female" : "male");
+			wxLogError("LeveledListPreviewer: Actor: race '%s' of NPC '%s' defines no %s skeleton (ANAM)", race.editorId, npcText, npc->isFemale ? "female" : "male");
 			actorAnim_.ClearActor();
 			return false;
 		}
 		if (files.behaviorProject.empty())
-			wxLogError("LeveledListPreviewer: Actor: race '%s' of NPC '%s' defines no %s behavior graph (MODL); the idle animation is unavailable", race.editorId, currentHeadEditorId, npc->isFemale ? "female" : "male");
+			wxLogError("LeveledListPreviewer: Actor: race '%s' of NPC '%s' defines no %s behavior graph (MODL); the idle animation is unavailable", race.editorId, npcText, npc->isFemale ? "female" : "male");
 
 		info.npcFormId = npc->formId;
 		info.name = npc->fullName;
 		cbpcNpcFormId_ = data.EngineFormId(npc->plugin, npc->formId);
 		if (cbpcNpcFormId_ == 0)
-			wxLogError("LeveledListPreviewer: Actor: NPC '%s' is from '%s', which is not in the game's active load order; CBPC doesn't see the actor", currentHeadEditorId, npc->plugin);
+			wxLogError("LeveledListPreviewer: Actor: NPC '%s' is from '%s', which is not in the game's active load order; CBPC doesn't see the actor", npcText, npc->plugin);
 		for (int sex = 0; sex < 2; sex++)
 			info.raceSkeleton[sex] = RecordModelPath(data.GetRaceAnimationFiles(race.formId, sex == 1).skeletonNif);
 	}
@@ -4459,12 +4449,12 @@ void LeveledListPreviewer::ActorFrame() {
 	if (canvas && context)
 		canvas->SetCurrent(*context);
 
-	if (animActorDirty_ || animActorEditorId_ != currentHeadEditorId) {
+	if (animActorDirty_ || animActorNpc_ != currentHeadNpc) {
 		bool pending = false;
 		bool ok = LoadAnimationActor(pending);
 		if (!pending) {
 			animActorDirty_ = false;
-			animActorEditorId_ = currentHeadEditorId;
+			animActorNpc_ = currentHeadNpc;
 			if (!ok) {
 				actorAnim_.QueueRestPoseUpload(getMesh);
 				gls.RenderOneFrame();
