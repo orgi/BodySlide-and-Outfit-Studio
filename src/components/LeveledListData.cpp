@@ -2358,15 +2358,25 @@ std::string LeveledListData::ResolveHeadPartNif(FormId headPartFormId) const {
 	return it->second.model;
 }
 
-bool LeveledListData::IsHeadPartEditorId(const std::string& editorId) const {
-	for (auto& [fid, hp] : headPartCache) {
+static const CachedHeadPart* FindHeadPartByEditorId(const std::unordered_map<FormId, CachedHeadPart>& headParts, const std::string& editorId) {
+	for (auto& [fid, hp] : headParts) {
 		(void)fid;
 		if (hp.editorId.size() == editorId.size() && std::equal(hp.editorId.begin(), hp.editorId.end(), editorId.begin(), [](char a, char b) {
 				return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
 			}))
-			return true;
+			return &hp;
 	}
-	return false;
+	return nullptr;
+}
+
+bool LeveledListData::IsHeadPartEditorId(const std::string& editorId) const {
+	return FindHeadPartByEditorId(headPartCache, editorId) != nullptr;
+}
+
+bool LeveledListData::IsHairHeadPart(const std::string& editorId) const {
+	constexpr uint32_t HDPT_TYPE_HAIR = 3;
+	const CachedHeadPart* headPart = FindHeadPartByEditorId(headPartCache, editorId);
+	return headPart && headPart->type == HDPT_TYPE_HAIR;
 }
 
 LeveledListData::BodyNifPaths LeveledListData::ResolveNpcBodyNifPaths(const NpcKey& npc, bool highWeight) {

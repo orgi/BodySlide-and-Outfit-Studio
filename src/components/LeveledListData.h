@@ -322,6 +322,9 @@ public:
 	/// True if any loaded HDPT record has this editor id (case-insensitive).
 	bool IsHeadPartEditorId(const std::string& editorId) const;
 
+	/// True if the HDPT record with this editor id (case-insensitive) has the type Hair.
+	bool IsHairHeadPart(const std::string& editorId) const;
+
 	/// Info about an NPC's skin override found by scanning all plugins.
 	/// All active plugins are loaded eagerly via LoadAllActivePlugins during
 	/// LoadESP, so both remappedWnam and remappedRace are always resolvable

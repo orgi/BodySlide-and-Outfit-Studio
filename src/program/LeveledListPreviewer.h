@@ -239,6 +239,18 @@ class LeveledListPreviewer : public wxFrame {
 	// (ApplyRaceBodyPartVisibility). The actor doesn't wear covered skin.
 	std::unordered_map<std::string, bool> raceBodyShapeCovered_;
 
+	// The head shapes that are hair (LoadHeadMesh) and whether a shown piece
+	// covers them right now (ApplyRaceBodyPartVisibility).
+	std::set<std::string> headHairShapes_;
+	std::unordered_map<std::string, bool> hairShapeCovered_;
+	// The meshes of the loaded wigs: those of the current outfit and the one below.
+	std::set<std::string> wigShapes_;
+	// The wig of the NPC's default outfit, worn with another outfit (LoadNpcWig).
+	std::vector<std::string> npcWigShapeNames_;	   // all of its meshes
+	std::vector<std::string> npcWigDisplayShapes_; // its meshes without the hidden helper shapes
+	std::set<int> npcWigSlots_;					   // biped slots of its ARMO
+	bool npcWigCovered_ = false;				   // a shown outfit shape uses one of these slots
+
 	// Body slots declared by the current outfit's ARMO records (e.g. 32=body, 33=hands, 37=feet).
 	// Used post-load to delete default body shapes whose slots are fully claimed by the outfit.
 	std::set<int> outfitDeclaredSlots;
@@ -341,6 +353,14 @@ private:
 	void LoadBodyMeshes();
 	void LoadHeadMesh(const lldata::NPCEntry& npc);
 	void ClearHeadMeshes();
+	// Loads the wig of the selected NPC's default outfit for the outfit on
+	// display, replacing the wig loaded before. Nothing is loaded while the
+	// default outfit itself is on display: it shows its own wig.
+	void LoadNpcWig();
+	void ClearNpcWig();
+	// Indices into outfit.pieces of the pieces the selected NPC's race shows
+	// (the ARMA tier that fits the race, per ARMO).
+	std::set<size_t> SelectPiecesForNpcRace(const lldata::OutfitEntry& outfit);
 	// Reconcile race-loaded body parts with outfit-bundled body shapes:
 	// - Hide race body shapes whose dismember slot is already covered by an outfit shape.
 	// - Apply the NPC's WNAM/race skin TXST to outfit body shapes that occupy body slots.
@@ -398,11 +418,12 @@ private:
 	// loaded yet. Called from LoadOutfitMeshes (initial set) and from
 	// SwitchUseAnyVariant / ActivateVariantChain (lazy-load on variant switch).
 	void EnsurePiecesLoadedForActivePath();
-	// Load the NIF for a single outfit piece into the GL surface, register all
-	// the per-shape state (textures, partitions, .tri, gate path), and record
-	// the piece as loaded. Returns the number of shapes added (used for unique
-	// shape-name prefixes across pieces).
-	void LoadOutfitPieceShapes(const lldata::OutfitEntry& outfit, size_t pieceIdx, const std::string& baseGamePath, int& loadedCount);
+	// Load the NIF for a single outfit piece into the GL surface and register
+	// all the per-shape state (textures, partitions, .tri, gate path). The
+	// mesh names start with `namePrefix` and are added to `shapeNames`;
+	// `loadedCount` counts the shapes added (used for unique shape-name
+	// prefixes across pieces). `worn` says when the actor wears the piece.
+	void LoadOutfitPieceShapes(const lldata::OutfitPiece& piece, std::vector<std::string>& shapeNames, const std::string& namePrefix, int& loadedCount, ActorAnimation::WornCheck worn);
 
 	std::string FindSkeletonNifPath();
 

@@ -29,6 +29,35 @@ wxDEFINE_EVENT(wxEVT_LEVELEDLIST_CLOSED, wxCommandEvent);
 
 extern ConfigurationManager Config;
 
+// True if an ARMO with these slots only occupies the hair slots (31 hair, 41 long hair).
+static bool OnlyHairSlots(const std::vector<int>& slots) {
+	return !slots.empty() && std::all_of(slots.begin(), slots.end(), [](int slot) { return slot == 31 || slot == 41; });
+}
+
+// A piece counts as a wig if its ARMO only occupies the hair slots and every
+// shape of its model that has a shader has the Hair Tint shader. Shapes
+// without a shader (collision, helper shapes) don't count.
+static bool IsWigModel(const lldata::OutfitPiece& piece, NifFile& nif) {
+	if (!OnlyHairSlots(piece.bodySlots))
+		return false;
+	bool hasHair = false;
+	for (auto& shapeName : nif.GetShapeNames()) {
+		auto* shape = nif.FindBlockByName<NiShape>(shapeName);
+		NiShader* shader = shape ? nif.GetShader(shape) : nullptr;
+		if (!shader)
+			continue;
+		if (shader->bslspShaderType != BSLSP_HAIRTINT)
+			return false;
+		hasHair = true;
+	}
+	return hasHair;
+}
+
+// True if a Use Any path only goes through the first variant of its gates.
+static bool IsFirstVariantPath(const std::vector<std::pair<int, int>>& path) {
+	return std::all_of(path.begin(), path.end(), [](const std::pair<int, int>& gate) { return gate.second == 0; });
+}
+
 // ---------------------------------------------------------------------------
 // Tree item data
 // ---------------------------------------------------------------------------
@@ -479,6 +508,8 @@ void LeveledListPreviewer::LoadESPFile(const std::string& filepath) {
 	data.SetBaseDataPath(baseGamePath);
 
 	wxBusyCursor wait;
+	// LoadESP replaces the entry this points at.
+	currentOutfit = nullptr;
 	if (!data.LoadESP(filepath)) {
 		wxMessageBox(_("Failed to load ESP file."), _("Error"), wxICON_ERROR);
 		return;
@@ -1472,6 +1503,8 @@ void LeveledListPreviewer::ClearHeadMeshes() {
 		headShapeNifName_.erase(name);
 	}
 	headShapeNames.clear();
+	headHairShapes_.clear();
+	hairShapeCovered_.clear();
 }
 
 void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
@@ -1722,8 +1755,15 @@ void LeveledListPreviewer::LoadHeadMesh(const lldata::NPCEntry& npc) {
 				std::set<uint16_t> partIds;
 				for (size_t i = 0; i < partInfo.size(); ++i)
 					partIds.insert(partInfo[i].partID);
+				// Hairlines are not of the head part type Hair, but have a hair slot's partition.
+				for (uint16_t hairPart : {31, 41, 131, 141}) {
+					if (partIds.count(hairPart))
+						headHairShapes_.insert(meshName);
+				}
 				bodyShapePartMap[meshName] = std::move(partIds);
 			}
+			if (data.IsHairHeadPart(shapeName))
+				headHairShapes_.insert(meshName);
 		}
 	}
 	actorAnim_.RegisterModel(nif, loadedPath, ActorAnimation::ModelKind::FaceGenHead, modelMeshes, nullptr);
@@ -1747,6 +1787,7 @@ void LeveledListPreviewer::OnHeadEntered(wxCommandEvent& WXUNUSED(event)) {
 	std::string text = headCtrl->GetValue().ToStdString();
 	if (text.empty()) {
 		ClearHeadMeshes();
+		ClearNpcWig();
 		currentHeadNpc = {};
 		hasNpcSkinTextures = false;
 		npcBodyPartTextures = {};
@@ -1853,17 +1894,20 @@ void LeveledListPreviewer::SelectNpc(const lldata::NPCEntry& npc, bool loadDefau
 			// so the NPC stands in just race body + head.
 			if (canvas && context)
 				canvas->SetCurrent(*context);
+			ClearNpcWig();
 			for (auto& name : outfitShapeNames)
 				gls.DeleteMesh(name);
 			outfitShapeNames.clear();
 			outfitGameVerts.clear();
 			shapeArmoBodySlots.clear();
+			wigShapes_.clear();
 			useAnyGroups_.clear();
 			shapeUseAnyPath_.clear();
 			variantNifLoadFailures_.clear();
 			loadedOutfitPieces_.clear();
 			renderPieceIdx_.clear();
 			currentOutfit = nullptr;
+			ApplyRaceBodyPartVisibility();
 			// Distinguish "no DOFT defined" (normal for creatures) from "DOFT exists
 			// but couldn't be resolved" (mod outfit chain not loaded).
 			if (npc.defaultOutfitFormIdRaw == 0)
@@ -1872,6 +1916,12 @@ void LeveledListPreviewer::SelectNpc(const lldata::NPCEntry& npc, bool loadDefau
 				SetStatusText(
 					wxString::Format(_("NPC '%s' default outfit unresolvable (defined in '%s')"), wxString::FromUTF8(logName), wxString::FromUTF8(npc.defaultOutfitSourcePlugin)));
 		}
+	}
+	else {
+		// The outfit on display stays, the wig is the new NPC's.
+		LoadNpcWig();
+		if (!outfitGameVerts.empty() && !currentPresetName.empty() && currentPresetName != "(none)")
+			ApplyPresetToOutfit(currentPresetName, true);
 	}
 
 	RefreshMeshOverlay();
@@ -1890,33 +1940,42 @@ void LeveledListPreviewer::UpdateHeadVisibility() {
 }
 
 void LeveledListPreviewer::ApplyRaceBodyPartVisibility() {
-	if (bodyShapeNames.empty() && headShapeNames.empty())
+	if (bodyShapeNames.empty() && headShapeNames.empty() && npcWigShapeNames_.empty())
 		return;
 
 	// Gather slot coverage from currently VISIBLE outfit shapes only. Slots
 	// 32/33/37 may be contributed by either NIF dismember partitions or by
-	// the piece's ARMO BOD2; slot 31 (hair) is BOD2-only because hair-
-	// covering pieces (hoods, helms) rarely paint partition 31 on their
-	// own geometry.
+	// the piece's ARMO BOD2; every other slot is BOD2-only. Wigs only count
+	// with their BOD2: nifly reports partition 32 for shapes without
+	// dismember data, which would hide the race body.
 	std::set<int> shownSlots;
 	for (auto& sn : outfitShapeNames) {
 		Mesh* m = gls.GetMesh(sn);
 		if (!m || !m->bVisible)
 			continue;
 		auto pit = bodyShapePartMap.find(sn);
-		if (pit != bodyShapePartMap.end()) {
+		if (pit != bodyShapePartMap.end() && !wigShapes_.count(sn)) {
 			for (uint16_t p : pit->second) {
 				if (p == 32 || p == 33 || p == 37)
 					shownSlots.insert(static_cast<int>(p));
 			}
 		}
 		auto sit = shapeArmoBodySlots.find(sn);
-		if (sit != shapeArmoBodySlots.end()) {
-			for (int s : sit->second) {
-				if (s == 31 || s == 32 || s == 33 || s == 37)
-					shownSlots.insert(s);
-			}
-		}
+		if (sit != shapeArmoBodySlots.end())
+			shownSlots.insert(sit->second.begin(), sit->second.end());
+	}
+
+	// The default outfit's wig gives way to a shown outfit piece on one of
+	// its slots. Only a change touches the shapes, so that an unticked
+	// overlay checkbox stays unticked. The overlay lists the wig while it is
+	// worn; it can't rebuild here, this may run from one of its checkboxes.
+	bool wigCovered = std::any_of(npcWigSlots_.begin(), npcWigSlots_.end(), [&](int slot) { return shownSlots.count(slot) != 0; });
+	if (wigCovered != npcWigCovered_) {
+		npcWigCovered_ = wigCovered;
+		for (auto& name : npcWigDisplayShapes_)
+			gls.SetMeshVisibility(name, !wigCovered);
+		wxLogMessage("ApplyRaceBodyPartVisibility: default outfit wig -> %s", wigCovered ? "hide" : "show");
+		CallAfter([this]() { RefreshMeshOverlay(); });
 	}
 
 	// Race body parts (32/33/37): hide if a visible outfit shape covers the
@@ -1944,21 +2003,33 @@ void LeveledListPreviewer::ApplyRaceBodyPartVisibility() {
 		}
 	}
 
-	// Hair (slot 31): only the head shapes that carry partition 31.
-	bool hideHair = shownSlots.count(31) != 0;
-	for (const auto& meshName : headShapeNames) {
+	// Hair: a shown wig replaces all of it. Another piece covers the hair
+	// shapes with a partition of its hair slots: 31 / 41, or 131 / 141 as
+	// head parts number them. A shape goes as a whole, also if it has a
+	// partition of the other hair slot. Only a change touches the shapes, so
+	// that an overlay checkbox the user clicked stays as it is.
+	bool wigShown = std::any_of(wigShapes_.begin(), wigShapes_.end(), [&](const std::string& name) {
+		Mesh* m = gls.GetMesh(name);
+		return m && m->bVisible;
+	});
+	for (const auto& meshName : headHairShapes_) {
+		bool covered = wigShown;
 		auto it = bodyShapePartMap.find(meshName);
-		if (it == bodyShapePartMap.end() || !it->second.count(31))
-			continue;
-		bool desired = !hideHair;
-		Mesh* m = gls.GetMesh(meshName);
-		if (m && m->bVisible != desired) {
-			gls.SetMeshVisibility(meshName, desired);
-			wxLogMessage("ApplyRaceBodyPartVisibility: hair shape '%s' -> %s", meshName, desired ? "show" : "hide");
-			auto cbIt = meshCheckboxes.find(meshName);
-			if (cbIt != meshCheckboxes.end() && cbIt->second)
-				cbIt->second->SetValue(desired);
+		if (!covered && it != bodyShapePartMap.end()) {
+			for (int slot : {31, 41}) {
+				if (shownSlots.count(slot) && (it->second.count(slot) || it->second.count(slot + 100)))
+					covered = true;
+			}
 		}
+		bool& known = hairShapeCovered_[meshName];
+		if (covered == known)
+			continue;
+		known = covered;
+		gls.SetMeshVisibility(meshName, !covered);
+		wxLogMessage("ApplyRaceBodyPartVisibility: hair shape '%s' -> %s", meshName, covered ? "hide" : "show");
+		auto cbIt = meshCheckboxes.find(meshName);
+		if (cbIt != meshCheckboxes.end() && cbIt->second)
+			cbIt->second->SetValue(!covered);
 	}
 }
 
@@ -1974,15 +2045,7 @@ void LeveledListPreviewer::UpdateActiveSlotsAndVisibility() {
 			// (before useAnyGroups_ is populated) treat the first variant as
 			// active for every gate to match the default activeIndex = 0.
 			if (useAnyGroups_.empty()) {
-				bool allZero = true;
-				for (auto& [g, v] : piece.useAnyPath) {
-					(void)g;
-					if (v != 0) {
-						allZero = false;
-						break;
-					}
-				}
-				if (!allZero)
+				if (!IsFirstVariantPath(piece.useAnyPath))
 					continue;
 			}
 			else if (!IsUseAnyPathActive(piece.useAnyPath)) {
@@ -2378,6 +2441,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 		std::set<std::string> headSet(headShapeNames.begin(), headShapeNames.end());
 		auto isNotHead = [&](const std::string& name) { return headSet.find(name) == headSet.end(); };
 
+		ClearNpcWig();
 		for (auto& name : outfitShapeNames)
 			gls.DeleteMesh(name);
 		for (auto& name : bodyShapeNames)
@@ -2426,6 +2490,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 		outfitShapeNames.clear();
 		outfitGameVerts.clear();
 		outfitShapeNifName_.clear();
+		wigShapes_.clear();
 		useAnyGroups_.clear();
 		shapeUseAnyPath_.clear();
 		variantNifLoadFailures_.clear();
@@ -2442,110 +2507,7 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	if (showBody)
 		LoadBodyMeshes();
 
-	std::string baseGamePath = Config["GameDataPath"];
-	if (!baseGamePath.empty() && baseGamePath.back() != '/' && baseGamePath.back() != '\\')
-		baseGamePath += '/';
-
-	// Determine the selected NPC's race, if any. ARMOs that contain multiple
-	// ARMAs targeting different races (one ARMA per race) need to be filtered
-	// to the ARMA that matches the NPC's race — otherwise we render every
-	// race variant on top of each other.
-	uint32_t npcRaceFid = 0;
-	std::set<lldata::FormId> effectiveArmorRaces;
-	if (!currentHeadNpc.first.empty()) {
-		auto effRace = data.GetEffectiveNpcRace(currentHeadNpc);
-		npcRaceFid = effRace.formId;
-		// "Effective" set covers custom child / variant races that inherit
-		// armor compatibility from a parent via the skin ARMO's ARMAs.
-		effectiveArmorRaces = data.GetEffectiveArmorRaces(npcRaceFid);
-	}
-	if (npcRaceFid != 0) {
-		std::string ras;
-		for (lldata::FormId r : effectiveArmorRaces) {
-			if (!ras.empty())
-				ras += ",";
-			char buf[24];
-			std::snprintf(buf, sizeof(buf), "%llX", static_cast<unsigned long long>(r));
-			ras += buf;
-		}
-		wxLogMessage("LeveledListPreviewer: NPC race %08X effective armor races: [%s]", npcRaceFid, ras);
-	}
-
-	// Build the set of piece indices (into outfit.pieces) we will actually
-	// render. For each ARMO we pick the ARMA tier that best matches the NPC's
-	// race, using the same priority the engine uses:
-	//   1. ARMAs whose race (primary or additional) is exactly the NPC's race
-	//   2. ARMAs whose race (primary or additional) is DefaultRace (0x19) —
-	//      these are the catch-all human variants used when no race-specific
-	//      ARMA exists
-	//   3. ARMAs whose race is reachable via the NPC race's skin-ARMO chain
-	//      (covers custom child / variant races that inherit armor
-	//      compatibility from a parent race)
-	//   4. Fallback: keep everything (no race info available at all)
-	// This prevents e.g. the Argonian / Khajiit gauntlet variants from being
-	// rendered on a Redguard NPC just because they share the broad humanoid
-	// effective-race set.
-	constexpr uint32_t DEFAULT_RACE_FID = 0x00000019;
-	renderPieceIdx_.clear();
-	{
-		auto pieceMatchesAny = [](const lldata::OutfitPiece& p, const std::set<lldata::FormId>& set) -> bool {
-			if (set.count(p.armaRaceFormId))
-				return true;
-			for (lldata::FormId r : p.armaAdditionalRaceFormIds) {
-				if (set.count(r))
-					return true;
-			}
-			return false;
-		};
-
-		std::set<lldata::FormId> exactRaceSet;
-		if (npcRaceFid != 0)
-			exactRaceSet.insert(npcRaceFid);
-		std::set<lldata::FormId> defaultRaceSet{DEFAULT_RACE_FID};
-
-		std::map<lldata::FormId, std::vector<size_t>> byArmo;
-		for (size_t i = 0; i < outfit.pieces.size(); ++i)
-			byArmo[outfit.pieces[i].formId].push_back(i);
-
-		for (auto& [armoId, indices] : byArmo) {
-			// Try each tier in priority order; first tier that finds a match
-			// wins for this ARMO and all non-matching ARMA variants get hidden.
-			auto tryTier = [&](const std::set<lldata::FormId>& tierSet, const char* tierLabel) -> bool {
-				if (tierSet.empty())
-					return false;
-				bool anyMatch = false;
-				for (size_t i : indices) {
-					if (pieceMatchesAny(outfit.pieces[i], tierSet)) {
-						anyMatch = true;
-						break;
-					}
-				}
-				if (!anyMatch)
-					return false;
-				for (size_t i : indices) {
-					if (pieceMatchesAny(outfit.pieces[i], tierSet))
-						renderPieceIdx_.insert(i);
-					else
-						wxLogMessage("  Hiding ARMA variant of piece '%s' [%08X]: ARMA race %08X not in %s tier",
-									 outfit.pieces[i].name,
-									 outfit.pieces[i].formId,
-									 outfit.pieces[i].armaRaceFormId,
-									 tierLabel);
-				}
-				return true;
-			};
-
-			if (tryTier(exactRaceSet, "exact NPC race"))
-				continue;
-			if (tryTier(defaultRaceSet, "DefaultRace"))
-				continue;
-			if (tryTier(effectiveArmorRaces, "skin-ARMO race chain"))
-				continue;
-			// No tier matched (or no race info): keep everything.
-			for (size_t i : indices)
-				renderPieceIdx_.insert(i);
-		}
-	}
+	renderPieceIdx_ = SelectPiecesForNpcRace(outfit);
 
 	// Build the "Use Any" variant group state from the OutfitEntry's pre-built
 	// gate tree BEFORE loading any piece NIFs. Loading only walks pieces on
@@ -2584,6 +2546,9 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 	for (auto& g : useAnyGroups_) {
 		wxLogMessage("  Use Any group %d ('%s', parent=%d/%d): %zu variants", g.groupId, g.label, g.parentGroupId, g.parentVariantIdx, g.variants.size());
 	}
+
+	// The NPC keeps the wig of its default outfit over this outfit.
+	LoadNpcWig();
 
 	// Apply preset to outfit pieces
 	if (!outfitGameVerts.empty() && !currentPresetName.empty() && currentPresetName != "(none)")
@@ -2648,6 +2613,195 @@ void LeveledListPreviewer::LoadOutfitMeshes(const lldata::OutfitEntry& outfit) {
 
 	RefreshMeshOverlay();
 	gls.RenderOneFrame();
+}
+
+std::set<size_t> LeveledListPreviewer::SelectPiecesForNpcRace(const lldata::OutfitEntry& outfit) {
+	// Determine the selected NPC's race, if any. ARMOs that contain multiple
+	// ARMAs targeting different races (one ARMA per race) need to be filtered
+	// to the ARMA that matches the NPC's race — otherwise we render every
+	// race variant on top of each other.
+	uint32_t npcRaceFid = 0;
+	std::set<lldata::FormId> effectiveArmorRaces;
+	if (!currentHeadNpc.first.empty()) {
+		auto effRace = data.GetEffectiveNpcRace(currentHeadNpc);
+		npcRaceFid = effRace.formId;
+		// "Effective" set covers custom child / variant races that inherit
+		// armor compatibility from a parent via the skin ARMO's ARMAs.
+		effectiveArmorRaces = data.GetEffectiveArmorRaces(npcRaceFid);
+	}
+	if (npcRaceFid != 0) {
+		std::string ras;
+		for (lldata::FormId r : effectiveArmorRaces) {
+			if (!ras.empty())
+				ras += ",";
+			char buf[24];
+			std::snprintf(buf, sizeof(buf), "%llX", static_cast<unsigned long long>(r));
+			ras += buf;
+		}
+		wxLogMessage("LeveledListPreviewer: NPC race %08X effective armor races: [%s]", npcRaceFid, ras);
+	}
+
+	// Build the set of piece indices (into outfit.pieces) we will actually
+	// render. For each ARMO we pick the ARMA tier that best matches the NPC's
+	// race, using the same priority the engine uses:
+	//   1. ARMAs whose race (primary or additional) is exactly the NPC's race
+	//   2. ARMAs whose race (primary or additional) is DefaultRace (0x19) —
+	//      these are the catch-all human variants used when no race-specific
+	//      ARMA exists
+	//   3. ARMAs whose race is reachable via the NPC race's skin-ARMO chain
+	//      (covers custom child / variant races that inherit armor
+	//      compatibility from a parent race)
+	//   4. Fallback: keep everything (no race info available at all)
+	// This prevents e.g. the Argonian / Khajiit gauntlet variants from being
+	// rendered on a Redguard NPC just because they share the broad humanoid
+	// effective-race set.
+	constexpr uint32_t DEFAULT_RACE_FID = 0x00000019;
+	std::set<size_t> selected;
+	{
+		auto pieceMatchesAny = [](const lldata::OutfitPiece& p, const std::set<lldata::FormId>& set) -> bool {
+			if (set.count(p.armaRaceFormId))
+				return true;
+			for (lldata::FormId r : p.armaAdditionalRaceFormIds) {
+				if (set.count(r))
+					return true;
+			}
+			return false;
+		};
+
+		std::set<lldata::FormId> exactRaceSet;
+		if (npcRaceFid != 0)
+			exactRaceSet.insert(npcRaceFid);
+		std::set<lldata::FormId> defaultRaceSet{DEFAULT_RACE_FID};
+
+		std::map<lldata::FormId, std::vector<size_t>> byArmo;
+		for (size_t i = 0; i < outfit.pieces.size(); ++i)
+			byArmo[outfit.pieces[i].formId].push_back(i);
+
+		for (auto& [armoId, indices] : byArmo) {
+			// Try each tier in priority order; first tier that finds a match
+			// wins for this ARMO and all non-matching ARMA variants get hidden.
+			auto tryTier = [&](const std::set<lldata::FormId>& tierSet, const char* tierLabel) -> bool {
+				if (tierSet.empty())
+					return false;
+				bool anyMatch = false;
+				for (size_t i : indices) {
+					if (pieceMatchesAny(outfit.pieces[i], tierSet)) {
+						anyMatch = true;
+						break;
+					}
+				}
+				if (!anyMatch)
+					return false;
+				for (size_t i : indices) {
+					if (pieceMatchesAny(outfit.pieces[i], tierSet))
+						selected.insert(i);
+					else
+						wxLogMessage("  Hiding ARMA variant of piece '%s' [%08X]: ARMA race %08X not in %s tier",
+									 outfit.pieces[i].name,
+									 outfit.pieces[i].formId,
+									 outfit.pieces[i].armaRaceFormId,
+									 tierLabel);
+				}
+				return true;
+			};
+
+			if (tryTier(exactRaceSet, "exact NPC race"))
+				continue;
+			if (tryTier(defaultRaceSet, "DefaultRace"))
+				continue;
+			if (tryTier(effectiveArmorRaces, "skin-ARMO race chain"))
+				continue;
+			// No tier matched (or no race info): keep everything.
+			for (size_t i : indices)
+				selected.insert(i);
+		}
+	}
+	return selected;
+}
+
+// ---------------------------------------------------------------------------
+// The wig of the NPC's default outfit
+// ---------------------------------------------------------------------------
+
+void LeveledListPreviewer::ClearNpcWig() {
+	if (canvas && context)
+		canvas->SetCurrent(*context);
+	for (auto& name : npcWigShapeNames_) {
+		gls.DeleteMesh(name);
+		shapeNifSource.erase(name);
+		bodyShapePartMap.erase(name);
+		shapeMaterials.erase(name);
+		shapeArmoName.erase(name);
+		shapeArmoBodySlots.erase(name);
+		outfitGameVerts.erase(name);
+		outfitShapeNifName_.erase(name);
+		wigShapes_.erase(name);
+		untexturedShapes.erase(std::remove(untexturedShapes.begin(), untexturedShapes.end(), name), untexturedShapes.end());
+	}
+	npcWigShapeNames_.clear();
+	npcWigDisplayShapes_.clear();
+	npcWigSlots_.clear();
+	npcWigCovered_ = false;
+}
+
+void LeveledListPreviewer::LoadNpcWig() {
+	ClearNpcWig();
+
+	const lldata::NPCEntry* npc = currentHeadNpc.first.empty() ? nullptr : data.FindNpc(currentHeadNpc);
+	const lldata::OutfitEntry* defaultOutfit = npc ? data.ResolveNpcDefaultOutfit(*npc) : nullptr;
+	if (!defaultOutfit || (currentOutfit && currentOutfit->formId == defaultOutfit->formId)) {
+		ApplyRaceBodyPartVisibility();
+		return;
+	}
+
+	// The wig is the first ARMO on the default outfit's first variants that
+	// passes IsWigModel. Its pieces are all the ARMO's pieces for the NPC's race.
+	std::set<size_t> racePieces = SelectPiecesForNpcRace(*defaultOutfit);
+	lldata::FormId wigFormId = 0;
+	for (size_t i : racePieces) {
+		const lldata::OutfitPiece& piece = defaultOutfit->pieces[i];
+		if (piece.nifPath.empty() || !IsFirstVariantPath(piece.useAnyPath) || !OnlyHairSlots(piece.bodySlots))
+			continue;
+		std::vector<char> bytes;
+		if (!data.ReadGameFile(piece.nifPath, bytes)) {
+			wxLogWarning("LoadNpcWig: NIF of '%s' not found: %s", piece.name, piece.nifPath);
+			continue;
+		}
+		std::string content(bytes.data(), bytes.size());
+		std::istringstream stream(content, std::istringstream::binary);
+		NifFile nif;
+		if (nif.Load(stream) != 0) {
+			wxLogError("LoadNpcWig: Failed to read NIF of '%s': %s", piece.name, piece.nifPath);
+			continue;
+		}
+		if (IsWigModel(piece, nif)) {
+			wigFormId = piece.formId;
+			break;
+		}
+	}
+	if (wigFormId == 0) {
+		ApplyRaceBodyPartVisibility();
+		return;
+	}
+
+	int loadedCount = 0;
+	for (size_t i : racePieces) {
+		if (defaultOutfit->pieces[i].formId != wigFormId || !IsFirstVariantPath(defaultOutfit->pieces[i].useAnyPath))
+			continue;
+		// The gates of the default outfit don't exist in the outfit on display.
+		lldata::OutfitPiece piece = defaultOutfit->pieces[i];
+		piece.useAnyPath.clear();
+		wxLogMessage("LoadNpcWig: NPC '%s' keeps '%s' of its default outfit", npc->editorId, piece.name);
+		npcWigSlots_.insert(piece.bodySlots.begin(), piece.bodySlots.end());
+		LoadOutfitPieceShapes(piece, npcWigShapeNames_, "_wig_", loadedCount, [this]() { return !npcWigCovered_; });
+	}
+	for (auto& name : npcWigShapeNames_) {
+		Mesh* m = gls.GetMesh(name);
+		if (m && m->bVisible)
+			npcWigDisplayShapes_.push_back(name);
+	}
+
+	ApplyRaceBodyPartVisibility();
 }
 
 // ---------------------------------------------------------------------------
@@ -3144,17 +3298,11 @@ bool LeveledListPreviewer::IsUseAnyPathActive(const std::vector<std::pair<int, i
 bool LeveledListPreviewer::IsUseAnyPathActiveOrDefault(const std::vector<std::pair<int, int>>& path) const {
 	if (path.empty())
 		return true;
-	if (useAnyGroups_.empty()) {
-		// First-time load: useAnyGroups_ is populated only after the initial
-		// piece sweep finishes, so during that sweep every gate's activeIndex
-		// is conceptually 0. A piece is "active" iff its path is all-zero.
-		for (auto& [gid, vid] : path) {
-			(void)gid;
-			if (vid != 0)
-				return false;
-		}
-		return true;
-	}
+	// First-time load: useAnyGroups_ is populated only after the initial
+	// piece sweep finishes, so during that sweep every gate's activeIndex
+	// is conceptually 0. A piece is "active" iff its path is all-zero.
+	if (useAnyGroups_.empty())
+		return IsFirstVariantPath(path);
 	return IsUseAnyPathActive(path);
 }
 
@@ -3169,9 +3317,16 @@ void LeveledListPreviewer::EnsurePiecesLoadedForActivePath() {
 			continue;
 		if (!renderPieceIdx_.count(i))
 			continue;
-		if (!IsUseAnyPathActiveOrDefault(currentOutfit->pieces[i].useAnyPath))
+		const lldata::OutfitPiece& piece = currentOutfit->pieces[i];
+		if (!IsUseAnyPathActiveOrDefault(piece.useAnyPath))
 			continue;
-		LoadOutfitPieceShapes(*currentOutfit, i, /*baseGamePath*/ std::string{}, loadedCount);
+		// Marked as loaded up-front so a partial load (e.g. unresolved NIF)
+		// still prevents endless re-attempts on subsequent variant switches.
+		loadedOutfitPieces_.insert(i);
+		// The actor wears the piece while its Use Any variants are active.
+		LoadOutfitPieceShapes(piece, outfitShapeNames, /*namePrefix*/ std::string{}, loadedCount, [this, path = piece.useAnyPath]() {
+			return path.empty() || IsUseAnyPathActive(path);
+		});
 		anyNew = true;
 	}
 
@@ -3187,12 +3342,7 @@ void LeveledListPreviewer::EnsurePiecesLoadedForActivePath() {
 	}
 }
 
-void LeveledListPreviewer::LoadOutfitPieceShapes(const lldata::OutfitEntry& outfit, size_t pieceIdx, const std::string& /*baseGamePath*/, int& loadedCount) {
-	// Mark the piece as loaded up-front so a partial load (e.g. unresolved NIF)
-	// still prevents endless re-attempts on subsequent variant switches.
-	loadedOutfitPieces_.insert(pieceIdx);
-
-	auto& piece = outfit.pieces[pieceIdx];
+void LeveledListPreviewer::LoadOutfitPieceShapes(const lldata::OutfitPiece& piece, std::vector<std::string>& shapeNames, const std::string& namePrefix, int& loadedCount, ActorAnimation::WornCheck worn) {
 	if (piece.nifPath.empty()) {
 		wxLogMessage("  Piece '%s' [%08X]: no model path, skipping", piece.name, piece.formId);
 		return;
@@ -3267,10 +3417,12 @@ void LeveledListPreviewer::LoadOutfitPieceShapes(const lldata::OutfitEntry& outf
 	// multiple pieces share shape names.
 	char piecePrefixBuf[32];
 	std::snprintf(piecePrefixBuf, sizeof(piecePrefixBuf), "%08X_%d_", piece.formId, loadedCount);
-	std::string piecePrefix = piecePrefixBuf;
+	std::string piecePrefix = namePrefix + piecePrefixBuf;
 
 	// Try to pre-load .tri file for this piece NIF
 	TriFile* pieceTri = GetOrLoadTriFile(piecePath);
+
+	bool isWig = IsWigModel(piece, nif);
 
 	std::vector<std::pair<NiShape*, Mesh*>> modelMeshes;
 	for (auto& shapeName : nif.GetShapeNames()) {
@@ -3281,6 +3433,8 @@ void LeveledListPreviewer::LoadOutfitPieceShapes(const lldata::OutfitEntry& outf
 		lighting_.SetShapeFlags(m->shapeName, GameLighting::ReadShapeFlags(nif, nif.FindBlockByName<NiShape>(shapeName)));
 
 		outfitShapeNifName_[m->shapeName] = shapeName;
+		if (isWig)
+			wigShapes_.insert(m->shapeName);
 
 		// Vertex colors
 		const std::vector<Color4>* vcolors = nif.GetColorsForShape(shapeName);
@@ -3362,8 +3516,8 @@ void LeveledListPreviewer::LoadOutfitPieceShapes(const lldata::OutfitEntry& outf
 			wxLogMessage("  Hiding outfit shape '%s' (%s)", m->shapeName, hideReason);
 			gls.SetMeshVisibility(m->shapeName, false);
 		}
-		if (std::find(outfitShapeNames.begin(), outfitShapeNames.end(), m->shapeName) == outfitShapeNames.end())
-			outfitShapeNames.push_back(m->shapeName);
+		if (std::find(shapeNames.begin(), shapeNames.end(), m->shapeName) == shapeNames.end())
+			shapeNames.push_back(m->shapeName);
 		shapeNifSource[m->shapeName] = piecePath;
 		shapeArmoName[m->shapeName] = piece.name;
 		shapeArmoBodySlots[m->shapeName] = piece.bodySlots;
@@ -3429,7 +3583,6 @@ void LeveledListPreviewer::LoadOutfitPieceShapes(const lldata::OutfitEntry& outf
 		}
 	}
 
-	// The actor wears the piece while its Use Any variants are active.
 	fsmp::WornItem item;
 	item.formId = piece.formId;
 	item.name = piece.name;
@@ -3437,9 +3590,7 @@ void LeveledListPreviewer::LoadOutfitPieceShapes(const lldata::OutfitEntry& outf
 		if (slot >= 30 && slot < 62)
 			item.bipedSlots |= 1u << (slot - 30);
 	}
-	actorAnim_.RegisterModel(nif, piecePath, ActorAnimation::ModelKind::Armor, modelMeshes, [this, path = piece.useAnyPath]() {
-		return path.empty() || IsUseAnyPathActive(path);
-	}, item, data.EngineFormId(piece.formId));
+	actorAnim_.RegisterModel(nif, piecePath, ActorAnimation::ModelKind::Armor, modelMeshes, std::move(worn), item, data.EngineFormId(piece.formId));
 }
 
 void LeveledListPreviewer::ApplyUseAnyVisibility() {
@@ -3535,6 +3686,16 @@ void LeveledListPreviewer::RefreshMeshOverlay() {
 	});
 	if (!headCat.groups.empty())
 		categories.push_back(std::move(headCat));
+
+	// The default outfit's wig, while the actor wears it.
+	if (!npcWigCovered_) {
+		auto wigCat = buildCategory("Wig", npcWigDisplayShapes_, [this](const std::string& n) -> std::string {
+			auto it = outfitShapeNifName_.find(n);
+			return it != outfitShapeNifName_.end() ? it->second : n;
+		});
+		if (!wigCat.groups.empty())
+			categories.push_back(std::move(wigCat));
+	}
 
 	// Separate bodyShapeNames into Body, Hands, Feet categories based on partition IDs
 	std::vector<std::string> bodyOnly, handsOnly, feetOnly;
