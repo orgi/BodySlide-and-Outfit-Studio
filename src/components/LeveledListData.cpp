@@ -2379,6 +2379,13 @@ bool LeveledListData::IsHairHeadPart(const std::string& editorId) const {
 	return headPart && headPart->type == HDPT_TYPE_HAIR;
 }
 
+std::string LeveledListData::RecordKeyText(FormId formId) const {
+	std::string plugin = LookupGlobalPluginName(static_cast<uint16_t>((formId >> 24) & 0xFFFFu));
+	if (plugin.empty())
+		return {};
+	return NpcKeyText({ToLower(plugin), static_cast<uint32_t>(formId & 0x00FFFFFFu)});
+}
+
 LeveledListData::BodyNifPaths LeveledListData::ResolveNpcBodyNifPaths(const NpcKey& npc, bool highWeight) {
 	BodyNifPaths result;
 	if (npc.first.empty())

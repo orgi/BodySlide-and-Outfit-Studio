@@ -159,6 +159,16 @@ LeveledListPreviewer::LeveledListPreviewer(wxEvtHandler* handler)
 	presetSizer->Add(highWeightCheck, 0, wxALIGN_CENTER_VERTICAL);
 	leftSizer->Add(presetSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
 
+	// The wig of the NPC's default outfit, chosen from its leveled list
+	wxBoxSizer* wigSizer = new wxBoxSizer(wxHORIZONTAL);
+	wigSizer->Add(new wxStaticText(leftPanel, wxID_ANY, _("Wig:")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+	wigChoice_ = new wxChoice(leftPanel, wxID_ANY);
+	wigChoice_->SetToolTip(_("The wig the NPC wears from its default outfit, also with other outfits; remembered per NPC"));
+	wigChoice_->Bind(wxEVT_CHOICE, &LeveledListPreviewer::OnWigChosen, this);
+	wigChoice_->Disable();
+	wigSizer->Add(wigChoice_, 1);
+	leftSizer->Add(wigSizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
+
 	// SMP physics toggle
 	wxBoxSizer* smpSizer = new wxBoxSizer(wxHORIZONTAL);
 	smpToggle_ = new wxCheckBox(leftPanel, ID_ToggleSmp, _("SMP Physics Preview"));
@@ -508,8 +518,10 @@ void LeveledListPreviewer::LoadESPFile(const std::string& filepath) {
 	data.SetBaseDataPath(baseGamePath);
 
 	wxBusyCursor wait;
-	// LoadESP replaces the entry this points at.
+	// LoadESP replaces the entries these point at.
 	currentOutfit = nullptr;
+	npcDefaultOutfit_ = nullptr;
+	npcWigOptionsDirty_ = true;
 	if (!data.LoadESP(filepath)) {
 		wxMessageBox(_("Failed to load ESP file."), _("Error"), wxICON_ERROR);
 		return;
@@ -1789,6 +1801,8 @@ void LeveledListPreviewer::OnHeadEntered(wxCommandEvent& WXUNUSED(event)) {
 		ClearHeadMeshes();
 		ClearNpcWig();
 		currentHeadNpc = {};
+		UpdateNpcWigOptions();
+		RefreshWigChoice();
 		hasNpcSkinTextures = false;
 		npcBodyPartTextures = {};
 		hasNpcTint = false;
@@ -1907,6 +1921,8 @@ void LeveledListPreviewer::SelectNpc(const lldata::NPCEntry& npc, bool loadDefau
 			loadedOutfitPieces_.clear();
 			renderPieceIdx_.clear();
 			currentOutfit = nullptr;
+			UpdateNpcWigOptions();
+			RefreshWigChoice();
 			ApplyRaceBodyPartVisibility();
 			// Distinguish "no DOFT defined" (normal for creatures) from "DOFT exists
 			// but couldn't be resolved" (mod outfit chain not loaded).
@@ -2744,54 +2760,336 @@ void LeveledListPreviewer::ClearNpcWig() {
 	npcWigCovered_ = false;
 }
 
-void LeveledListPreviewer::LoadNpcWig() {
-	ClearNpcWig();
-
-	const lldata::NPCEntry* npc = currentHeadNpc.first.empty() ? nullptr : data.FindNpc(currentHeadNpc);
-	const lldata::OutfitEntry* defaultOutfit = npc ? data.ResolveNpcDefaultOutfit(*npc) : nullptr;
-	if (!defaultOutfit || (currentOutfit && currentOutfit->formId == defaultOutfit->formId)) {
-		ApplyRaceBodyPartVisibility();
-		return;
+// The remembered wig choices are kept as "<npc>><wig>" pairs separated by
+// '|', both RecordKeyText() / NpcKeyText() keys. File names can't contain
+// '>' or '|'.
+static std::map<std::string, std::string> ReadNpcWigChoices() {
+	std::map<std::string, std::string> choices;
+	std::string text = Config["LLPreviewer/NpcWigs"];
+	size_t begin = 0;
+	while (begin < text.size()) {
+		size_t end = text.find('|', begin);
+		if (end == std::string::npos)
+			end = text.size();
+		std::string entry = text.substr(begin, end - begin);
+		size_t sep = entry.find('>');
+		if (sep != std::string::npos && sep > 0 && sep + 1 < entry.size())
+			choices[entry.substr(0, sep)] = entry.substr(sep + 1);
+		begin = end + 1;
 	}
+	return choices;
+}
 
-	// The wig is the first ARMO on the default outfit's first variants that
-	// passes IsWigModel. Its pieces are all the ARMO's pieces for the NPC's race.
-	std::set<size_t> racePieces = SelectPiecesForNpcRace(*defaultOutfit);
-	lldata::FormId wigFormId = 0;
-	for (size_t i : racePieces) {
-		const lldata::OutfitPiece& piece = defaultOutfit->pieces[i];
-		if (piece.nifPath.empty() || !IsFirstVariantPath(piece.useAnyPath) || !OnlyHairSlots(piece.bodySlots))
-			continue;
-		std::vector<char> bytes;
-		if (!data.ReadGameFile(piece.nifPath, bytes)) {
-			wxLogWarning("LoadNpcWig: NIF of '%s' not found: %s", piece.name, piece.nifPath);
-			continue;
-		}
+static void SaveNpcWigChoice(const std::string& npcKey, const std::string& wigKey) {
+	std::map<std::string, std::string> choices = ReadNpcWigChoices();
+	choices[npcKey] = wigKey;
+	std::string text;
+	for (auto& [npc, wig] : choices) {
+		if (!text.empty())
+			text += '|';
+		text += npc + '>' + wig;
+	}
+	Config.SetValue("LLPreviewer/NpcWigs", text);
+}
+
+bool LeveledListPreviewer::IsWigPiece(const lldata::OutfitPiece& piece) {
+	if (piece.nifPath.empty() || !OnlyHairSlots(piece.bodySlots))
+		return false;
+	// IsWigModel's slot condition holds for every piece that gets here, so the
+	// result depends on the NIF only.
+	auto cached = wigModelCache_.find(piece.nifPath);
+	if (cached != wigModelCache_.end())
+		return cached->second;
+	bool wig = false;
+	std::vector<char> bytes;
+	if (!data.ReadGameFile(piece.nifPath, bytes)) {
+		wxLogWarning("IsWigPiece: NIF of '%s' not found: %s", piece.name, piece.nifPath);
+	}
+	else {
 		std::string content(bytes.data(), bytes.size());
 		std::istringstream stream(content, std::istringstream::binary);
 		NifFile nif;
-		if (nif.Load(stream) != 0) {
-			wxLogError("LoadNpcWig: Failed to read NIF of '%s': %s", piece.name, piece.nifPath);
-			continue;
+		if (nif.Load(stream) != 0)
+			wxLogError("IsWigPiece: Failed to read NIF of '%s': %s", piece.name, piece.nifPath);
+		else
+			wig = IsWigModel(piece, nif);
+	}
+	wigModelCache_[piece.nifPath] = wig;
+	return wig;
+}
+
+void LeveledListPreviewer::UpdateNpcWigOptions() {
+	if (!npcWigOptionsDirty_ && npcWigOptionsNpc_ == currentHeadNpc)
+		return;
+	npcWigOptionsDirty_ = false;
+	npcWigOptionsNpc_ = currentHeadNpc;
+	npcWigOptions_.clear();
+	npcWigChoice_ = -1;
+
+	const lldata::NPCEntry* npc = currentHeadNpc.first.empty() ? nullptr : data.FindNpc(currentHeadNpc);
+	npcDefaultOutfit_ = npc ? data.ResolveNpcDefaultOutfit(*npc) : nullptr;
+	if (npcDefaultOutfit_) {
+		wxBusyCursor wait;
+		// The wigs whose gates above their own gate are on the first variant, in
+		// the order of the pieces, one per ARMO. The options are the wigs of the
+		// first one's gate, or the first one if it is outside of gates.
+		std::vector<WigOption> found;
+		for (size_t i : SelectPiecesForNpcRace(*npcDefaultOutfit_)) {
+			const lldata::OutfitPiece& piece = npcDefaultOutfit_->pieces[i];
+			const auto& path = piece.useAnyPath;
+			if (!path.empty() && !IsFirstVariantPath(std::vector<std::pair<int, int>>(path.begin(), path.end() - 1)))
+				continue;
+			if (std::any_of(found.begin(), found.end(), [&](const WigOption& w) { return w.formId == piece.formId; }))
+				continue;
+			if (!IsWigPiece(piece))
+				continue;
+			found.push_back({piece.formId, !piece.name.empty() ? piece.name : piece.editorId, path});
 		}
-		if (IsWigModel(piece, nif)) {
-			wigFormId = piece.formId;
+		auto gateOf = [](const WigOption& w) { return w.path.empty() ? -1 : w.path.back().first; };
+		if (!found.empty()) {
+			int gate = gateOf(found.front());
+			if (gate < 0) {
+				npcWigOptions_.push_back(found.front());
+			}
+			else {
+				for (auto& w : found) {
+					if (gateOf(w) == gate)
+						npcWigOptions_.push_back(w);
+				}
+				std::stable_sort(npcWigOptions_.begin(), npcWigOptions_.end(), [](const WigOption& a, const WigOption& b) {
+					return a.path.back().second < b.path.back().second;
+				});
+			}
+		}
+
+		npcWigChoice_ = CarriedWigIndex();
+		wxLogMessage("UpdateNpcWigOptions: NPC '%s' has %zu wig(s) in its default outfit, worn with other outfits: '%s' (remembered: '%s')",
+					 lldata::NpcKeyText(currentHeadNpc),
+					 npcWigOptions_.size(),
+					 npcWigChoice_ >= 0 ? npcWigOptions_[npcWigChoice_].label : std::string("none"),
+					 RememberedNpcWig());
+		for (size_t k = 0; k < npcWigOptions_.size(); ++k)
+			wxLogMessage("  wig %zu: '%s' %s", k, npcWigOptions_[k].label, data.RecordKeyText(npcWigOptions_[k].formId));
+	}
+}
+
+std::string LeveledListPreviewer::RememberedNpcWig() const {
+	if (currentHeadNpc.first.empty())
+		return {};
+	std::map<std::string, std::string> choices = ReadNpcWigChoices();
+	auto it = choices.find(lldata::NpcKeyText(currentHeadNpc));
+	return it != choices.end() ? it->second : std::string();
+}
+
+int LeveledListPreviewer::CarriedWigIndex() const {
+	std::string remembered = RememberedNpcWig();
+	for (size_t k = 0; k < npcWigOptions_.size() && !remembered.empty(); ++k) {
+		if (data.RecordKeyText(npcWigOptions_[k].formId) == remembered)
+			return static_cast<int>(k);
+	}
+	for (size_t k = 0; k < npcWigOptions_.size(); ++k) {
+		if (IsFirstVariantPath(npcWigOptions_[k].path))
+			return static_cast<int>(k);
+	}
+	return -1;
+}
+
+int LeveledListPreviewer::FindOutfitWigGate() {
+	if (!currentOutfit || currentOutfit == npcDefaultOutfit_)
+		return -1;
+	for (const auto& gateInfo : currentOutfit->useAnyGroups) {
+		auto gate = std::find_if(useAnyGroups_.begin(), useAnyGroups_.end(), [&](const UseAnyGroup& g) { return g.groupId == gateInfo.groupId; });
+		if (gate == useAnyGroups_.end() || gate->activeIndex < 0 || gate->activeIndex >= static_cast<int>(gate->variants.size()))
+			continue;
+		if (gateInfo.parentGroupId >= 0 && !IsUseAnyPathActive({{gateInfo.parentGroupId, gateInfo.parentVariantIdx}}))
+			continue;
+		std::pair<int, int> shown{gateInfo.groupId, gate->variants[gate->activeIndex].variantIdx};
+		for (size_t i : renderPieceIdx_) {
+			const lldata::OutfitPiece& piece = currentOutfit->pieces[i];
+			if (!piece.useAnyPath.empty() && piece.useAnyPath.back() == shown && IsWigPiece(piece))
+				return gateInfo.groupId;
+		}
+	}
+	return -1;
+}
+
+std::vector<LeveledListPreviewer::WigEntry> LeveledListPreviewer::OutfitGateWigs(int groupId) {
+	std::vector<WigEntry> wigs;
+	if (!currentOutfit)
+		return wigs;
+	for (size_t i : renderPieceIdx_) {
+		const lldata::OutfitPiece& piece = currentOutfit->pieces[i];
+		if (piece.useAnyPath.empty() || piece.useAnyPath.back().first != groupId)
+			continue;
+		if (std::any_of(wigs.begin(), wigs.end(), [&](const WigEntry& w) { return w.formId == piece.formId; }))
+			continue;
+		if (!IsWigPiece(piece))
+			continue;
+		wigs.push_back({piece.formId, !piece.name.empty() ? piece.name : piece.editorId, groupId, piece.useAnyPath.back().second});
+	}
+	std::stable_sort(wigs.begin(), wigs.end(), [](const WigEntry& a, const WigEntry& b) { return a.variantIdx < b.variantIdx; });
+	return wigs;
+}
+
+void LeveledListPreviewer::RefreshWigChoice() {
+	wigChoiceEntries_.clear();
+	int selection = -1;
+	int gate = FindOutfitWigGate();
+	if (gate >= 0) {
+		wigChoiceEntries_ = OutfitGateWigs(gate);
+		auto group = std::find_if(useAnyGroups_.begin(), useAnyGroups_.end(), [&](const UseAnyGroup& g) { return g.groupId == gate; });
+		int shownVariant = group->variants[group->activeIndex].variantIdx;
+		for (size_t k = 0; k < wigChoiceEntries_.size(); ++k) {
+			if (wigChoiceEntries_[k].variantIdx == shownVariant)
+				selection = static_cast<int>(k);
+		}
+	}
+	else {
+		bool defaultOnDisplay = currentOutfit && currentOutfit == npcDefaultOutfit_;
+		for (size_t k = 0; k < npcWigOptions_.size(); ++k) {
+			wigChoiceEntries_.push_back({npcWigOptions_[k].formId, npcWigOptions_[k].label, -1, -1});
+			// The default outfit on display shows the wig of its active variant.
+			if (defaultOnDisplay && !npcWigOptions_[k].path.empty() && IsUseAnyPathActive(npcWigOptions_[k].path))
+				selection = static_cast<int>(k);
+		}
+		if (!defaultOnDisplay)
+			selection = npcWigChoice_;
+	}
+	// Only a variant of the outfit on display shows a wig; the carried one may be covered.
+	bool shownByVariant = gate >= 0 || (currentOutfit && currentOutfit == npcDefaultOutfit_);
+	shownWig_ = shownByVariant && selection >= 0 ? wigChoiceEntries_[selection].formId : 0;
+
+	if (wigChoice_) {
+		wigChoice_->Clear();
+		for (auto& w : wigChoiceEntries_)
+			wigChoice_->Append(wxString::FromUTF8(w.label));
+		wigChoice_->SetSelection(selection);
+		wigChoice_->Enable(wigChoiceEntries_.size() > 1);
+	}
+}
+
+void LeveledListPreviewer::ApplyNpcWigChoiceToVariants() {
+	if (!currentOutfit)
+		return;
+	if (currentOutfit == npcDefaultOutfit_) {
+		if (npcWigChoice_ < 0)
+			return;
+		const auto& path = npcWigOptions_[npcWigChoice_].path;
+		if (!path.empty() && !IsUseAnyPathActive(path)) {
+			applyingNpcWig_ = true;
+			ActivateVariantChain(path.back().first, path.back().second, /*descend*/ true);
+			applyingNpcWig_ = false;
+		}
+		return;
+	}
+
+	// Another outfit: its wig gate shows the remembered wig, else the carried
+	// one, else its first variant (undoing what was shown for another NPC).
+	int gate = FindOutfitWigGate();
+	if (gate < 0)
+		return;
+	std::vector<WigEntry> wigs = OutfitGateWigs(gate);
+	std::string remembered = RememberedNpcWig();
+	auto wig = std::find_if(wigs.begin(), wigs.end(), [&](const WigEntry& w) { return !remembered.empty() && data.RecordKeyText(w.formId) == remembered; });
+	if (wig == wigs.end() && npcWigChoice_ >= 0)
+		wig = std::find_if(wigs.begin(), wigs.end(), [&](const WigEntry& w) { return w.formId == npcWigOptions_[npcWigChoice_].formId; });
+	int target = wig != wigs.end() ? wig->variantIdx : 0;
+	auto group = std::find_if(useAnyGroups_.begin(), useAnyGroups_.end(), [&](const UseAnyGroup& g) { return g.groupId == gate; });
+	if (group->variants[group->activeIndex].variantIdx == target)
+		return;
+	wxLogMessage("ApplyNpcWigChoiceToVariants: outfit '%s' shows variant %d of its wig gate '%s' for NPC '%s'", currentOutfit->name, target, group->label, lldata::NpcKeyText(currentHeadNpc));
+	applyingNpcWig_ = true;
+	ActivateVariantChain(gate, target, /*descend*/ true);
+	applyingNpcWig_ = false;
+}
+
+void LeveledListPreviewer::SyncNpcWigChoiceFromVariants() {
+	if (!currentOutfit || currentHeadNpc.first.empty())
+		return;
+	lldata::FormId before = shownWig_;
+	RefreshWigChoice();
+	if (applyingNpcWig_ || shownWig_ == 0 || shownWig_ == before)
+		return;
+
+	// The user activated the variant of another wig: it is the NPC's wig now.
+	auto entry = std::find_if(wigChoiceEntries_.begin(), wigChoiceEntries_.end(), [&](const WigEntry& w) { return w.formId == shownWig_; });
+	std::string label = entry != wigChoiceEntries_.end() ? entry->label : std::string();
+	std::string wigKey = data.RecordKeyText(shownWig_);
+	if (wigKey.empty()) {
+		wxLogError("SyncNpcWigChoiceFromVariants: the plugin of wig '%s' is unknown; the choice isn't remembered", label);
+		return;
+	}
+	SaveNpcWigChoice(lldata::NpcKeyText(currentHeadNpc), wigKey);
+	wxLogMessage("SyncNpcWigChoiceFromVariants: NPC '%s' wears '%s'", lldata::NpcKeyText(currentHeadNpc), label);
+	int carried = CarriedWigIndex();
+	if (carried != npcWigChoice_) {
+		npcWigChoice_ = carried;
+		// The wig worn with other outfits follows.
+		if (currentOutfit != npcDefaultOutfit_)
+			LoadNpcWig();
+	}
+}
+
+void LeveledListPreviewer::OnWigChosen(wxCommandEvent& WXUNUSED(event)) {
+	int sel = wigChoice_ ? wigChoice_->GetSelection() : wxNOT_FOUND;
+	if (sel < 0 || sel >= static_cast<int>(wigChoiceEntries_.size()))
+		return;
+	const WigEntry chosen = wigChoiceEntries_[sel];
+	std::string wigKey = data.RecordKeyText(chosen.formId);
+	if (wigKey.empty())
+		wxLogError("OnWigChosen: the plugin of wig '%s' is unknown; the choice isn't remembered", chosen.label);
+	else
+		SaveNpcWigChoice(lldata::NpcKeyText(currentHeadNpc), wigKey);
+	wxLogMessage("OnWigChosen: NPC '%s' wears '%s'", lldata::NpcKeyText(currentHeadNpc), chosen.label);
+
+	// The carried wig, the outfit's wig gate and the choice follow the remembered wig.
+	npcWigChoice_ = CarriedWigIndex();
+	LoadNpcWig();
+	if (!outfitGameVerts.empty() && !currentPresetName.empty() && currentPresetName != "(none)")
+		ApplyPresetToOutfit(currentPresetName, true);
+
+	// Says which shown piece of the outfit replaces the chosen wig.
+	if (npcWigCovered_) {
+		for (auto& name : outfitShapeNames) {
+			Mesh* m = gls.GetMesh(name);
+			auto slots = shapeArmoBodySlots.find(name);
+			if (!m || !m->bVisible || slots == shapeArmoBodySlots.end())
+				continue;
+			if (std::none_of(slots->second.begin(), slots->second.end(), [&](int slot) { return npcWigSlots_.count(slot) != 0; }))
+				continue;
+			auto armo = shapeArmoName.find(name);
+			std::string by = armo != shapeArmoName.end() ? armo->second : name;
+			if (by != chosen.label)
+				SetStatusText(wxString::Format(_("Wig '%s' is replaced by '%s' of the outfit, which uses the same slots"), wxString::FromUTF8(chosen.label), wxString::FromUTF8(by)));
 			break;
 		}
 	}
-	if (wigFormId == 0) {
+
+	RefreshMeshOverlay();
+	gls.RenderOneFrame();
+}
+
+void LeveledListPreviewer::LoadNpcWig() {
+	ClearNpcWig();
+	UpdateNpcWigOptions();
+
+	if (!npcDefaultOutfit_ || (currentOutfit && currentOutfit->formId == npcDefaultOutfit_->formId) || npcWigChoice_ < 0) {
+		ApplyNpcWigChoiceToVariants();
+		RefreshWigChoice();
 		ApplyRaceBodyPartVisibility();
 		return;
 	}
 
+	// The wig's pieces are all pieces of its ARMO on its path for the NPC's race.
+	const WigOption& wig = npcWigOptions_[npcWigChoice_];
 	int loadedCount = 0;
-	for (size_t i : racePieces) {
-		if (defaultOutfit->pieces[i].formId != wigFormId || !IsFirstVariantPath(defaultOutfit->pieces[i].useAnyPath))
+	for (size_t i : SelectPiecesForNpcRace(*npcDefaultOutfit_)) {
+		if (npcDefaultOutfit_->pieces[i].formId != wig.formId || npcDefaultOutfit_->pieces[i].useAnyPath != wig.path)
 			continue;
 		// The gates of the default outfit don't exist in the outfit on display.
-		lldata::OutfitPiece piece = defaultOutfit->pieces[i];
+		lldata::OutfitPiece piece = npcDefaultOutfit_->pieces[i];
 		piece.useAnyPath.clear();
-		wxLogMessage("LoadNpcWig: NPC '%s' keeps '%s' of its default outfit", npc->editorId, piece.name);
+		wxLogMessage("LoadNpcWig: NPC '%s' keeps '%s' of its default outfit", lldata::NpcKeyText(currentHeadNpc), piece.name);
 		npcWigSlots_.insert(piece.bodySlots.begin(), piece.bodySlots.end());
 		LoadOutfitPieceShapes(piece, npcWigShapeNames_, "_wig_", loadedCount, [this]() { return !npcWigCovered_; });
 	}
@@ -2801,6 +3099,8 @@ void LeveledListPreviewer::LoadNpcWig() {
 			npcWigDisplayShapes_.push_back(name);
 	}
 
+	ApplyNpcWigChoiceToVariants();
+	RefreshWigChoice();
 	ApplyRaceBodyPartVisibility();
 }
 
@@ -3031,6 +3331,7 @@ void LeveledListPreviewer::SwitchUseAnyVariant(size_t groupIdx, int newVariantId
 
 	// Use exactly the same algorithm as initial load for re-calculating slots and visibility
 	UpdateActiveSlotsAndVisibility();
+	SyncNpcWigChoiceFromVariants();
 
 	gls.RenderOneFrame();
 	RefreshMeshOverlay();
@@ -3111,6 +3412,7 @@ void LeveledListPreviewer::ActivateVariantChain(int groupId, int variantIdx, boo
 
 	ApplyUseAnyVisibility();
 	UpdateActiveSlotsAndVisibility();
+	SyncNpcWigChoiceFromVariants();
 	gls.RenderOneFrame();
 	RefreshMeshOverlay();
 }

@@ -325,6 +325,11 @@ public:
 	/// True if the HDPT record with this editor id (case-insensitive) has the type Hair.
 	bool IsHairHeadPart(const std::string& editorId) const;
 
+	/// "0x<id>~<plugin>" for a record, in the form of NpcKeyText(): the plugin
+	/// that defines it (lower case) and its id without the file index. Empty
+	/// if the plugin isn't known.
+	std::string RecordKeyText(FormId formId) const;
+
 	/// Info about an NPC's skin override found by scanning all plugins.
 	/// All active plugins are loaded eagerly via LoadAllActivePlugins during
 	/// LoadESP, so both remappedWnam and remappedRace are always resolvable

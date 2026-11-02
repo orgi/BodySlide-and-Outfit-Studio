@@ -250,6 +250,31 @@ class LeveledListPreviewer : public wxFrame {
 	std::vector<std::string> npcWigDisplayShapes_; // its meshes without the hidden helper shapes
 	std::set<int> npcWigSlots_;					   // biped slots of its ARMO
 	bool npcWigCovered_ = false;				   // a shown outfit shape uses one of these slots
+	// The wigs the selected NPC's default outfit offers (UpdateNpcWigOptions):
+	// the wigs of one Use Any gate, or one wig outside of gates.
+	struct WigOption {
+		lldata::FormId formId = 0; // the wig's ARMO
+		std::string label;
+		std::vector<std::pair<int, int>> path; // its Use Any path in the default outfit
+	};
+	std::vector<WigOption> npcWigOptions_;
+	int npcWigChoice_ = -1;							  // index into npcWigOptions_, -1: no wig
+	const lldata::OutfitEntry* npcDefaultOutfit_ = nullptr; // the outfit the options come from
+	lldata::NpcKey npcWigOptionsNpc_;				  // the NPC the options were made for
+	bool npcWigOptionsDirty_ = true;				  // plugin data changed since
+	std::unordered_map<std::string, bool> wigModelCache_; // NIF path → IsWigModel
+	// The entries of the wig choice (RefreshWigChoice): the wigs of the Use
+	// Any gate of the outfit on display that shows a wig, else npcWigOptions_.
+	struct WigEntry {
+		lldata::FormId formId = 0;
+		std::string label;
+		int groupId = -1; // the outfit's gate, -1 for an entry of npcWigOptions_
+		int variantIdx = -1;
+	};
+	std::vector<WigEntry> wigChoiceEntries_;
+	lldata::FormId shownWig_ = 0; // the wig a variant of the outfit on display shows, 0: none
+	bool applyingNpcWig_ = false; // variants change for the remembered wig, not by the user
+	wxChoice* wigChoice_ = nullptr;
 
 	// Body slots declared by the current outfit's ARMO records (e.g. 32=body, 33=hands, 37=feet).
 	// Used post-load to delete default body shapes whose slots are fully claimed by the outfit.
@@ -353,11 +378,37 @@ private:
 	void LoadBodyMeshes();
 	void LoadHeadMesh(const lldata::NPCEntry& npc);
 	void ClearHeadMeshes();
-	// Loads the wig of the selected NPC's default outfit for the outfit on
-	// display, replacing the wig loaded before. Nothing is loaded while the
-	// default outfit itself is on display: it shows its own wig.
+	// Loads the chosen wig of the selected NPC's default outfit for the
+	// outfit on display, replacing the wig loaded before. Nothing is loaded
+	// while the default outfit itself is on display: it shows its own wig,
+	// the chosen one if it comes from a Use Any gate.
 	void LoadNpcWig();
 	void ClearNpcWig();
+	// Finds the wigs the selected NPC's default outfit offers and the one the
+	// NPC wears with other outfits (CarriedWigIndex). Does nothing while the
+	// NPC and the plugin data stay the same.
+	void UpdateNpcWigOptions();
+	// The wig remembered for the selected NPC (RecordKeyText), empty if none.
+	std::string RememberedNpcWig() const;
+	// Index into npcWigOptions_ of the wig worn with other outfits: the
+	// remembered one, else the one on the first variant of its gate; -1: none.
+	int CarriedWigIndex() const;
+	// IsWigModel for a piece, read from its NIF (cached by path).
+	bool IsWigPiece(const lldata::OutfitPiece& piece);
+	// The first reachable Use Any gate of the outfit on display (not the NPC's
+	// default outfit) whose active variant is a wig, -1 if there is none, and
+	// the wigs among its variants for the NPC's race.
+	int FindOutfitWigGate();
+	std::vector<WigEntry> OutfitGateWigs(int groupId);
+	// Activates the variant of the NPC's wig: in the NPC's default outfit the
+	// carried wig's; in another outfit's wig gate the remembered wig's (else
+	// the carried wig's), if the gate offers it, otherwise its first variant.
+	void ApplyNpcWigChoiceToVariants();
+	// Remembers a wig the user activated in a wig gate's variant tree and
+	// refreshes the wig choice.
+	void SyncNpcWigChoiceFromVariants();
+	void RefreshWigChoice();
+	void OnWigChosen(wxCommandEvent& event);
 	// Indices into outfit.pieces of the pieces the selected NPC's race shows
 	// (the ARMA tier that fits the race, per ARMO).
 	std::set<size_t> SelectPiecesForNpcRace(const lldata::OutfitEntry& outfit);
